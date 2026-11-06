@@ -1,0 +1,16 @@
+All checks passed!
+.......                                                                  [100%]
+7 passed in 3.38s
+FIXTURE /tmp/birbcrew-proof-wuka8gz9
+VERIFIED duplicate_submission
+VERIFIED worker_interruption
+VERIFIED shared_context
+VERIFIED gateway_restart
+VERIFIED isolation
+VERIFIED human_wait
+VERIFIED conflicting_response
+VERIFIED reconnect
+VERIFIED normal_interaction
+VERIFIED explicit_cancellation
+VERIFIED telemetry
+EVIDENCE /tmp/birbcrew-proof-wuka8gz9

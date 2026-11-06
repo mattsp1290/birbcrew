@@ -1,0 +1,17 @@
+{
+  "provider": "opencode-go",
+  "account_path": "owner-provided Go key in ~/.profile",
+  "extra_usage_disabled": true,
+  "eligible_coding_use": true,
+  "checked_at": "2026-11-06T04:17:21.264905Z",
+  "evidence": "Owner confirmed Claude Max and OpenCode Go ready in response to disabled Extra Usage gate.",
+  "endpoint": "https://opencode.ai/inference/go/openai/v1",
+  "model": "glm-5.3-flash",
+  "credential_present": true,
+  "credential_source": "~/.profile",
+  "usage_visibility": "Owner attestation of console settings. No billing API verified.",
+  "models_http_status": 401,
+  "models_check": "No eligibility inferred from this response. No response body retained.",
+  "error_code": "api_key_expired",
+  "status": "NOT VERIFIED"
+}

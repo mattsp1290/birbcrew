@@ -1,0 +1,12 @@
+{
+  "checked_at": "2026-11-06T12:48:27.511631+00:00",
+  "status": "VERIFIED",
+  "staged_files_scanned": 71,
+  "known_secret_scan": "Current Go key and client tokens/database passwords from the three continuation-owned disposable proof runs; values never retained",
+  "pattern_scan": "Common API keys, GitHub tokens, private keys, long bearer tokens and Slack hook URLs",
+  "matching_files": [],
+  "excluded_private_artifacts": "Private owner attestation, profile, fixture configuration, credential files, raw workflow histories and bootstrap review prompts remain outside Git",
+  "limitations": "Pattern scanning is not a proof that every possible private datum is absent. Claude separately inspected public evidence and documented remaining limitations.",
+  "source_hashes_checked": 24,
+  "evidence_hashes_checked": 13
+}

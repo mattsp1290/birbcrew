@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+unset PYTHONPATH
+export DD_INJECTION_ENABLED=false
+export DD_TRACE_ENABLED=false
+export DD_INSTRUMENTATION_TELEMETRY_ENABLED=false
+cd "$(dirname "$0")/.."
+uv run --locked ruff check src tests
+uv run --locked python -I -m pytest -q
+exec uv run --locked python -I -m birbcrew.proof "$@"
