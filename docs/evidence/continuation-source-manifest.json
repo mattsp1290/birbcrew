@@ -1,0 +1,52 @@
+{
+  "checked_at": "2026-11-06T12:47:58.732670+00:00",
+  "base_revision": "7c27e2c72a499b5db1179ed91570647797159a63",
+  "branch": "review/first-milestone-subscription-proof",
+  "clean_source_copy": "/tmp/birbcrew-continuation-clean-drgjq12x/repo",
+  "source_hashes": {
+    ".python-version": "40411dc2c2726b4c7024d38318dd8df45c528b49491efb45939dd4a829847d94",
+    "clients/observe.mjs": "05dc9ec7fbca67b2af8261ce2049e4a8729fcac180265955e50aa39ad1a23d4c",
+    "clients/package-lock.json": "dc4a5c274e407b0112daea68e56d66809d1073fe1725df8d485c912eb3f02caa",
+    "clients/package.json": "8db7924713dfb82ae5fd43a21d57a0e629c961c8df4f90ce2c6fc8f04ecf7635",
+    "clients/resolve.mjs": "db242184063c1cd771c2e7693d842a2f9fc41e6d7fde7a7704ca2ab44c9c99e2",
+    "pyproject.toml": "82807034773e9078024a835393c0b406f9520f42e1bc51e131293ba0b90b388e",
+    "scripts/setup": "8bafd6b82f0548574f3ce30153f0123278a022a7244530f2879d33e2e7ef2f70",
+    "scripts/verify": "3a30bb0a7760ff91370b8262e4e8427deb7e5f33ce6e4c7864b52c37eb3d0799",
+    "src/birbcrew/__init__.py": "e55832f37a2e45c4448e74f3b8457b9f3e3a3ee868840a7b2c32e2c64675ba1e",
+    "src/birbcrew/api.py": "27db1d0b130ba5d781f8184ae6e377ac105e5845de6dc35c4239edba6ac3a4df",
+    "src/birbcrew/beans.py": "499a0e46cb63991aaa5c427a120bd8d41ae1ec858ab5007342db691a9aab738b",
+    "src/birbcrew/config.py": "db3fa21ff13afe0aa4601bfd448aa9352bb8fc27b8b9d5b5c9ff54405e7e28d2",
+    "src/birbcrew/domain.py": "31a744206b29b77d144156cc33965246f68c0630278636c450176cb1f5551a76",
+    "src/birbcrew/proof.py": "abcdc67d6410294bf03041ff156b4dfcaf8884dafd6a1eeb3046406f1d4edf23",
+    "src/birbcrew/provider.py": "09905f8fc82ad66ec9f61b66d25210a6c65d457aab7e96567ef3f38b0dd8e8d1",
+    "src/birbcrew/replay.py": "af0052404edb3ce49d7eed5e35327a80cd9408d0f06c6da2376f702144c61bdd",
+    "src/birbcrew/runtime.py": "ddccc00a6d2989910c26eaab53e4f0ca6de172317048597eaa08ab95940df9bc",
+    "src/birbcrew/store.py": "ec8937de2670d81ccf4d9a3d0ca85e3ce0b51fbf46ef6347dd43f98ee0ffc8fe",
+    "src/birbcrew/telemetry.py": "db6606c70163ed255cd4522e8dd305049173c684165f840315c6ed840037d00f",
+    "src/birbcrew/test_model.py": "a2acff89c58387c301b47aaad45526a1a235903c785ffcf517db82928fb90739",
+    "src/birbcrew/worker.py": "3bf02182edb97c425dbb0bc111d9159555cc8c03cf359977e4d7b235ea7f04e5",
+    "src/birbcrew/workflow.py": "ae587dd0a8bf76f23189a0a973f3335cc85dfe63529436ad9e75a240d894eb11",
+    "tests/test_boundaries.py": "19996e9c1ec44d2d4c20be45aaced389c74f041affe520f75f4035c72d88dfa0",
+    "uv.lock": "804aa6f38ede84a795a1e530e6bfeaa08598be2c2841470d4a550937e244e534"
+  },
+  "evidence_hashes": {
+    "docs/evidence/final-acceptance.json": "356b1fff992952ea8fd01a043c6e5ffafc069595ad6a483357eaf563714caed8",
+    "docs/evidence/clean-start.json": "e6ac1be75a8d1ab69264a93506b9b7baca121d484dcc453d0dd2a79eccedcba6",
+    "docs/evidence/clean-setup.log": "a0add4cfe40968ec97c237e0899460d566cfcea2637e06a044ab112ff6250e0c",
+    "docs/evidence/clean-verify.log": "cb0b5888bc14650082516768b245a8c1922be21e7e5d2ca64fa4c791f225b73e",
+    "docs/evidence/client-a.jsonl": "f1ea64290428eedb75874a7f3c5775e78c8e25898d9a77c1ac8b0ca87d38e870",
+    "docs/evidence/client-b.jsonl": "ce7a87a249e7fef9bef9ac5a25f574a714554331b4e70bc23c2792a24d2665df",
+    "docs/evidence/client-b-midrun.jsonl": "a9181947f6fef638aa616a8bab8ee7c46b12ad2f38c61f44babe655eec6f70bd",
+    "docs/evidence/cancel-client.jsonl": "3b6bda1dff7acd2f25f60f6f29c5dfc06d4120515f7524f41e6b9b454493eec1",
+    "docs/evidence/live-acceptance.json": "89a27e88a0fdfa4aead13feed136d6224b3cf3247299e24db7a39ba0c6410bd2",
+    "docs/evidence/live-verify.log": "fc93dd413ed983827cfa6779fe3e957fe6820f3da00691d8e7f614d3e64431b5",
+    "docs/evidence/live-client-a.jsonl": "b9715d84ad276677329f2cb9ef22543c93401d27dc501c8c8910860c965b2d08",
+    "docs/evidence/live-client-b.jsonl": "e28b83cf703dca31aae3b1fd2ad9e52a3f109478c39257c2dfa68014cfb9e875",
+    "docs/evidence/continuation-final-review.json": "13147acdcff9beefc00a0055ffadf785f2edb729398fe73c4ba20cd27c4a3c46",
+    "docs/evidence/packaging-check.json": "54bbaf17dd12869d8f3ec8148850c44a69b8073bd92f8d381c94c94617c58496"
+  },
+  "source_changes_in_continuation": [
+    "src/birbcrew/proof.py"
+  ],
+  "revision_binding": "Source and evidence are committed together with this manifest. Verify the listed blobs at the delivered Git revision. Hashes were recomputed after both clean-copy runs, not instrumented inside the verifier."
+}

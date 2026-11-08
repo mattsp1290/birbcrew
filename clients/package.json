@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "dependencies": {"@ag-ui/client": "1.0.4", "@ag-ui/core": "1.0.4"}
+}

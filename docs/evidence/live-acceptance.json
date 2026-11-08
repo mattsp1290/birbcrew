@@ -1,0 +1,868 @@
+{
+  "started_at": "2026-11-06T12:42:58.067458+00:00",
+  "mode": "live",
+  "gates": {
+    "normal_interaction": {
+      "status": "VERIFIED",
+      "evidence": {
+        "sdk": "@ag-ui/client 1.0.4",
+        "text_tool_and_finalized_messages": true
+      }
+    },
+    "duplicate_submission": {
+      "status": "VERIFIED",
+      "evidence": {
+        "input_count": 1,
+        "operation_count": 1,
+        "conflicting_payload_http": 409
+      }
+    },
+    "reconnect": {
+      "status": "VERIFIED",
+      "evidence": {
+        "same_conversation": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "accepted_inputs": 1,
+        "unique_finalized_message_ids": 7
+      }
+    },
+    "gateway_restart": {
+      "status": "VERIFIED",
+      "evidence": {
+        "messages": 5,
+        "same_finalized_history": true
+      }
+    },
+    "worker_interruption": {
+      "status": "NOT VERIFIED",
+      "evidence": "Not exercised in this run"
+    },
+    "human_wait": {
+      "status": "VERIFIED",
+      "evidence": {
+        "request": {
+          "id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d/b862ee23-f6d5-42b1-939d-d7037654dd9f/next-step",
+          "version": 1,
+          "resolution": null,
+          "tool_call_id": "chatcmpl-tool-95447e6fd211c0f5",
+          "expected_responder": "owner"
+        },
+        "resolution": {
+          "id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d/b862ee23-f6d5-42b1-939d-d7037654dd9f/next-step",
+          "version": 1,
+          "resolution": "test",
+          "tool_call_id": "chatcmpl-tool-95447e6fd211c0f5",
+          "expected_responder": "owner"
+        },
+        "survived_worker_and_gateway_restart": true
+      }
+    },
+    "conflicting_response": {
+      "status": "VERIFIED",
+      "evidence": {
+        "wrong_version_http": 409,
+        "conflict_http": 409,
+        "identical_retry_accepted": true
+      }
+    },
+    "explicit_cancellation": {
+      "status": "NOT VERIFIED",
+      "evidence": "Not exercised in this run"
+    },
+    "isolation": {
+      "status": "VERIFIED",
+      "evidence": {
+        "other_principal_read_submit_resume_stream_cancel": 404,
+        "invalid_credential": 401
+      }
+    },
+    "shared_context": {
+      "status": "VERIFIED",
+      "evidence": {
+        "context": {
+          "actor": "birbcrew-proof",
+          "notes": [
+            {
+              "key": "milestone",
+              "body": "Use only synthetic work items. Preserve conversation identity across reconnect.",
+              "path": "projects/birbcrew/memories/milestone.md",
+              "updated": {
+                "seconds": 1793968978,
+                "nanoseconds": 0,
+                "offset_seconds": 0
+              },
+              "file_sha256": "7906f84eca0dd6bc6d36a8ac39cb1c85619c43d95ed0832175dc707119ca5e1e",
+              "content_sha256": "1a515fa5dadf1817f240b21a1e368b2c3d0ef240100ab687582ffc43f4edafd0"
+            },
+            {
+              "key": "verification",
+              "body": "Recover the committed operation before asking the human to inspect or test.",
+              "path": "projects/birbcrew/memories/verification.md",
+              "updated": {
+                "seconds": 1793968978,
+                "nanoseconds": 0,
+                "offset_seconds": 0
+              },
+              "file_sha256": "5293ca3d2ca3fccaf541dba2fe8c1ab14f67e29fafa71d1c20afc1df369ce172",
+              "content_sha256": "0952e23cdbe08ff9b571cd9597a4a0bd9877955d372f3ddff8e45453a3f55657"
+            }
+          ],
+          "commit": "9dc34c92997553e0c455f254624635914e74c84e",
+          "project": "birbcrew"
+        },
+        "unrelated_note_absent": true
+      }
+    },
+    "telemetry": {
+      "status": "VERIFIED",
+      "evidence": {
+        "exported_spans": 19,
+        "secret_scan_files": [
+          "offline-replay-telemetry/telemetry-1955884.jsonl",
+          "telemetry-1955031.jsonl",
+          "telemetry-1955395.jsonl"
+        ],
+        "correlated_spans": 7,
+        "names": [
+          "conversation.persist",
+          "tool.effect"
+        ],
+        "datadog": "NOT VERIFIED; outside scope"
+      }
+    },
+    "real_subscription": {
+      "status": "VERIFIED",
+      "evidence": {
+        "preflight": {
+          "provider": "opencode-go",
+          "account_path": "owner Go subscription through local Console key",
+          "extra_usage_disabled": true,
+          "eligible_coding_use": true,
+          "checked_at": "2026-11-06T12:37:39.293532Z",
+          "evidence": "Current explicit owner confirmation plus official Go coding-agent requirements; private attestation retained outside Git.",
+          "endpoint": "https://opencode.ai/inference/go/openai/v1",
+          "model": "glm-5.3-flash",
+          "credential_present": true,
+          "credential_source": "~/.profile",
+          "usage_visibility": "Owner attestation of console settings. No billing API verified.",
+          "models_http_status": 200,
+          "selected_model_listed": true
+        },
+        "provider_model": [
+          "glm-5.3-flash"
+        ],
+        "provider_url": [
+          "https://opencode.ai/inference/go/openai/v1"
+        ]
+      }
+    }
+  },
+  "process_terminations": [
+    {
+      "process": "client-a",
+      "pid": 1955171,
+      "signal": "SIGTERM",
+      "at": "2026-11-06T12:43:09.187580+00:00"
+    },
+    {
+      "process": "worker",
+      "pid": 1955031,
+      "signal": "SIGKILL",
+      "at": "2026-11-06T12:43:09.230362+00:00"
+    },
+    {
+      "process": "gateway",
+      "pid": 1955067,
+      "signal": "SIGKILL",
+      "at": "2026-11-06T12:43:09.245688+00:00"
+    },
+    {
+      "process": "client-a",
+      "pid": 1955474,
+      "signal": "SIGTERM",
+      "at": "2026-11-06T12:43:25.448162+00:00"
+    },
+    {
+      "process": "client-b",
+      "pid": 1955473,
+      "signal": "SIGTERM",
+      "at": "2026-11-06T12:43:25.463673+00:00"
+    },
+    {
+      "process": "gateway",
+      "pid": 1955431,
+      "signal": "SIGTERM",
+      "at": "2026-11-06T12:43:27.068608+00:00"
+    },
+    {
+      "process": "worker",
+      "pid": 1955395,
+      "signal": "SIGTERM",
+      "at": "2026-11-06T12:43:27.083952+00:00"
+    },
+    {
+      "process": "temporal",
+      "pid": 1954980,
+      "signal": "SIGTERM",
+      "at": "2026-11-06T12:43:28.751567+00:00"
+    }
+  ],
+  "conversations": [
+    {
+      "id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "workflow_id": "birbcrew-8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "workflow_run_id": "01a1b0e2-4dd9-78fb-b5d5-e46ba82abd5e",
+      "status": "COMPLETED",
+      "activity_retries": [],
+      "history_events": 362
+    }
+  ],
+  "fixture_root": "/tmp/birbcrew-proof-sld7r4xu",
+  "account": {
+    "provider": "opencode-go",
+    "account_path": "owner Go subscription through local Console key",
+    "extra_usage_disabled": true,
+    "eligible_coding_use": true,
+    "checked_at": "2026-11-06T12:37:39.293532Z",
+    "evidence": "Current explicit owner confirmation plus official Go coding-agent requirements; private attestation retained outside Git.",
+    "endpoint": "https://opencode.ai/inference/go/openai/v1",
+    "model": "glm-5.3-flash",
+    "credential_present": true,
+    "credential_source": "~/.profile",
+    "usage_visibility": "Owner attestation of console settings. No billing API verified.",
+    "models_http_status": 200,
+    "selected_model_listed": true
+  },
+  "beans": {
+    "project": "birbcrew",
+    "actor": "birbcrew-proof",
+    "commit": "9dc34c92997553e0c455f254624635914e74c84e",
+    "notes": [
+      {
+        "key": "milestone",
+        "path": "projects/birbcrew/memories/milestone.md",
+        "updated": {
+          "nanoseconds": 0,
+          "offset_seconds": 0,
+          "seconds": 1793968978
+        },
+        "file_sha256": "7906f84eca0dd6bc6d36a8ac39cb1c85619c43d95ed0832175dc707119ca5e1e",
+        "content_sha256": "1a515fa5dadf1817f240b21a1e368b2c3d0ef240100ab687582ffc43f4edafd0",
+        "body": "Use only synthetic work items. Preserve conversation identity across reconnect."
+      },
+      {
+        "key": "verification",
+        "path": "projects/birbcrew/memories/verification.md",
+        "updated": {
+          "nanoseconds": 0,
+          "offset_seconds": 0,
+          "seconds": 1793968978
+        },
+        "file_sha256": "5293ca3d2ca3fccaf541dba2fe8c1ab14f67e29fafa71d1c20afc1df369ce172",
+        "content_sha256": "0952e23cdbe08ff9b571cd9597a4a0bd9877955d372f3ddff8e45453a3f55657",
+        "body": "Recover the committed operation before asking the human to inspect or test."
+      }
+    ]
+  },
+  "versions": {
+    "python": "3.13.12",
+    "pydantic-ai-slim": "2.66.0",
+    "pydantic": "2.14.3",
+    "ag-ui-protocol": "1.0.0",
+    "temporalio": "1.35.0",
+    "psycopg": "3.3.8",
+    "fastapi": "0.162.0",
+    "uvicorn": "0.54.0",
+    "opentelemetry-sdk": "1.45.2",
+    "httpx-sse": "0.4.3",
+    "temporal": "temporal version 1.10.0 (Server 1.32.2, UI 2.56.1)",
+    "postgres": "postgres (PostgreSQL) 17.6",
+    "bn": "bn v0.3.0"
+  },
+  "operations": [
+    {
+      "operation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d/b862ee23-f6d5-42b1-939d-d7037654dd9f",
+      "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "payload": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.",
+      "result": {
+        "kind": "synthetic-work-item",
+        "text": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.",
+        "operation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d/b862ee23-f6d5-42b1-939d-d7037654dd9f"
+      },
+      "deliveries": 1
+    }
+  ],
+  "client_b_resolution": {
+    "client": "B",
+    "resolution": {
+      "id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d/b862ee23-f6d5-42b1-939d-d7037654dd9f/next-step",
+      "version": 1,
+      "expected_responder": "owner",
+      "tool_call_id": "chatcmpl-tool-95447e6fd211c0f5",
+      "resolution": "test"
+    }
+  },
+  "framework_history_preserved_after_replay": true,
+  "agui_event_types": [
+    "MESSAGES_SNAPSHOT",
+    "REASONING_ENCRYPTED_VALUE",
+    "REASONING_END",
+    "REASONING_MESSAGE_CONTENT",
+    "REASONING_MESSAGE_END",
+    "REASONING_MESSAGE_START",
+    "REASONING_START",
+    "RUN_STARTED",
+    "STATE_SNAPSHOT",
+    "STEP_FINISHED",
+    "STEP_STARTED",
+    "TEXT_MESSAGE_CONTENT",
+    "TEXT_MESSAGE_END",
+    "TEXT_MESSAGE_START",
+    "TOOL_CALL_ARGS",
+    "TOOL_CALL_END",
+    "TOOL_CALL_RESULT",
+    "TOOL_CALL_START"
+  ],
+  "final_snapshot": {
+    "id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+    "human": null,
+    "owner": "owner",
+    "phase": "idle",
+    "inputs": [
+      {
+        "text": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.",
+        "digest": "4913ea6a87359bd7ee60a3af5ada92e8a2fc6ff2f916e0722d6a78366c5ca177",
+        "ordinal": 0,
+        "outcome": "completed",
+        "request_id": "b862ee23-f6d5-42b1-939d-d7037654dd9f"
+      }
+    ],
+    "context": {
+      "actor": "birbcrew-proof",
+      "notes": [
+        {
+          "key": "milestone",
+          "body": "Use only synthetic work items. Preserve conversation identity across reconnect.",
+          "path": "projects/birbcrew/memories/milestone.md",
+          "updated": {
+            "seconds": 1793968978,
+            "nanoseconds": 0,
+            "offset_seconds": 0
+          },
+          "file_sha256": "7906f84eca0dd6bc6d36a8ac39cb1c85619c43d95ed0832175dc707119ca5e1e",
+          "content_sha256": "1a515fa5dadf1817f240b21a1e368b2c3d0ef240100ab687582ffc43f4edafd0"
+        },
+        {
+          "key": "verification",
+          "body": "Recover the committed operation before asking the human to inspect or test.",
+          "path": "projects/birbcrew/memories/verification.md",
+          "updated": {
+            "seconds": 1793968978,
+            "nanoseconds": 0,
+            "offset_seconds": 0
+          },
+          "file_sha256": "5293ca3d2ca3fccaf541dba2fe8c1ab14f67e29fafa71d1c20afc1df369ce172",
+          "content_sha256": "0952e23cdbe08ff9b571cd9597a4a0bd9877955d372f3ddff8e45453a3f55657"
+        }
+      ],
+      "commit": "9dc34c92997553e0c455f254624635914e74c84e",
+      "project": "birbcrew"
+    },
+    "failure": null,
+    "attempts": [
+      {
+        "id": "888d1804-ccb2-5583-bde6-48efb7001cb8",
+        "outcome": "waiting",
+        "request_id": "b862ee23-f6d5-42b1-939d-d7037654dd9f",
+        "workflow_id": "birbcrew-8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "workflow_run_id": "01a1b0e2-4dd9-78fb-b5d5-e46ba82abd5e"
+      },
+      {
+        "id": "d0cdb9e5-ab0b-5d26-a6ef-c2f9c4760f52",
+        "outcome": "completed",
+        "request_id": "b862ee23-f6d5-42b1-939d-d7037654dd9f",
+        "workflow_id": "birbcrew-8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "workflow_run_id": "01a1b0e2-4dd9-78fb-b5d5-e46ba82abd5e"
+      }
+    ],
+    "coworker": {
+      "id": "birbcrew-proof",
+      "tools": [
+        "record_work_item",
+        "choose_next_step"
+      ],
+      "version": 1,
+      "instructions": "You are a coding coworker testing a disposable repository. Read the supplied project notes. Record one synthetic coding work item with record_work_item, then request a human next step with choose_next_step. After the human reply, summarize the recorded item and the choice. Do not repeat the completed operation. No real actions.",
+      "eligible_models": [
+        "test",
+        "glm-5.3-flash"
+      ]
+    },
+    "messages": [
+      {
+        "id": "1d6b31b0-4902-5c9f-88ea-3b86c5f2a304",
+        "role": "user",
+        "content": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions."
+      },
+      {
+        "id": "15ff77db-5928-5978-aea6-df7eb0037249",
+        "role": "reasoning",
+        "content": "Two tool calls: record_work_item first, then choose_next_step? The instructions say record, then request next step. The record and choose_next_step \u2014 choose depends on recorded item? They're independent calls in parameters, but sequencing: record first, then ask. But the instruction says make independent calls together. The reasoning steps: \"Recover the committed operation before asking the human to inspect or test\" \u2014 implies record first. I could do record first, wait, then choose_next_step. Safer: call record alone, then choose_next_step after result. Actually they're logically dependent (must record before asking). Do them sequentially.",
+        "encryptedValue": "{\"id\": \"reasoning_content\", \"provider_name\": \"openai\", \"canonical_system\": \"openai\"}"
+      },
+      {
+        "id": "2605df63-6f88-578a-a6b4-2a6db0f9d6fd",
+        "role": "assistant",
+        "content": "I'll record the synthetic work item first, then request your next step.",
+        "toolCalls": [
+          {
+            "id": "chatcmpl-tool-b14095ff9dfd8299",
+            "type": "function",
+            "function": {
+              "name": "record_work_item",
+              "arguments": "{\"operation_id\":\"8233fb27-6f0f-4d28-9269-86ffdbcf723d/b862ee23-f6d5-42b1-939d-d7037654dd9f\"}"
+            }
+          }
+        ]
+      },
+      {
+        "id": "6e72859f-8fc4-5925-b7d8-5b2ad6f8c550",
+        "role": "tool",
+        "content": "{\"kind\":\"synthetic-work-item\",\"text\":\"Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.\",\"operation_id\":\"8233fb27-6f0f-4d28-9269-86ffdbcf723d/b862ee23-f6d5-42b1-939d-d7037654dd9f\"}",
+        "toolCallId": "chatcmpl-tool-b14095ff9dfd8299"
+      },
+      {
+        "id": "cd2df49f-90bc-5edb-9c8b-345d60b85ad2",
+        "role": "assistant",
+        "content": "The work item is recorded. Now let me ask you for the next step.",
+        "toolCalls": [
+          {
+            "id": "chatcmpl-tool-95447e6fd211c0f5",
+            "type": "function",
+            "function": {
+              "name": "choose_next_step",
+              "arguments": "{}"
+            }
+          }
+        ]
+      },
+      {
+        "id": "c847617f-c696-519f-bcd6-f280272987ab",
+        "role": "tool",
+        "content": "test",
+        "toolCallId": "chatcmpl-tool-95447e6fd211c0f5"
+      },
+      {
+        "id": "38327079-126b-5de8-a96f-f3f66860675e",
+        "role": "assistant",
+        "content": "Here's the summary:\n\n**Recorded work item:**\n- **Type:** Synthetic work item\n- **Content:** Add a regression test covering conversation reconnection in the disposable coding fixture, preserving conversation identity across reconnect per the project milestone notes.\n- **Operation ID:** `8233fb27-6f0f-4d28-9269-86ffdbcf723d/b862ee23-f6d5-42b1-939d-d7037654dd9f`\n\n**Your chosen next step:**\n- **Test** \u2014 you opted to verify the recorded item through testing rather than inspection.\n\nNo real repository actions were taken; the recorded item is purely synthetic, and the committed operation was recovered before asking you to proceed."
+      }
+    ],
+    "revision": 5,
+    "decisions": [
+      {
+        "id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d/b862ee23-f6d5-42b1-939d-d7037654dd9f/next-step",
+        "version": 1,
+        "resolution": "test",
+        "tool_call_id": "chatcmpl-tool-95447e6fd211c0f5",
+        "expected_responder": "owner"
+      }
+    ],
+    "native_messages": [
+      {
+        "kind": "request",
+        "parts": [
+          {
+            "content": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.",
+            "part_kind": "user-prompt",
+            "timestamp": "2026-11-06T12:43:03.966452Z"
+          }
+        ],
+        "state": "complete",
+        "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8",
+        "metadata": null,
+        "timestamp": "2026-11-06T12:43:03.966598Z",
+        "instructions": "You are a coding coworker testing a disposable repository. Read the supplied project notes. Record one synthetic coding work item with record_work_item, then request a human next step with choose_next_step. After the human reply, summarize the recorded item and the choice. Do not repeat the completed operation. No real actions.\n\nSelected repository notes.\n{\"project\":\"birbcrew\",\"actor\":\"birbcrew-proof\",\"commit\":\"9dc34c92997553e0c455f254624635914e74c84e\",\"notes\":[{\"key\":\"milestone\",\"path\":\"projects/birbcrew/memories/milestone.md\",\"updated\":{\"seconds\":1793968978,\"nanoseconds\":0,\"offset_seconds\":0},\"file_sha256\":\"7906f84eca0dd6bc6d36a8ac39cb1c85619c43d95ed0832175dc707119ca5e1e\",\"content_sha256\":\"1a515fa5dadf1817f240b21a1e368b2c3d0ef240100ab687582ffc43f4edafd0\",\"body\":\"Use only synthetic work items. Preserve conversation identity across reconnect.\"},{\"key\":\"verification\",\"path\":\"projects/birbcrew/memories/verification.md\",\"updated\":{\"seconds\":1793968978,\"nanoseconds\":0,\"offset_seconds\":0},\"file_sha256\":\"5293ca3d2ca3fccaf541dba2fe8c1ab14f67e29fafa71d1c20afc1df369ce172\",\"content_sha256\":\"0952e23cdbe08ff9b571cd9597a4a0bd9877955d372f3ddff8e45453a3f55657\",\"body\":\"Recover the committed operation before asking the human to inspect or test.\"}]}",
+        "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d"
+      },
+      {
+        "kind": "response",
+        "parts": [
+          {
+            "id": "reasoning_content",
+            "content": "Two tool calls: record_work_item first, then choose_next_step? The instructions say record, then request next step. The record and choose_next_step \u2014 choose depends on recorded item? They're independent calls in parameters, but sequencing: record first, then ask. But the instruction says make independent calls together. The reasoning steps: \"Recover the committed operation before asking the human to inspect or test\" \u2014 implies record first. I could do record first, wait, then choose_next_step. Safer: call record alone, then choose_next_step after result. Actually they're logically dependent (must record before asking). Do them sequentially.",
+            "part_kind": "thinking",
+            "signature": null,
+            "provider_name": "openai",
+            "provider_details": null
+          },
+          {
+            "id": null,
+            "content": "I'll record the synthetic work item first, then request your next step.",
+            "citations": null,
+            "part_kind": "text",
+            "provider_name": null,
+            "provider_details": null
+          },
+          {
+            "id": null,
+            "args": "{\"operation_id\": \"8233fb27-6f0f-4d28-9269-86ffdbcf723d/b862ee23-f6d5-42b1-939d-d7037654dd9f\"}",
+            "part_kind": "tool-call",
+            "tool_kind": null,
+            "tool_name": "record_work_item",
+            "tool_call_id": "chatcmpl-tool-b14095ff9dfd8299",
+            "provider_name": null,
+            "provider_details": null
+          }
+        ],
+        "state": "complete",
+        "usage": {
+          "cost": null,
+          "details": {
+            "cost": 0,
+            "reasoning_tokens": 128
+          },
+          "input_tokens": 733,
+          "audio_seconds": 0.0,
+          "output_tokens": 208,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_audio_tokens": 0,
+          "output_audio_tokens": 0,
+          "cache_write_1h_tokens": 0,
+          "cache_audio_read_tokens": 0,
+          "output_reasoning_tokens": 128
+        },
+        "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8",
+        "metadata": null,
+        "model_id": "openai:glm-5.3-flash",
+        "timestamp": "2026-11-06T12:43:04.837252Z",
+        "model_name": "glm-5.3-flash",
+        "provider_url": "https://opencode.ai/inference/go/openai/v1/",
+        "finish_reason": "tool_call",
+        "provider_name": "openai",
+        "workspace_ref": null,
+        "history_digest": null,
+        "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "failed_attempts": null,
+        "canonical_system": "openai",
+        "provider_details": {
+          "timestamp": "2026-11-06T12:43:04Z",
+          "finish_reason": "tool_calls"
+        },
+        "provider_response_id": "chatcmpl-d5bac907e13c80afbf8ac9bf35e4d8fb"
+      },
+      {
+        "kind": "request",
+        "parts": [
+          {
+            "retry": null,
+            "content": {
+              "kind": "synthetic-work-item",
+              "text": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.",
+              "operation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d/b862ee23-f6d5-42b1-939d-d7037654dd9f"
+            },
+            "outcome": "success",
+            "metadata": null,
+            "part_kind": "tool-return",
+            "timestamp": "2026-11-06T12:43:07.812867Z",
+            "tool_kind": null,
+            "tool_name": "record_work_item",
+            "tool_call_id": "chatcmpl-tool-b14095ff9dfd8299",
+            "content_file_digests": []
+          }
+        ],
+        "state": "complete",
+        "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8",
+        "metadata": null,
+        "timestamp": "2026-11-06T12:43:07.814752Z",
+        "instructions": "You are a coding coworker testing a disposable repository. Read the supplied project notes. Record one synthetic coding work item with record_work_item, then request a human next step with choose_next_step. After the human reply, summarize the recorded item and the choice. Do not repeat the completed operation. No real actions.\n\nSelected repository notes.\n{\"project\":\"birbcrew\",\"actor\":\"birbcrew-proof\",\"commit\":\"9dc34c92997553e0c455f254624635914e74c84e\",\"notes\":[{\"key\":\"milestone\",\"path\":\"projects/birbcrew/memories/milestone.md\",\"updated\":{\"seconds\":1793968978,\"nanoseconds\":0,\"offset_seconds\":0},\"file_sha256\":\"7906f84eca0dd6bc6d36a8ac39cb1c85619c43d95ed0832175dc707119ca5e1e\",\"content_sha256\":\"1a515fa5dadf1817f240b21a1e368b2c3d0ef240100ab687582ffc43f4edafd0\",\"body\":\"Use only synthetic work items. Preserve conversation identity across reconnect.\"},{\"key\":\"verification\",\"path\":\"projects/birbcrew/memories/verification.md\",\"updated\":{\"seconds\":1793968978,\"nanoseconds\":0,\"offset_seconds\":0},\"file_sha256\":\"5293ca3d2ca3fccaf541dba2fe8c1ab14f67e29fafa71d1c20afc1df369ce172\",\"content_sha256\":\"0952e23cdbe08ff9b571cd9597a4a0bd9877955d372f3ddff8e45453a3f55657\",\"body\":\"Recover the committed operation before asking the human to inspect or test.\"}]}",
+        "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d"
+      },
+      {
+        "kind": "response",
+        "parts": [
+          {
+            "id": null,
+            "content": "The work item is recorded. Now let me ask you for the next step.",
+            "citations": null,
+            "part_kind": "text",
+            "provider_name": null,
+            "provider_details": null
+          },
+          {
+            "id": null,
+            "args": "{}",
+            "part_kind": "tool-call",
+            "tool_kind": null,
+            "tool_name": "choose_next_step",
+            "tool_call_id": "chatcmpl-tool-95447e6fd211c0f5",
+            "provider_name": null,
+            "provider_details": null
+          }
+        ],
+        "state": "complete",
+        "usage": {
+          "cost": null,
+          "details": {
+            "cost": 0,
+            "reasoning_tokens": 0
+          },
+          "input_tokens": 1058,
+          "audio_seconds": 0.0,
+          "output_tokens": 23,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_audio_tokens": 0,
+          "output_audio_tokens": 0,
+          "cache_write_1h_tokens": 0,
+          "cache_audio_read_tokens": 0,
+          "output_reasoning_tokens": 0
+        },
+        "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8",
+        "metadata": null,
+        "model_id": "openai:glm-5.3-flash",
+        "timestamp": "2026-11-06T12:43:08.585649Z",
+        "model_name": "glm-5.3-flash",
+        "provider_url": "https://opencode.ai/inference/go/openai/v1/",
+        "finish_reason": "tool_call",
+        "provider_name": "openai",
+        "workspace_ref": null,
+        "history_digest": null,
+        "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "failed_attempts": null,
+        "canonical_system": "openai",
+        "provider_details": {
+          "timestamp": "2026-11-06T12:43:08Z",
+          "finish_reason": "tool_calls"
+        },
+        "provider_response_id": "chatcmpl-6761a035f79f7b0ce68af64ecae90172"
+      },
+      {
+        "kind": "request",
+        "parts": [
+          {
+            "retry": null,
+            "content": "test",
+            "outcome": "success",
+            "metadata": null,
+            "part_kind": "tool-return",
+            "timestamp": "2026-11-06T12:43:21.393805Z",
+            "tool_kind": null,
+            "tool_name": "choose_next_step",
+            "tool_call_id": "chatcmpl-tool-95447e6fd211c0f5"
+          }
+        ],
+        "state": "complete",
+        "run_id": "d0cdb9e5-ab0b-5d26-a6ef-c2f9c4760f52",
+        "metadata": null,
+        "timestamp": "2026-11-06T12:43:21.394072Z",
+        "instructions": "You are a coding coworker testing a disposable repository. Read the supplied project notes. Record one synthetic coding work item with record_work_item, then request a human next step with choose_next_step. After the human reply, summarize the recorded item and the choice. Do not repeat the completed operation. No real actions.\n\nSelected repository notes.\n{\"project\":\"birbcrew\",\"actor\":\"birbcrew-proof\",\"commit\":\"9dc34c92997553e0c455f254624635914e74c84e\",\"notes\":[{\"key\":\"milestone\",\"path\":\"projects/birbcrew/memories/milestone.md\",\"updated\":{\"seconds\":1793968978,\"nanoseconds\":0,\"offset_seconds\":0},\"file_sha256\":\"7906f84eca0dd6bc6d36a8ac39cb1c85619c43d95ed0832175dc707119ca5e1e\",\"content_sha256\":\"1a515fa5dadf1817f240b21a1e368b2c3d0ef240100ab687582ffc43f4edafd0\",\"body\":\"Use only synthetic work items. Preserve conversation identity across reconnect.\"},{\"key\":\"verification\",\"path\":\"projects/birbcrew/memories/verification.md\",\"updated\":{\"seconds\":1793968978,\"nanoseconds\":0,\"offset_seconds\":0},\"file_sha256\":\"5293ca3d2ca3fccaf541dba2fe8c1ab14f67e29fafa71d1c20afc1df369ce172\",\"content_sha256\":\"0952e23cdbe08ff9b571cd9597a4a0bd9877955d372f3ddff8e45453a3f55657\",\"body\":\"Recover the committed operation before asking the human to inspect or test.\"}]}",
+        "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d"
+      },
+      {
+        "kind": "response",
+        "parts": [
+          {
+            "id": null,
+            "content": "Here's the summary:\n\n**Recorded work item:**\n- **Type:** Synthetic work item\n- **Content:** Add a regression test covering conversation reconnection in the disposable coding fixture, preserving conversation identity across reconnect per the project milestone notes.\n- **Operation ID:** `8233fb27-6f0f-4d28-9269-86ffdbcf723d/b862ee23-f6d5-42b1-939d-d7037654dd9f`\n\n**Your chosen next step:**\n- **Test** \u2014 you opted to verify the recorded item through testing rather than inspection.\n\nNo real repository actions were taken; the recorded item is purely synthetic, and the committed operation was recovered before asking you to proceed.",
+            "citations": null,
+            "part_kind": "text",
+            "provider_name": null,
+            "provider_details": null
+          }
+        ],
+        "state": "complete",
+        "usage": {
+          "cost": null,
+          "details": {
+            "cost": 0,
+            "reasoning_tokens": 0
+          },
+          "input_tokens": 1086,
+          "audio_seconds": 0.0,
+          "output_tokens": 161,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_audio_tokens": 0,
+          "output_audio_tokens": 0,
+          "cache_write_1h_tokens": 0,
+          "cache_audio_read_tokens": 0,
+          "output_reasoning_tokens": 0
+        },
+        "run_id": "d0cdb9e5-ab0b-5d26-a6ef-c2f9c4760f52",
+        "metadata": null,
+        "model_id": "openai:glm-5.3-flash",
+        "timestamp": "2026-11-06T12:43:22.825865Z",
+        "model_name": "glm-5.3-flash",
+        "provider_url": "https://opencode.ai/inference/go/openai/v1/",
+        "finish_reason": "stop",
+        "provider_name": "openai",
+        "workspace_ref": null,
+        "history_digest": null,
+        "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "failed_attempts": null,
+        "canonical_system": "openai",
+        "provider_details": {
+          "timestamp": "2026-11-06T12:43:22Z",
+          "finish_reason": "stop"
+        },
+        "provider_response_id": "chatcmpl-8bbff89f2a706c64bfea61d0bb51c421"
+      }
+    ],
+    "cursor": 58
+  },
+  "replay": [
+    {
+      "workflow_id": "birbcrew-8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "replay": "VERIFIED"
+    }
+  ],
+  "framework_telemetry": [
+    {
+      "name": "chat glm-5.3-flash",
+      "trace_id": "d93967d4dae076d1de40665b3e8885be",
+      "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8"
+    },
+    {
+      "name": "execute_tool record_work_item",
+      "trace_id": "d93967d4dae076d1de40665b3e8885be",
+      "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8"
+    },
+    {
+      "name": "chat glm-5.3-flash",
+      "trace_id": "d93967d4dae076d1de40665b3e8885be",
+      "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8"
+    },
+    {
+      "name": "execute_tool choose_next_step",
+      "trace_id": "d93967d4dae076d1de40665b3e8885be",
+      "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8"
+    },
+    {
+      "name": "invoke_agent birbcrew-proof-v1",
+      "trace_id": "d93967d4dae076d1de40665b3e8885be",
+      "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8"
+    },
+    {
+      "name": "chat glm-5.3-flash",
+      "trace_id": "e452f54d97c3181e8c17c22682ebf69c",
+      "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8"
+    },
+    {
+      "name": "execute_tool record_work_item",
+      "trace_id": "e452f54d97c3181e8c17c22682ebf69c",
+      "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8"
+    },
+    {
+      "name": "chat glm-5.3-flash",
+      "trace_id": "e452f54d97c3181e8c17c22682ebf69c",
+      "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8"
+    },
+    {
+      "name": "execute_tool choose_next_step",
+      "trace_id": "e452f54d97c3181e8c17c22682ebf69c",
+      "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8"
+    },
+    {
+      "name": "invoke_agent birbcrew-proof-v1",
+      "trace_id": "e452f54d97c3181e8c17c22682ebf69c",
+      "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8"
+    },
+    {
+      "name": "chat glm-5.3-flash",
+      "trace_id": "a47ad634f49fab61be529f7b325a363a",
+      "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "run_id": "d0cdb9e5-ab0b-5d26-a6ef-c2f9c4760f52"
+    },
+    {
+      "name": "invoke_agent birbcrew-proof-v1",
+      "trace_id": "a47ad634f49fab61be529f7b325a363a",
+      "conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+      "run_id": "d0cdb9e5-ab0b-5d26-a6ef-c2f9c4760f52"
+    }
+  ],
+  "telemetry": [
+    {
+      "name": "conversation.persist",
+      "trace_id": "6563b88e7b7f3be418a6d156cab8bafa",
+      "span_id": "8cfeda8f5c55bad4",
+      "attributes": {
+        "birbcrew.conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "birbcrew.workflow_id": "birbcrew-8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "birbcrew.phase": "idle"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "371ebc1ee19f51458d08a1bd0eacc122",
+      "span_id": "9dfef5812b964999",
+      "attributes": {
+        "birbcrew.conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "birbcrew.workflow_id": "birbcrew-8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "birbcrew.phase": "running"
+      }
+    },
+    {
+      "name": "tool.effect",
+      "trace_id": "f87673601ead8753b125056f04d09f74",
+      "span_id": "fbeafce44acf56fe",
+      "attributes": {
+        "birbcrew.conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "birbcrew.request_id": "b862ee23-f6d5-42b1-939d-d7037654dd9f",
+        "birbcrew.run_id": "888d1804-ccb2-5583-bde6-48efb7001cb8",
+        "birbcrew.operation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d/b862ee23-f6d5-42b1-939d-d7037654dd9f",
+        "birbcrew.workflow_id": "birbcrew-8233fb27-6f0f-4d28-9269-86ffdbcf723d"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "7a4ce2b541c2743ee1fe1c1b1651af8a",
+      "span_id": "173c529a9b17efc0",
+      "attributes": {
+        "birbcrew.conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "birbcrew.workflow_id": "birbcrew-8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "birbcrew.phase": "waiting"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "95883a10938384f537fad70a4b46089c",
+      "span_id": "c1e287c7c01a22d6",
+      "attributes": {
+        "birbcrew.conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "birbcrew.workflow_id": "birbcrew-8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "birbcrew.phase": "running"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "4fc28a3a50b26d1230ee1e809b4bbd57",
+      "span_id": "f37e7729208be3b3",
+      "attributes": {
+        "birbcrew.conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "birbcrew.workflow_id": "birbcrew-8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "birbcrew.phase": "idle"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "11ea96f6e2c7e7a76a8d363b3dd676b6",
+      "span_id": "f3a3f264c1e27368",
+      "attributes": {
+        "birbcrew.conversation_id": "8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "birbcrew.workflow_id": "birbcrew-8233fb27-6f0f-4d28-9269-86ffdbcf723d",
+        "birbcrew.phase": "cancelled"
+      }
+    }
+  ]
+}

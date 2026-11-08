@@ -1,0 +1,1120 @@
+{
+  "started_at": "2026-11-06T04:45:07.674928+00:00",
+  "mode": "test",
+  "gates": {
+    "normal_interaction": {
+      "status": "VERIFIED",
+      "evidence": {
+        "sdk": "@ag-ui/client 1.0.4",
+        "text_tool_and_finalized_messages": true
+      }
+    },
+    "duplicate_submission": {
+      "status": "VERIFIED",
+      "evidence": {
+        "input_count": 1,
+        "operation_count": 1,
+        "conflicting_payload_http": 409
+      }
+    },
+    "reconnect": {
+      "status": "VERIFIED",
+      "evidence": {
+        "same_conversation": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "accepted_inputs": 1,
+        "unique_finalized_message_ids": 5
+      }
+    },
+    "gateway_restart": {
+      "status": "VERIFIED",
+      "evidence": {
+        "messages": 3,
+        "same_finalized_history": true
+      }
+    },
+    "worker_interruption": {
+      "status": "VERIFIED",
+      "evidence": {
+        "operation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73",
+        "rows_before_kill": 1,
+        "workflow_activity_result": "not acknowledged; tool blocked after commit",
+        "deliveries_after_recovery": 2,
+        "effect_rows": 1,
+        "temporal_retries": [
+          {
+            "activity": "agent__birbcrew-proof-v1__toolset__<agent>__call_tool",
+            "attempt": 2,
+            "cause": "TIMEOUT_TYPE_HEARTBEAT"
+          },
+          {
+            "activity": "project_events",
+            "attempt": 2,
+            "cause": "TIMEOUT_TYPE_HEARTBEAT"
+          }
+        ]
+      }
+    },
+    "human_wait": {
+      "status": "VERIFIED",
+      "evidence": {
+        "request": {
+          "id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73/next-step",
+          "version": 1,
+          "resolution": null,
+          "tool_call_id": "0c1c4a07-1c13-5567-9e6e-76f1a019e741",
+          "expected_responder": "owner"
+        },
+        "resolution": {
+          "id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73/next-step",
+          "version": 1,
+          "resolution": "test",
+          "tool_call_id": "0c1c4a07-1c13-5567-9e6e-76f1a019e741",
+          "expected_responder": "owner"
+        },
+        "survived_worker_and_gateway_restart": true
+      }
+    },
+    "conflicting_response": {
+      "status": "VERIFIED",
+      "evidence": {
+        "wrong_version_http": 409,
+        "conflict_http": 409,
+        "identical_retry_accepted": true
+      }
+    },
+    "explicit_cancellation": {
+      "status": "VERIFIED",
+      "evidence": {
+        "ack": {
+          "acknowledgement": "requested",
+          "conversation_id": "32f53772-62a8-4893-8d1e-70da2dc1bcab"
+        },
+        "final_phase": "cancelled",
+        "effect_already_committed": true,
+        "disconnect_did_not_cancel_first_conversation": true
+      }
+    },
+    "isolation": {
+      "status": "VERIFIED",
+      "evidence": {
+        "other_principal_read_submit_resume_stream_cancel": 404,
+        "invalid_credential": 401
+      }
+    },
+    "shared_context": {
+      "status": "VERIFIED",
+      "evidence": {
+        "context": {
+          "actor": "birbcrew-proof",
+          "notes": [
+            {
+              "key": "milestone",
+              "body": "Use only synthetic work items. Preserve conversation identity across reconnect.",
+              "path": "projects/birbcrew/memories/milestone.md",
+              "updated": {
+                "seconds": 1793940307,
+                "nanoseconds": 0,
+                "offset_seconds": 0
+              },
+              "file_sha256": "38cc1980b86176d8b553086b57522f1789dfa5e0945b0f43e53917f8902e58c1",
+              "content_sha256": "1a515fa5dadf1817f240b21a1e368b2c3d0ef240100ab687582ffc43f4edafd0"
+            },
+            {
+              "key": "verification",
+              "body": "Recover the committed operation before asking the human to inspect or test.",
+              "path": "projects/birbcrew/memories/verification.md",
+              "updated": {
+                "seconds": 1793940308,
+                "nanoseconds": 0,
+                "offset_seconds": 0
+              },
+              "file_sha256": "e0c759b600d8b11c425bb9f17ef904d627f5424a1f310f70bb5f7fc7ecef6daa",
+              "content_sha256": "0952e23cdbe08ff9b571cd9597a4a0bd9877955d372f3ddff8e45453a3f55657"
+            }
+          ],
+          "commit": "2648692f68bd223ee4a0fa4ce826efe3846f9d01",
+          "project": "birbcrew"
+        },
+        "unrelated_note_absent": true
+      }
+    },
+    "telemetry": {
+      "status": "VERIFIED",
+      "evidence": {
+        "exported_spans": 48,
+        "correlated_spans": 24,
+        "names": [
+          "conversation.persist",
+          "tool.committed_before_ack",
+          "tool.effect",
+          "tool.reconciled"
+        ],
+        "datadog": "NOT VERIFIED; outside scope"
+      }
+    },
+    "real_subscription": {
+      "status": "NOT VERIFIED",
+      "evidence": "Not exercised in this run"
+    }
+  },
+  "process_terminations": [
+    {
+      "process": "client-b",
+      "pid": 1507296,
+      "signal": "SIGTERM",
+      "at": "2026-11-06T04:45:14.591876+00:00"
+    },
+    {
+      "process": "client-a",
+      "pid": 1507246,
+      "signal": "SIGTERM",
+      "at": "2026-11-06T04:45:14.607185+00:00"
+    },
+    {
+      "process": "worker",
+      "pid": 1507089,
+      "signal": "SIGKILL",
+      "at": "2026-11-06T04:45:14.638554+00:00"
+    },
+    {
+      "process": "gateway",
+      "pid": 1507133,
+      "signal": "SIGKILL",
+      "at": "2026-11-06T04:45:14.653853+00:00"
+    },
+    {
+      "process": "worker",
+      "pid": 1507374,
+      "signal": "SIGKILL",
+      "at": "2026-11-06T04:45:29.658225+00:00"
+    },
+    {
+      "process": "gateway",
+      "pid": 1507341,
+      "signal": "SIGKILL",
+      "at": "2026-11-06T04:45:29.673543+00:00"
+    },
+    {
+      "process": "client-a",
+      "pid": 1507768,
+      "signal": "SIGTERM",
+      "at": "2026-11-06T04:45:41.454259+00:00"
+    },
+    {
+      "process": "client-b",
+      "pid": 1507767,
+      "signal": "SIGTERM",
+      "at": "2026-11-06T04:45:41.469728+00:00"
+    },
+    {
+      "process": "gateway",
+      "pid": 1507734,
+      "signal": "SIGTERM",
+      "at": "2026-11-06T04:45:54.603962+00:00"
+    },
+    {
+      "process": "worker",
+      "pid": 1507676,
+      "signal": "SIGTERM",
+      "at": "2026-11-06T04:45:54.619295+00:00"
+    },
+    {
+      "process": "temporal",
+      "pid": 1507065,
+      "signal": "SIGTERM",
+      "at": "2026-11-06T04:45:56.290073+00:00"
+    }
+  ],
+  "conversations": [
+    {
+      "id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "workflow_run_id": "01a1af2c-d53d-78ae-a1e7-5a687fdf0391",
+      "status": "COMPLETED",
+      "activity_retries": [
+        {
+          "activity": "agent__birbcrew-proof-v1__toolset__<agent>__call_tool",
+          "attempt": 2,
+          "cause": "TIMEOUT_TYPE_HEARTBEAT"
+        },
+        {
+          "activity": "project_events",
+          "attempt": 2,
+          "cause": "TIMEOUT_TYPE_HEARTBEAT"
+        }
+      ],
+      "history_events": 372
+    },
+    {
+      "id": "32f53772-62a8-4893-8d1e-70da2dc1bcab",
+      "workflow_id": "birbcrew-32f53772-62a8-4893-8d1e-70da2dc1bcab",
+      "workflow_run_id": "01a1af2d-5022-70c6-9693-b0a411488898",
+      "status": "COMPLETED",
+      "activity_retries": [],
+      "history_events": 69
+    },
+    {
+      "id": "2a8c1537-e37c-426e-b509-75577540333d",
+      "workflow_id": "birbcrew-2a8c1537-e37c-426e-b509-75577540333d",
+      "workflow_run_id": "01a1af2d-64b0-74a3-9e03-3ff8a287df89",
+      "status": "COMPLETED",
+      "activity_retries": [],
+      "history_events": 22
+    }
+  ],
+  "fixture_root": "/tmp/birbcrew-proof-6n4huhvf",
+  "beans": {
+    "project": "birbcrew",
+    "actor": "birbcrew-proof",
+    "commit": "2648692f68bd223ee4a0fa4ce826efe3846f9d01",
+    "notes": [
+      {
+        "key": "milestone",
+        "path": "projects/birbcrew/memories/milestone.md",
+        "updated": {
+          "nanoseconds": 0,
+          "offset_seconds": 0,
+          "seconds": 1793940307
+        },
+        "file_sha256": "38cc1980b86176d8b553086b57522f1789dfa5e0945b0f43e53917f8902e58c1",
+        "content_sha256": "1a515fa5dadf1817f240b21a1e368b2c3d0ef240100ab687582ffc43f4edafd0",
+        "body": "Use only synthetic work items. Preserve conversation identity across reconnect."
+      },
+      {
+        "key": "verification",
+        "path": "projects/birbcrew/memories/verification.md",
+        "updated": {
+          "nanoseconds": 0,
+          "offset_seconds": 0,
+          "seconds": 1793940308
+        },
+        "file_sha256": "e0c759b600d8b11c425bb9f17ef904d627f5424a1f310f70bb5f7fc7ecef6daa",
+        "content_sha256": "0952e23cdbe08ff9b571cd9597a4a0bd9877955d372f3ddff8e45453a3f55657",
+        "body": "Recover the committed operation before asking the human to inspect or test."
+      }
+    ]
+  },
+  "versions": {
+    "python": "3.13.12",
+    "pydantic-ai-slim": "2.66.0",
+    "pydantic": "2.14.3",
+    "ag-ui-protocol": "1.0.0",
+    "temporalio": "1.35.0",
+    "psycopg": "3.3.8",
+    "fastapi": "0.162.0",
+    "uvicorn": "0.54.0",
+    "opentelemetry-sdk": "1.45.2",
+    "httpx-sse": "0.4.3",
+    "temporal": "temporal version 1.10.0 (Server 1.32.2, UI 2.56.1)",
+    "postgres": "postgres (PostgreSQL) 17.6",
+    "bn": "bn v0.3.0"
+  },
+  "mid_run_reconnect": {
+    "phase_before_and_after_attach": "running",
+    "client": "B",
+    "sdk_tool_start_received": true,
+    "sdk_step_start_received": true,
+    "cursor": 4,
+    "effect_not_acknowledged": true
+  },
+  "interruption_point": {
+    "operation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73",
+    "rows_before_kill": 1,
+    "workflow_activity_result": "not acknowledged; tool blocked after commit"
+  },
+  "operations": [
+    {
+      "operation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "payload": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.",
+      "result": {
+        "kind": "synthetic-work-item",
+        "text": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.",
+        "operation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73"
+      },
+      "deliveries": 2
+    }
+  ],
+  "client_b_resolution": {
+    "client": "B",
+    "resolution": {
+      "id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73/next-step",
+      "version": 1,
+      "expected_responder": "owner",
+      "tool_call_id": "0c1c4a07-1c13-5567-9e6e-76f1a019e741",
+      "resolution": "test"
+    }
+  },
+  "framework_history_preserved_after_replay": true,
+  "agui_event_types": [
+    "MESSAGES_SNAPSHOT",
+    "RUN_STARTED",
+    "STATE_SNAPSHOT",
+    "STEP_FINISHED",
+    "STEP_STARTED",
+    "TEXT_MESSAGE_CONTENT",
+    "TEXT_MESSAGE_END",
+    "TEXT_MESSAGE_START",
+    "TOOL_CALL_ARGS",
+    "TOOL_CALL_END",
+    "TOOL_CALL_RESULT",
+    "TOOL_CALL_START"
+  ],
+  "final_snapshot": {
+    "id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+    "human": null,
+    "owner": "owner",
+    "phase": "idle",
+    "inputs": [
+      {
+        "text": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.",
+        "digest": "4913ea6a87359bd7ee60a3af5ada92e8a2fc6ff2f916e0722d6a78366c5ca177",
+        "ordinal": 0,
+        "outcome": "completed",
+        "request_id": "2465878a-36a3-4bbf-8248-45294e8b4f73"
+      }
+    ],
+    "context": {
+      "actor": "birbcrew-proof",
+      "notes": [
+        {
+          "key": "milestone",
+          "body": "Use only synthetic work items. Preserve conversation identity across reconnect.",
+          "path": "projects/birbcrew/memories/milestone.md",
+          "updated": {
+            "seconds": 1793940307,
+            "nanoseconds": 0,
+            "offset_seconds": 0
+          },
+          "file_sha256": "38cc1980b86176d8b553086b57522f1789dfa5e0945b0f43e53917f8902e58c1",
+          "content_sha256": "1a515fa5dadf1817f240b21a1e368b2c3d0ef240100ab687582ffc43f4edafd0"
+        },
+        {
+          "key": "verification",
+          "body": "Recover the committed operation before asking the human to inspect or test.",
+          "path": "projects/birbcrew/memories/verification.md",
+          "updated": {
+            "seconds": 1793940308,
+            "nanoseconds": 0,
+            "offset_seconds": 0
+          },
+          "file_sha256": "e0c759b600d8b11c425bb9f17ef904d627f5424a1f310f70bb5f7fc7ecef6daa",
+          "content_sha256": "0952e23cdbe08ff9b571cd9597a4a0bd9877955d372f3ddff8e45453a3f55657"
+        }
+      ],
+      "commit": "2648692f68bd223ee4a0fa4ce826efe3846f9d01",
+      "project": "birbcrew"
+    },
+    "failure": null,
+    "attempts": [
+      {
+        "id": "860c7942-1c6e-5d21-9165-f39b84045b6c",
+        "outcome": "waiting",
+        "request_id": "2465878a-36a3-4bbf-8248-45294e8b4f73",
+        "workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "workflow_run_id": "01a1af2c-d53d-78ae-a1e7-5a687fdf0391"
+      },
+      {
+        "id": "1fbad725-381e-58d9-8ce1-ad138121cedf",
+        "outcome": "completed",
+        "request_id": "2465878a-36a3-4bbf-8248-45294e8b4f73",
+        "workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "workflow_run_id": "01a1af2c-d53d-78ae-a1e7-5a687fdf0391"
+      }
+    ],
+    "coworker": {
+      "id": "birbcrew-proof",
+      "tools": [
+        "record_work_item",
+        "choose_next_step"
+      ],
+      "version": 1,
+      "instructions": "You are a coding coworker testing a disposable repository. Read the supplied project notes. Record one synthetic coding work item with record_work_item, then request a human next step with choose_next_step. After the human reply, summarize the recorded item and the choice. Do not repeat the completed operation. No real actions.",
+      "eligible_models": [
+        "test",
+        "glm-5.3-flash"
+      ]
+    },
+    "messages": [
+      {
+        "id": "3cfb188e-7f28-55ee-b888-324cfa951094",
+        "role": "user",
+        "content": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions."
+      },
+      {
+        "id": "f1264700-7c0b-506c-baf7-8179c7314937",
+        "role": "assistant",
+        "toolCalls": [
+          {
+            "id": "a4a5ce03-ac6b-56ab-91ed-d4a3b35bff69",
+            "type": "function",
+            "function": {
+              "name": "record_work_item",
+              "arguments": "{\"operation_id\":\"bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73\"}"
+            }
+          },
+          {
+            "id": "0c1c4a07-1c13-5567-9e6e-76f1a019e741",
+            "type": "function",
+            "function": {
+              "name": "choose_next_step",
+              "arguments": "{}"
+            }
+          }
+        ]
+      },
+      {
+        "id": "815df306-687a-5651-bae9-15a7ecf0452d",
+        "role": "tool",
+        "content": "{\"kind\":\"synthetic-work-item\",\"text\":\"Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.\",\"operation_id\":\"bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73\"}",
+        "toolCallId": "a4a5ce03-ac6b-56ab-91ed-d4a3b35bff69"
+      },
+      {
+        "id": "7b2def85-997c-5b07-a3b4-2aa1ab0ac6ed",
+        "role": "tool",
+        "content": "test",
+        "toolCallId": "0c1c4a07-1c13-5567-9e6e-76f1a019e741"
+      },
+      {
+        "id": "e5cc76bd-703e-5e66-a1d9-5d338188cb42",
+        "role": "assistant",
+        "content": "The scoped repository notes require synthetic work only. The work item and human next step are recorded."
+      }
+    ],
+    "revision": 5,
+    "decisions": [
+      {
+        "id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73/next-step",
+        "version": 1,
+        "resolution": "test",
+        "tool_call_id": "0c1c4a07-1c13-5567-9e6e-76f1a019e741",
+        "expected_responder": "owner"
+      }
+    ],
+    "native_messages": [
+      {
+        "kind": "request",
+        "parts": [
+          {
+            "content": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.",
+            "part_kind": "user-prompt",
+            "timestamp": "2026-11-06T04:45:29.060253Z"
+          }
+        ],
+        "state": "complete",
+        "run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c",
+        "metadata": null,
+        "timestamp": "2026-11-06T04:45:29.060388Z",
+        "instructions": "You are a coding coworker testing a disposable repository. Read the supplied project notes. Record one synthetic coding work item with record_work_item, then request a human next step with choose_next_step. After the human reply, summarize the recorded item and the choice. Do not repeat the completed operation. No real actions.\n\nSelected repository notes.\n{\"project\":\"birbcrew\",\"actor\":\"birbcrew-proof\",\"commit\":\"2648692f68bd223ee4a0fa4ce826efe3846f9d01\",\"notes\":[{\"key\":\"milestone\",\"path\":\"projects/birbcrew/memories/milestone.md\",\"updated\":{\"seconds\":1793940307,\"nanoseconds\":0,\"offset_seconds\":0},\"file_sha256\":\"38cc1980b86176d8b553086b57522f1789dfa5e0945b0f43e53917f8902e58c1\",\"content_sha256\":\"1a515fa5dadf1817f240b21a1e368b2c3d0ef240100ab687582ffc43f4edafd0\",\"body\":\"Use only synthetic work items. Preserve conversation identity across reconnect.\"},{\"key\":\"verification\",\"path\":\"projects/birbcrew/memories/verification.md\",\"updated\":{\"seconds\":1793940308,\"nanoseconds\":0,\"offset_seconds\":0},\"file_sha256\":\"e0c759b600d8b11c425bb9f17ef904d627f5424a1f310f70bb5f7fc7ecef6daa\",\"content_sha256\":\"0952e23cdbe08ff9b571cd9597a4a0bd9877955d372f3ddff8e45453a3f55657\",\"body\":\"Recover the committed operation before asking the human to inspect or test.\"}]}",
+        "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8"
+      },
+      {
+        "kind": "response",
+        "parts": [
+          {
+            "id": null,
+            "args": "{\"operation_id\": \"bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73\"}",
+            "part_kind": "tool-call",
+            "tool_kind": null,
+            "tool_name": "record_work_item",
+            "tool_call_id": "a4a5ce03-ac6b-56ab-91ed-d4a3b35bff69",
+            "provider_name": null,
+            "provider_details": null
+          },
+          {
+            "id": null,
+            "args": "{}",
+            "part_kind": "tool-call",
+            "tool_kind": null,
+            "tool_name": "choose_next_step",
+            "tool_call_id": "0c1c4a07-1c13-5567-9e6e-76f1a019e741",
+            "provider_name": null,
+            "provider_details": null
+          }
+        ],
+        "state": "complete",
+        "usage": {
+          "cost": null,
+          "details": {},
+          "input_tokens": 50,
+          "audio_seconds": 0.0,
+          "output_tokens": 5,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_audio_tokens": 0,
+          "output_audio_tokens": 0,
+          "cache_write_1h_tokens": 0,
+          "cache_audio_read_tokens": 0,
+          "output_reasoning_tokens": 0
+        },
+        "run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c",
+        "metadata": null,
+        "model_id": "function:birbcrew-coding-fixture-v1",
+        "timestamp": "2026-11-06T04:45:13.943424Z",
+        "model_name": "birbcrew-coding-fixture-v1",
+        "provider_url": null,
+        "finish_reason": null,
+        "provider_name": null,
+        "workspace_ref": null,
+        "history_digest": null,
+        "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "failed_attempts": null,
+        "canonical_system": null,
+        "provider_details": null,
+        "provider_response_id": null
+      },
+      {
+        "kind": "request",
+        "parts": [
+          {
+            "retry": null,
+            "content": {
+              "kind": "synthetic-work-item",
+              "text": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.",
+              "operation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73"
+            },
+            "outcome": "success",
+            "metadata": null,
+            "part_kind": "tool-return",
+            "timestamp": "2026-11-06T04:45:29.105987Z",
+            "tool_kind": null,
+            "tool_name": "record_work_item",
+            "tool_call_id": "a4a5ce03-ac6b-56ab-91ed-d4a3b35bff69",
+            "content_file_digests": []
+          }
+        ],
+        "state": "complete",
+        "run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c",
+        "metadata": null,
+        "timestamp": "2026-11-06T04:45:29.260793Z",
+        "instructions": null,
+        "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8"
+      },
+      {
+        "kind": "request",
+        "parts": [
+          {
+            "retry": null,
+            "content": "test",
+            "outcome": "success",
+            "metadata": null,
+            "part_kind": "tool-return",
+            "timestamp": "2026-11-06T04:45:39.990021Z",
+            "tool_kind": null,
+            "tool_name": "choose_next_step",
+            "tool_call_id": "0c1c4a07-1c13-5567-9e6e-76f1a019e741"
+          }
+        ],
+        "state": "complete",
+        "run_id": "1fbad725-381e-58d9-8ce1-ad138121cedf",
+        "metadata": null,
+        "timestamp": "2026-11-06T04:45:39.990304Z",
+        "instructions": "You are a coding coworker testing a disposable repository. Read the supplied project notes. Record one synthetic coding work item with record_work_item, then request a human next step with choose_next_step. After the human reply, summarize the recorded item and the choice. Do not repeat the completed operation. No real actions.\n\nSelected repository notes.\n{\"project\":\"birbcrew\",\"actor\":\"birbcrew-proof\",\"commit\":\"2648692f68bd223ee4a0fa4ce826efe3846f9d01\",\"notes\":[{\"key\":\"milestone\",\"path\":\"projects/birbcrew/memories/milestone.md\",\"updated\":{\"seconds\":1793940307,\"nanoseconds\":0,\"offset_seconds\":0},\"file_sha256\":\"38cc1980b86176d8b553086b57522f1789dfa5e0945b0f43e53917f8902e58c1\",\"content_sha256\":\"1a515fa5dadf1817f240b21a1e368b2c3d0ef240100ab687582ffc43f4edafd0\",\"body\":\"Use only synthetic work items. Preserve conversation identity across reconnect.\"},{\"key\":\"verification\",\"path\":\"projects/birbcrew/memories/verification.md\",\"updated\":{\"seconds\":1793940308,\"nanoseconds\":0,\"offset_seconds\":0},\"file_sha256\":\"e0c759b600d8b11c425bb9f17ef904d627f5424a1f310f70bb5f7fc7ecef6daa\",\"content_sha256\":\"0952e23cdbe08ff9b571cd9597a4a0bd9877955d372f3ddff8e45453a3f55657\",\"body\":\"Recover the committed operation before asking the human to inspect or test.\"}]}",
+        "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8"
+      },
+      {
+        "kind": "response",
+        "parts": [
+          {
+            "id": null,
+            "content": "The scoped repository notes require synthetic work only. The work item and human next step are recorded.",
+            "citations": null,
+            "part_kind": "text",
+            "provider_name": null,
+            "provider_details": null
+          }
+        ],
+        "state": "complete",
+        "usage": {
+          "cost": null,
+          "details": {},
+          "input_tokens": 50,
+          "audio_seconds": 0.0,
+          "output_tokens": 19,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_audio_tokens": 0,
+          "output_audio_tokens": 0,
+          "cache_write_1h_tokens": 0,
+          "cache_audio_read_tokens": 0,
+          "output_reasoning_tokens": 0
+        },
+        "run_id": "1fbad725-381e-58d9-8ce1-ad138121cedf",
+        "metadata": null,
+        "model_id": "function:birbcrew-coding-fixture-v1",
+        "timestamp": "2026-11-06T04:45:40.079596Z",
+        "model_name": "birbcrew-coding-fixture-v1",
+        "provider_url": null,
+        "finish_reason": null,
+        "provider_name": null,
+        "workspace_ref": null,
+        "history_digest": null,
+        "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "failed_attempts": null,
+        "canonical_system": null,
+        "provider_details": null,
+        "provider_response_id": null
+      }
+    ],
+    "cursor": 29
+  },
+  "second_turn": {
+    "inputs": [
+      {
+        "text": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.",
+        "digest": "4913ea6a87359bd7ee60a3af5ada92e8a2fc6ff2f916e0722d6a78366c5ca177",
+        "ordinal": 0,
+        "outcome": "completed",
+        "request_id": "2465878a-36a3-4bbf-8248-45294e8b4f73"
+      },
+      {
+        "text": "Review the disposable coding fixture notes. Record one synthetic work item to add a regression test for conversation reconnection. Ask me whether to inspect or test next. After I answer, summarize the item and my choice. No real repository actions.",
+        "digest": "4913ea6a87359bd7ee60a3af5ada92e8a2fc6ff2f916e0722d6a78366c5ca177",
+        "ordinal": 1,
+        "outcome": "completed",
+        "request_id": "f2f7106d-3081-481e-83d8-9d6a5e99c855"
+      }
+    ],
+    "decisions": [
+      {
+        "id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73/next-step",
+        "version": 1,
+        "resolution": "test",
+        "tool_call_id": "0c1c4a07-1c13-5567-9e6e-76f1a019e741",
+        "expected_responder": "owner"
+      },
+      {
+        "id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/f2f7106d-3081-481e-83d8-9d6a5e99c855/next-step",
+        "version": 1,
+        "resolution": "inspect",
+        "tool_call_id": "55ccd5ea-6419-5d4b-ad81-e0b1b1c30dd3",
+        "expected_responder": "owner"
+      }
+    ],
+    "effect_rows": 2,
+    "prefix_preserved": true
+  },
+  "cancel_human_wait": {
+    "phase": "cancelled",
+    "observer_exit": 0,
+    "human_reply_after_cancel_http": 409
+  },
+  "stale_cursor_http": 410,
+  "event_retention_pruned_old_cursor": true,
+  "replay": [
+    {
+      "workflow_id": "birbcrew-32f53772-62a8-4893-8d1e-70da2dc1bcab",
+      "replay": "VERIFIED"
+    },
+    {
+      "workflow_id": "birbcrew-2a8c1537-e37c-426e-b509-75577540333d",
+      "replay": "VERIFIED"
+    },
+    {
+      "workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "replay": "VERIFIED"
+    }
+  ],
+  "framework_telemetry": [
+    {
+      "name": "chat birbcrew-coding-fixture-v1",
+      "trace_id": "a7e6bfae04bc76ffd4c393518161c1f9",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c"
+    },
+    {
+      "name": "execute_tool record_work_item",
+      "trace_id": "a7e6bfae04bc76ffd4c393518161c1f9",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c"
+    },
+    {
+      "name": "execute_tool choose_next_step",
+      "trace_id": "a7e6bfae04bc76ffd4c393518161c1f9",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c"
+    },
+    {
+      "name": "invoke_agent birbcrew-proof-v1",
+      "trace_id": "a7e6bfae04bc76ffd4c393518161c1f9",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c"
+    },
+    {
+      "name": "chat birbcrew-coding-fixture-v1",
+      "trace_id": "0dc51603fa8b1eccd8d4782417bb78ab",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c"
+    },
+    {
+      "name": "execute_tool record_work_item",
+      "trace_id": "0dc51603fa8b1eccd8d4782417bb78ab",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c"
+    },
+    {
+      "name": "execute_tool choose_next_step",
+      "trace_id": "0dc51603fa8b1eccd8d4782417bb78ab",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c"
+    },
+    {
+      "name": "invoke_agent birbcrew-proof-v1",
+      "trace_id": "0dc51603fa8b1eccd8d4782417bb78ab",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c"
+    },
+    {
+      "name": "chat birbcrew-coding-fixture-v1",
+      "trace_id": "07bd9d8ff503a0cfda43b031d5e2b8d9",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "1fbad725-381e-58d9-8ce1-ad138121cedf"
+    },
+    {
+      "name": "invoke_agent birbcrew-proof-v1",
+      "trace_id": "07bd9d8ff503a0cfda43b031d5e2b8d9",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "1fbad725-381e-58d9-8ce1-ad138121cedf"
+    },
+    {
+      "name": "chat birbcrew-coding-fixture-v1",
+      "trace_id": "048dd0a080f72fb78a2198bf7c966175",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "1739cfdf-727d-5685-98da-5f56528b35ca"
+    },
+    {
+      "name": "execute_tool record_work_item",
+      "trace_id": "048dd0a080f72fb78a2198bf7c966175",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "1739cfdf-727d-5685-98da-5f56528b35ca"
+    },
+    {
+      "name": "execute_tool choose_next_step",
+      "trace_id": "048dd0a080f72fb78a2198bf7c966175",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "1739cfdf-727d-5685-98da-5f56528b35ca"
+    },
+    {
+      "name": "invoke_agent birbcrew-proof-v1",
+      "trace_id": "048dd0a080f72fb78a2198bf7c966175",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "1739cfdf-727d-5685-98da-5f56528b35ca"
+    },
+    {
+      "name": "chat birbcrew-coding-fixture-v1",
+      "trace_id": "06838580f33fe6659d2226c646d80289",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "676cf251-1976-5210-a59a-775adc44f115"
+    },
+    {
+      "name": "invoke_agent birbcrew-proof-v1",
+      "trace_id": "06838580f33fe6659d2226c646d80289",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "676cf251-1976-5210-a59a-775adc44f115"
+    },
+    {
+      "name": "chat birbcrew-coding-fixture-v1",
+      "trace_id": "31508ce781234d9561b45f2292ea45cd",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "58e5031a-b7bf-524f-8684-0d84272cc453"
+    },
+    {
+      "name": "execute_tool record_work_item",
+      "trace_id": "31508ce781234d9561b45f2292ea45cd",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "58e5031a-b7bf-524f-8684-0d84272cc453"
+    },
+    {
+      "name": "execute_tool choose_next_step",
+      "trace_id": "31508ce781234d9561b45f2292ea45cd",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "58e5031a-b7bf-524f-8684-0d84272cc453"
+    },
+    {
+      "name": "invoke_agent birbcrew-proof-v1",
+      "trace_id": "31508ce781234d9561b45f2292ea45cd",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "58e5031a-b7bf-524f-8684-0d84272cc453"
+    },
+    {
+      "name": "chat birbcrew-coding-fixture-v1",
+      "trace_id": "aa45c76d8162a36dc8254aa2f5eff958",
+      "conversation_id": "32f53772-62a8-4893-8d1e-70da2dc1bcab",
+      "run_id": "9f79c6b3-53f2-510b-81c7-cfbaae0f1f0f"
+    },
+    {
+      "name": "execute_tool record_work_item",
+      "trace_id": "aa45c76d8162a36dc8254aa2f5eff958",
+      "conversation_id": "32f53772-62a8-4893-8d1e-70da2dc1bcab",
+      "run_id": "9f79c6b3-53f2-510b-81c7-cfbaae0f1f0f"
+    },
+    {
+      "name": "invoke_agent birbcrew-proof-v1",
+      "trace_id": "aa45c76d8162a36dc8254aa2f5eff958",
+      "conversation_id": "32f53772-62a8-4893-8d1e-70da2dc1bcab",
+      "run_id": "9f79c6b3-53f2-510b-81c7-cfbaae0f1f0f"
+    },
+    {
+      "name": "chat birbcrew-coding-fixture-v1",
+      "trace_id": "1e5ba00699deaea57d23945a5da9dd0b",
+      "conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+      "run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c"
+    }
+  ],
+  "telemetry": [
+    {
+      "name": "tool.effect",
+      "trace_id": "a0b98ae7aa6bc228eedacb79611d391b",
+      "span_id": "719269433e101fea",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.request_id": "2465878a-36a3-4bbf-8248-45294e8b4f73",
+        "birbcrew.run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c",
+        "birbcrew.operation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8"
+      }
+    },
+    {
+      "name": "tool.reconciled",
+      "trace_id": "09c1154ea05ae97fbae3651010e59351",
+      "span_id": "711732e034be1cfb",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.request_id": "2465878a-36a3-4bbf-8248-45294e8b4f73",
+        "birbcrew.run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c",
+        "birbcrew.operation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "5de1c3f9212184213a9cf6e4810714cf",
+      "span_id": "4a8de7504f34a472",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.phase": "waiting"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "31b072f3dbe79fb42e1e8ea5657ff37b",
+      "span_id": "e6319fddfa288851",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.phase": "running"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "7c1dc124214e676d9459075405d10bf1",
+      "span_id": "800b811e41f48555",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.phase": "idle"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "0445f4f8964852922d51773d490ac1a3",
+      "span_id": "231b4e54843d87c5",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.phase": "running"
+      }
+    },
+    {
+      "name": "tool.effect",
+      "trace_id": "6c2b75cbdc7856b35b1fc8ea0dadc9b7",
+      "span_id": "cddc1b2ebd811b95",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.request_id": "f2f7106d-3081-481e-83d8-9d6a5e99c855",
+        "birbcrew.run_id": "1739cfdf-727d-5685-98da-5f56528b35ca",
+        "birbcrew.operation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/f2f7106d-3081-481e-83d8-9d6a5e99c855",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "f30f6e53ee71361b22fa58a6d23614d3",
+      "span_id": "5a148aa619f37cda",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.phase": "waiting"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "9cd99c84f438fb52d223853429ebadff",
+      "span_id": "624e889ef012bde8",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.phase": "running"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "6ac22fd4cfeee131261d810ef48c4ee4",
+      "span_id": "ac3b6e503c2d6818",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.phase": "idle"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "e02cde91dbac8c67fd51fcfab317a43c",
+      "span_id": "52e0adf6a67f8347",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.phase": "running"
+      }
+    },
+    {
+      "name": "tool.effect",
+      "trace_id": "8a0b21ee3b5b57f3db9312b7c5ab5e46",
+      "span_id": "31d14eb2e57849d9",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.request_id": "297ecbab-5009-42e3-ac8c-0e10656af435",
+        "birbcrew.run_id": "58e5031a-b7bf-524f-8684-0d84272cc453",
+        "birbcrew.operation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/297ecbab-5009-42e3-ac8c-0e10656af435",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "153bb0cc7e8b863d12479cfc7043e14a",
+      "span_id": "9343d1f65eab4071",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.phase": "waiting"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "0e16ae790d7702d88662fa327f77f2ba",
+      "span_id": "b5518c286eecf40e",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.phase": "cancelled"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "cb88bb7988c9fc51b575c8ccaf6f33b7",
+      "span_id": "d42b4e1af0e84eba",
+      "attributes": {
+        "birbcrew.conversation_id": "32f53772-62a8-4893-8d1e-70da2dc1bcab",
+        "birbcrew.workflow_id": "birbcrew-32f53772-62a8-4893-8d1e-70da2dc1bcab",
+        "birbcrew.phase": "idle"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "0486e5af4a006f5815591d33678997e1",
+      "span_id": "e2079893b8251f47",
+      "attributes": {
+        "birbcrew.conversation_id": "32f53772-62a8-4893-8d1e-70da2dc1bcab",
+        "birbcrew.workflow_id": "birbcrew-32f53772-62a8-4893-8d1e-70da2dc1bcab",
+        "birbcrew.phase": "running"
+      }
+    },
+    {
+      "name": "tool.effect",
+      "trace_id": "d4c3f498e49db41731376378a114ab57",
+      "span_id": "3f9b34c4aa0aef3b",
+      "attributes": {
+        "birbcrew.conversation_id": "32f53772-62a8-4893-8d1e-70da2dc1bcab",
+        "birbcrew.request_id": "09530d35-9377-4f1c-bd97-cd9e70cd9958",
+        "birbcrew.run_id": "9f79c6b3-53f2-510b-81c7-cfbaae0f1f0f",
+        "birbcrew.operation_id": "32f53772-62a8-4893-8d1e-70da2dc1bcab/09530d35-9377-4f1c-bd97-cd9e70cd9958",
+        "birbcrew.workflow_id": "birbcrew-32f53772-62a8-4893-8d1e-70da2dc1bcab"
+      }
+    },
+    {
+      "name": "tool.committed_before_ack",
+      "trace_id": "7f787b925a7df8112c51c9f6589a6d3a",
+      "span_id": "214b11c1c104dbbb",
+      "attributes": {
+        "birbcrew.conversation_id": "32f53772-62a8-4893-8d1e-70da2dc1bcab",
+        "birbcrew.operation_id": "32f53772-62a8-4893-8d1e-70da2dc1bcab/09530d35-9377-4f1c-bd97-cd9e70cd9958",
+        "birbcrew.request_id": "09530d35-9377-4f1c-bd97-cd9e70cd9958",
+        "birbcrew.run_id": "9f79c6b3-53f2-510b-81c7-cfbaae0f1f0f",
+        "birbcrew.workflow_id": "birbcrew-32f53772-62a8-4893-8d1e-70da2dc1bcab"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "bd220e153289012ab4dce4addac45f5e",
+      "span_id": "3355632dd448e704",
+      "attributes": {
+        "birbcrew.conversation_id": "32f53772-62a8-4893-8d1e-70da2dc1bcab",
+        "birbcrew.workflow_id": "birbcrew-32f53772-62a8-4893-8d1e-70da2dc1bcab",
+        "birbcrew.phase": "cancelled"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "cc12d5cce31ad5728b3a2c69a291931d",
+      "span_id": "9fd3e86691293956",
+      "attributes": {
+        "birbcrew.conversation_id": "2a8c1537-e37c-426e-b509-75577540333d",
+        "birbcrew.workflow_id": "birbcrew-2a8c1537-e37c-426e-b509-75577540333d",
+        "birbcrew.phase": "idle"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "593f49a460bd9d80d8067ea6bc126c2f",
+      "span_id": "0bd67aaab47f35b4",
+      "attributes": {
+        "birbcrew.conversation_id": "2a8c1537-e37c-426e-b509-75577540333d",
+        "birbcrew.workflow_id": "birbcrew-2a8c1537-e37c-426e-b509-75577540333d",
+        "birbcrew.phase": "cancelled"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "a1706a69b01de819ec83cf1b326d0622",
+      "span_id": "a88c8bf7104a3223",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.phase": "idle"
+      }
+    },
+    {
+      "name": "conversation.persist",
+      "trace_id": "6f1802256b202fe59e46f6904b91ac13",
+      "span_id": "29861dd6d6a21d7b",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.phase": "running"
+      }
+    },
+    {
+      "name": "tool.effect",
+      "trace_id": "a19c88fef574f4da22014630a728b549",
+      "span_id": "a8874633b2148556",
+      "attributes": {
+        "birbcrew.conversation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8",
+        "birbcrew.request_id": "2465878a-36a3-4bbf-8248-45294e8b4f73",
+        "birbcrew.run_id": "860c7942-1c6e-5d21-9165-f39b84045b6c",
+        "birbcrew.operation_id": "bc20b3f8-fc36-437c-87a0-c8b8f09476e8/2465878a-36a3-4bbf-8248-45294e8b4f73",
+        "birbcrew.workflow_id": "birbcrew-bc20b3f8-fc36-437c-87a0-c8b8f09476e8"
+      }
+    }
+  ]
+}

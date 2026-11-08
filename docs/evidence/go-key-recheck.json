@@ -1,0 +1,10 @@
+{
+  "checked_at": "2026-11-06T12:34:40.126724+00:00",
+  "endpoint": "https://opencode.ai/inference/go/openai/v1/models",
+  "models_http_status": 200,
+  "selected_model": "glm-5.3-flash",
+  "credential_source": "~/.profile",
+  "model_call_made": false,
+  "extra_usage_disabled": "Awaiting owner confirmation for Go",
+  "selected_model_listed": true
+}
