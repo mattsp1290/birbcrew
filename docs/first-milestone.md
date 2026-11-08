@@ -1,5 +1,32 @@
 # First milestone for Birbcrew
 
+## Current status, November 8, 2026
+
+The bounded runtime proof is implemented at
+`88b219c18adeb352d2f291f099ede990a3190a58`. The
+[deterministic acceptance report](evidence/final-acceptance.json) verifies eleven
+journeys. The separate [live report](evidence/live-acceptance.json) verifies the
+subscription journey and nine overlapping journeys. Together they cover all
+twelve required scenarios. The [source manifest](evidence/continuation-source-manifest.json)
+binds those records to the delivered source. The
+[final independent Claude review](evidence/continuation-final-review.json)
+records no material findings and states its source-only review limits.
+[Verification instructions](verification.md) describe the implemented commands.
+
+On November 8, the owner authorized the coordinator to merge birb* PRs that it
+has reviewed and approved, including fixing findings. That authorization
+supersedes the earlier instruction to wait for a separate human review before
+merging this bounded proof. It does not claim that an independent human source
+review happened. Production identity, persistent deployment and live factory
+actions remain separate work. No production deployment is implied by acceptance
+or merge.
+
+The original November 5 implementation brief follows as historical scope.
+Its statements that implementation, commands and acceptance are still pending
+describe the starting point, not the current result.
+
+## Original implementation brief
+
 Status: ready for the owner to launch the bounded implementation milestone. Prepared November 5, 2026.
 The owner selected Birbcrew as the first repository and approved Pydantic AI
 with Temporal as the first integration to validate. The current session prepares
