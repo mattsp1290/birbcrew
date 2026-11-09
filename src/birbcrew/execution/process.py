@@ -9,6 +9,27 @@ from pathlib import Path
 from temporalio import activity
 
 
+class CommandFailure(RuntimeError):
+    def __init__(self, usage_unavailable: bool = False):
+        super().__init__(
+            "provider_usage_unavailable" if usage_unavailable else "installed_command_failed"
+        )
+        self.usage_unavailable = usage_unavailable
+
+
+def usage_unavailable(envelope: object) -> bool:
+    if not isinstance(envelope, dict) or envelope.get("is_error") is not True:
+        return False
+    result = envelope.get("result")
+    return (
+        isinstance(result, str)
+        and "out of usage credits" in result.lower()
+        and "switch to another model" in result.lower()
+        and not envelope.get("structured_output")
+        and not envelope.get("modelUsage")
+    )
+
+
 async def command(
     argv: list[str], cwd: Path, *, text: str | None = None, timeout=60, subscription=False
 ) -> str:
@@ -45,10 +66,16 @@ async def command(
                 os.killpg(process.pid, signal.SIGKILL)
                 await process.wait()
         raise
-    if process.returncode:
-        raise RuntimeError("installed_command_failed")
     if len(out) > 2 * 1024 * 1024:
         raise ValueError("command_output_limit")
+    if process.returncode:
+        unavailable = False
+        if subscription:
+            try:
+                unavailable = usage_unavailable(json.loads(out))
+            except (ValueError, UnicodeDecodeError):
+                pass
+        raise CommandFailure(unavailable)
     return out.decode()
 
 

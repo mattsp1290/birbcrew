@@ -102,10 +102,17 @@ EXECUTION_RESULT = TypeAdapter(ExecutionResult)
 
 class ReviewInput(ExecutionInput):
     candidate: Candidate
+    review_attempt: int = Field(default=0, ge=0, exclude_if=lambda value: value == 0)
+
+    @property
+    def review_identity(self) -> str:
+        identity = str(self.operation_id)
+        return identity if self.review_attempt == 0 else f"{identity}/review-{self.review_attempt}"
 
 
 class ReviewReceipt(Record):
     candidate_commit: Commit
+    review_attempt: int = Field(default=0, ge=0, exclude_if=lambda value: value == 0)
     reviewer: Literal["claude-cli"] = "claude-cli"
     disposition: Literal["approved", "changes_requested", "inconclusive"]
     findings_digest: Digest
@@ -121,6 +128,7 @@ class PublicationInput(ReviewInput):
         if (
             self.review.disposition != "approved"
             or self.review.candidate_commit != self.candidate.head_commit
+            or self.review.review_attempt != self.review_attempt
         ):
             raise ValueError("review_not_approved_for_candidate")
         return self

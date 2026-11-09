@@ -667,6 +667,12 @@
             "title": "Findings Digest",
             "type": "string"
           },
+          "review_attempt": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Review Attempt",
+            "type": "integer"
+          },
           "reviewer": {
             "const": "claude-cli",
             "default": "claude-cli",
@@ -706,6 +712,12 @@
       },
       "review": {
         "$ref": "#/$defs/ReviewReceipt"
+      },
+      "review_attempt": {
+        "default": 0,
+        "minimum": 0,
+        "title": "Review Attempt",
+        "type": "integer"
       },
       "schema_version": {
         "const": "birbcrew.execution.v1",
@@ -1063,6 +1075,12 @@
         "title": "Operation Id",
         "type": "string"
       },
+      "review_attempt": {
+        "default": 0,
+        "minimum": 0,
+        "title": "Review Attempt",
+        "type": "integer"
+      },
       "schema_version": {
         "const": "birbcrew.execution.v1",
         "default": "birbcrew.execution.v1",
@@ -1104,6 +1122,12 @@
         "pattern": "^[0-9a-f]{64}$",
         "title": "Findings Digest",
         "type": "string"
+      },
+      "review_attempt": {
+        "default": 0,
+        "minimum": 0,
+        "title": "Review Attempt",
+        "type": "integer"
       },
       "reviewer": {
         "const": "claude-cli",

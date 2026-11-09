@@ -14,8 +14,11 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
     id text PRIMARY KEY, owner text NOT NULL, revision bigint NOT NULL,
     snapshot jsonb NOT NULL, cursor bigint NOT NULL DEFAULT 0,
-    snapshot_cursor bigint NOT NULL DEFAULT 0
+    snapshot_cursor bigint NOT NULL DEFAULT 0,
+    last_activity_at timestamptz NOT NULL DEFAULT statement_timestamp()
 );
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS
+    last_activity_at timestamptz NOT NULL DEFAULT statement_timestamp();
 CREATE TABLE IF NOT EXISTS events (
     conversation_id text NOT NULL REFERENCES conversations(id),
     cursor bigint NOT NULL, event_key text NOT NULL, payload jsonb NOT NULL,
@@ -79,7 +82,9 @@ async def append_locked(db, cid: str, key: str, payload: dict) -> None:
         return
     row = await (
         await db.execute(
-            "UPDATE conversations SET cursor=cursor+1 WHERE id=%s RETURNING cursor", (cid,)
+            "UPDATE conversations SET cursor=cursor+1, last_activity_at=clock_timestamp() "
+            "WHERE id=%s RETURNING cursor",
+            (cid,),
         )
     ).fetchone()
     await db.execute(
@@ -108,7 +113,8 @@ async def save(state: Conversation) -> Conversation:
         if row["revision"] >= state.revision:
             return Conversation.model_validate(row["snapshot"])
         await db.execute(
-            "UPDATE conversations SET snapshot=%s,revision=%s WHERE id=%s",
+            "UPDATE conversations SET snapshot=%s,revision=%s,last_activity_at=clock_timestamp() "
+            "WHERE id=%s",
             (Jsonb(state.model_dump(mode="json")), state.revision, state.id),
         )
         for suffix, event in [
@@ -201,7 +207,8 @@ async def conversations_for_owner(owner: str) -> list[dict]:
     async with await connect() as db:
         rows = await (
             await db.execute(
-                "SELECT id, revision FROM conversations WHERE owner=%s ORDER BY id LIMIT 100",
+                "SELECT id, revision FROM conversations WHERE owner=%s "
+                "ORDER BY last_activity_at DESC, id LIMIT 100",
                 (owner,),
             )
         ).fetchall()
