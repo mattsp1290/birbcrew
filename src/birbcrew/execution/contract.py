@@ -125,6 +125,29 @@ class ReviewReceipt(Record):
         return self.disposition == "inconclusive" and self.findings_digest != "0" * 64
 
 
+class ReviewRecoveryInput(Record):
+    previous: ReviewInput
+    receipt: ReviewReceipt
+
+
+class ReviewRecoveryEligible(Record):
+    kind: Literal["legacy_approval_misclassified"]
+    operation_id: UUID
+    candidate_commit: Commit
+    review_attempt: int = Field(ge=0)
+    receipt_sha256: Digest
+    evidence_sha256: Digest
+
+
+class ReviewRecoveryDenied(Record):
+    kind: Literal["not_eligible", "evidence_unconfirmed"]
+
+
+REVIEW_RECOVERY_RESULT = TypeAdapter(
+    Annotated[ReviewRecoveryEligible | ReviewRecoveryDenied, Field(discriminator="kind")]
+)
+
+
 class PublicationInput(ReviewInput):
     review: ReviewReceipt
 

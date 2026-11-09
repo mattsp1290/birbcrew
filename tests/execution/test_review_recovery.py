@@ -41,8 +41,9 @@ def verdict(approved=True):
     return {
         "is_error": False,
         "structured_output": {
-            "approved": approved,
-            "findings": [] if approved else ["Misleading claim."],
+            "decision": "approved" if approved else "changes_requested",
+            "blocking_findings": [] if approved else ["Misleading claim."],
+            "notes": [],
         },
         "modelUsage": {"claude-sonnet-5-5": {}},
     }

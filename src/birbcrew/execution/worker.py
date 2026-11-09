@@ -7,6 +7,7 @@ from birbcrew.execution.author import author_goal
 from birbcrew.execution.policy import installation
 from birbcrew.execution.publish import publish_draft
 from birbcrew.execution.review import review_candidate
+from birbcrew.execution.review_recovery import check_review_recovery
 
 
 async def main():
@@ -16,7 +17,7 @@ async def main():
     async with Worker(
         client,
         task_queue=config.task_queue,
-        activities=[author_goal, review_candidate, publish_draft],
+        activities=[author_goal, review_candidate, check_review_recovery, publish_draft],
         max_concurrent_activities=1,
     ):
         print("execution-worker-ready", flush=True)
