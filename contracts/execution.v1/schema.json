@@ -1,0 +1,1132 @@
+{
+  "author_input": {
+    "$defs": {
+      "ApprovedGoal": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_command_id": {
+            "format": "uuid",
+            "title": "Approval Command Id",
+            "type": "string"
+          },
+          "conversation_id": {
+            "format": "uuid",
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "delivery_id": {
+            "format": "uuid",
+            "title": "Delivery Id",
+            "type": "string"
+          },
+          "offer": {
+            "$ref": "#/$defs/GoalOffer"
+          },
+          "offer_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Offer Sha256",
+            "type": "string"
+          },
+          "owner_principal": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Owner Principal",
+            "type": "string"
+          }
+        },
+        "required": [
+          "delivery_id",
+          "conversation_id",
+          "owner_principal",
+          "approval_command_id",
+          "offer",
+          "offer_sha256"
+        ],
+        "title": "ApprovedGoal",
+        "type": "object"
+      },
+      "GoalOffer": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Acceptance Id",
+            "type": "string"
+          },
+          "allowed_paths": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Allowed Paths",
+            "type": "array"
+          },
+          "base_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Base Commit",
+            "type": "string"
+          },
+          "goal_ref": {
+            "$ref": "#/$defs/GoalRef"
+          },
+          "goal_text": {
+            "maxLength": 16000,
+            "minLength": 1,
+            "title": "Goal Text",
+            "type": "string"
+          },
+          "offer_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Offer Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Policy Revision",
+            "type": "string"
+          },
+          "repository_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "offer_id",
+          "goal_ref",
+          "title",
+          "goal_text",
+          "repository_id",
+          "base_commit",
+          "policy_revision",
+          "allowed_paths",
+          "acceptance_id"
+        ],
+        "title": "GoalOffer",
+        "type": "object"
+      },
+      "GoalRef": {
+        "additionalProperties": false,
+        "properties": {
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "project": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Project",
+            "type": "string"
+          },
+          "record_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "revision": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "record_id",
+          "revision",
+          "content_sha256"
+        ],
+        "title": "GoalRef",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "approved_goal": {
+        "$ref": "#/$defs/ApprovedGoal"
+      },
+      "operation_id": {
+        "format": "uuid",
+        "title": "Operation Id",
+        "type": "string"
+      },
+      "schema_version": {
+        "const": "birbcrew.execution.v1",
+        "default": "birbcrew.execution.v1",
+        "title": "Schema Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "operation_id",
+      "approved_goal"
+    ],
+    "title": "ExecutionInput",
+    "type": "object"
+  },
+  "author_result": {
+    "$defs": {
+      "Acceptance": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Acceptance Id",
+            "type": "string"
+          },
+          "evidence_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evidence Digest",
+            "type": "string"
+          },
+          "evidence_ref": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Evidence Ref",
+            "type": "string"
+          },
+          "outcome": {
+            "const": "passed",
+            "title": "Outcome",
+            "type": "string"
+          }
+        },
+        "required": [
+          "acceptance_id",
+          "outcome",
+          "evidence_digest",
+          "evidence_ref"
+        ],
+        "title": "Acceptance",
+        "type": "object"
+      },
+      "Candidate": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance": {
+            "$ref": "#/$defs/Acceptance"
+          },
+          "base_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Base Commit",
+            "type": "string"
+          },
+          "branch": {
+            "pattern": "^birbforge/pilot/[0-9a-f-]{36}$",
+            "title": "Branch",
+            "type": "string"
+          },
+          "changed_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Paths",
+            "type": "array"
+          },
+          "head_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Head Commit",
+            "type": "string"
+          },
+          "repository_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Repository Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository_id",
+          "base_commit",
+          "head_commit",
+          "branch",
+          "changed_paths",
+          "acceptance"
+        ],
+        "title": "Candidate",
+        "type": "object"
+      },
+      "CandidateResult": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate": {
+            "$ref": "#/$defs/Candidate"
+          },
+          "status": {
+            "const": "candidate",
+            "default": "candidate",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate"
+        ],
+        "title": "CandidateResult",
+        "type": "object"
+      },
+      "HaltedResult": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Reason",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "blocked",
+              "uncertain",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "reason"
+        ],
+        "title": "HaltedResult",
+        "type": "object"
+      }
+    },
+    "discriminator": {
+      "mapping": {
+        "blocked": "#/$defs/HaltedResult",
+        "cancelled": "#/$defs/HaltedResult",
+        "candidate": "#/$defs/CandidateResult",
+        "uncertain": "#/$defs/HaltedResult"
+      },
+      "propertyName": "status"
+    },
+    "oneOf": [
+      {
+        "$ref": "#/$defs/CandidateResult"
+      },
+      {
+        "$ref": "#/$defs/HaltedResult"
+      }
+    ]
+  },
+  "offer": {
+    "$defs": {
+      "GoalRef": {
+        "additionalProperties": false,
+        "properties": {
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "project": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Project",
+            "type": "string"
+          },
+          "record_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "revision": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "record_id",
+          "revision",
+          "content_sha256"
+        ],
+        "title": "GoalRef",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "acceptance_id": {
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+        "title": "Acceptance Id",
+        "type": "string"
+      },
+      "allowed_paths": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 20,
+        "minItems": 1,
+        "title": "Allowed Paths",
+        "type": "array"
+      },
+      "base_commit": {
+        "pattern": "^[0-9a-f]{40}$",
+        "title": "Base Commit",
+        "type": "string"
+      },
+      "goal_ref": {
+        "$ref": "#/$defs/GoalRef"
+      },
+      "goal_text": {
+        "maxLength": 16000,
+        "minLength": 1,
+        "title": "Goal Text",
+        "type": "string"
+      },
+      "offer_id": {
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+        "title": "Offer Id",
+        "type": "string"
+      },
+      "policy_revision": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Policy Revision",
+        "type": "string"
+      },
+      "repository_id": {
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+        "title": "Repository Id",
+        "type": "string"
+      },
+      "title": {
+        "maxLength": 200,
+        "minLength": 1,
+        "title": "Title",
+        "type": "string"
+      }
+    },
+    "required": [
+      "offer_id",
+      "goal_ref",
+      "title",
+      "goal_text",
+      "repository_id",
+      "base_commit",
+      "policy_revision",
+      "allowed_paths",
+      "acceptance_id"
+    ],
+    "title": "GoalOffer",
+    "type": "object"
+  },
+  "publish_input": {
+    "$defs": {
+      "Acceptance": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Acceptance Id",
+            "type": "string"
+          },
+          "evidence_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evidence Digest",
+            "type": "string"
+          },
+          "evidence_ref": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Evidence Ref",
+            "type": "string"
+          },
+          "outcome": {
+            "const": "passed",
+            "title": "Outcome",
+            "type": "string"
+          }
+        },
+        "required": [
+          "acceptance_id",
+          "outcome",
+          "evidence_digest",
+          "evidence_ref"
+        ],
+        "title": "Acceptance",
+        "type": "object"
+      },
+      "ApprovedGoal": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_command_id": {
+            "format": "uuid",
+            "title": "Approval Command Id",
+            "type": "string"
+          },
+          "conversation_id": {
+            "format": "uuid",
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "delivery_id": {
+            "format": "uuid",
+            "title": "Delivery Id",
+            "type": "string"
+          },
+          "offer": {
+            "$ref": "#/$defs/GoalOffer"
+          },
+          "offer_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Offer Sha256",
+            "type": "string"
+          },
+          "owner_principal": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Owner Principal",
+            "type": "string"
+          }
+        },
+        "required": [
+          "delivery_id",
+          "conversation_id",
+          "owner_principal",
+          "approval_command_id",
+          "offer",
+          "offer_sha256"
+        ],
+        "title": "ApprovedGoal",
+        "type": "object"
+      },
+      "Candidate": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance": {
+            "$ref": "#/$defs/Acceptance"
+          },
+          "base_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Base Commit",
+            "type": "string"
+          },
+          "branch": {
+            "pattern": "^birbforge/pilot/[0-9a-f-]{36}$",
+            "title": "Branch",
+            "type": "string"
+          },
+          "changed_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Paths",
+            "type": "array"
+          },
+          "head_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Head Commit",
+            "type": "string"
+          },
+          "repository_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Repository Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository_id",
+          "base_commit",
+          "head_commit",
+          "branch",
+          "changed_paths",
+          "acceptance"
+        ],
+        "title": "Candidate",
+        "type": "object"
+      },
+      "GoalOffer": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Acceptance Id",
+            "type": "string"
+          },
+          "allowed_paths": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Allowed Paths",
+            "type": "array"
+          },
+          "base_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Base Commit",
+            "type": "string"
+          },
+          "goal_ref": {
+            "$ref": "#/$defs/GoalRef"
+          },
+          "goal_text": {
+            "maxLength": 16000,
+            "minLength": 1,
+            "title": "Goal Text",
+            "type": "string"
+          },
+          "offer_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Offer Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Policy Revision",
+            "type": "string"
+          },
+          "repository_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "offer_id",
+          "goal_ref",
+          "title",
+          "goal_text",
+          "repository_id",
+          "base_commit",
+          "policy_revision",
+          "allowed_paths",
+          "acceptance_id"
+        ],
+        "title": "GoalOffer",
+        "type": "object"
+      },
+      "GoalRef": {
+        "additionalProperties": false,
+        "properties": {
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "project": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Project",
+            "type": "string"
+          },
+          "record_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "revision": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "record_id",
+          "revision",
+          "content_sha256"
+        ],
+        "title": "GoalRef",
+        "type": "object"
+      },
+      "ReviewReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Candidate Commit",
+            "type": "string"
+          },
+          "disposition": {
+            "enum": [
+              "approved",
+              "changes_requested",
+              "inconclusive"
+            ],
+            "title": "Disposition",
+            "type": "string"
+          },
+          "evidence_ref": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Evidence Ref",
+            "type": "string"
+          },
+          "findings_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Findings Digest",
+            "type": "string"
+          },
+          "reviewer": {
+            "const": "claude-cli",
+            "default": "claude-cli",
+            "title": "Reviewer",
+            "type": "string"
+          },
+          "summary": {
+            "default": "Review details unavailable.",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_commit",
+          "disposition",
+          "findings_digest",
+          "evidence_ref"
+        ],
+        "title": "ReviewReceipt",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "approved_goal": {
+        "$ref": "#/$defs/ApprovedGoal"
+      },
+      "candidate": {
+        "$ref": "#/$defs/Candidate"
+      },
+      "operation_id": {
+        "format": "uuid",
+        "title": "Operation Id",
+        "type": "string"
+      },
+      "review": {
+        "$ref": "#/$defs/ReviewReceipt"
+      },
+      "schema_version": {
+        "const": "birbcrew.execution.v1",
+        "default": "birbcrew.execution.v1",
+        "title": "Schema Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "operation_id",
+      "approved_goal",
+      "candidate",
+      "review"
+    ],
+    "title": "PublicationInput",
+    "type": "object"
+  },
+  "publish_result": {
+    "$defs": {
+      "DraftReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "draft": {
+            "const": true,
+            "default": true,
+            "title": "Draft",
+            "type": "boolean"
+          },
+          "head_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Head Commit",
+            "type": "string"
+          },
+          "number": {
+            "exclusiveMinimum": 0,
+            "title": "Number",
+            "type": "integer"
+          },
+          "provider": {
+            "const": "github",
+            "default": "github",
+            "title": "Provider",
+            "type": "string"
+          },
+          "repository_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "draft_ready",
+            "default": "draft_ready",
+            "title": "Status",
+            "type": "string"
+          },
+          "url": {
+            "pattern": "^https://github.com/[^/]+/[^/]+/pull/[0-9]+$",
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository_id",
+          "head_commit",
+          "base_branch",
+          "number",
+          "url"
+        ],
+        "title": "DraftReceipt",
+        "type": "object"
+      },
+      "HaltedResult": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Reason",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "blocked",
+              "uncertain",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "reason"
+        ],
+        "title": "HaltedResult",
+        "type": "object"
+      }
+    },
+    "discriminator": {
+      "mapping": {
+        "blocked": "#/$defs/HaltedResult",
+        "cancelled": "#/$defs/HaltedResult",
+        "draft_ready": "#/$defs/DraftReceipt",
+        "uncertain": "#/$defs/HaltedResult"
+      },
+      "propertyName": "status"
+    },
+    "oneOf": [
+      {
+        "$ref": "#/$defs/DraftReceipt"
+      },
+      {
+        "$ref": "#/$defs/HaltedResult"
+      }
+    ]
+  },
+  "review_input": {
+    "$defs": {
+      "Acceptance": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Acceptance Id",
+            "type": "string"
+          },
+          "evidence_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evidence Digest",
+            "type": "string"
+          },
+          "evidence_ref": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Evidence Ref",
+            "type": "string"
+          },
+          "outcome": {
+            "const": "passed",
+            "title": "Outcome",
+            "type": "string"
+          }
+        },
+        "required": [
+          "acceptance_id",
+          "outcome",
+          "evidence_digest",
+          "evidence_ref"
+        ],
+        "title": "Acceptance",
+        "type": "object"
+      },
+      "ApprovedGoal": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_command_id": {
+            "format": "uuid",
+            "title": "Approval Command Id",
+            "type": "string"
+          },
+          "conversation_id": {
+            "format": "uuid",
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "delivery_id": {
+            "format": "uuid",
+            "title": "Delivery Id",
+            "type": "string"
+          },
+          "offer": {
+            "$ref": "#/$defs/GoalOffer"
+          },
+          "offer_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Offer Sha256",
+            "type": "string"
+          },
+          "owner_principal": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Owner Principal",
+            "type": "string"
+          }
+        },
+        "required": [
+          "delivery_id",
+          "conversation_id",
+          "owner_principal",
+          "approval_command_id",
+          "offer",
+          "offer_sha256"
+        ],
+        "title": "ApprovedGoal",
+        "type": "object"
+      },
+      "Candidate": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance": {
+            "$ref": "#/$defs/Acceptance"
+          },
+          "base_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Base Commit",
+            "type": "string"
+          },
+          "branch": {
+            "pattern": "^birbforge/pilot/[0-9a-f-]{36}$",
+            "title": "Branch",
+            "type": "string"
+          },
+          "changed_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Paths",
+            "type": "array"
+          },
+          "head_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Head Commit",
+            "type": "string"
+          },
+          "repository_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Repository Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository_id",
+          "base_commit",
+          "head_commit",
+          "branch",
+          "changed_paths",
+          "acceptance"
+        ],
+        "title": "Candidate",
+        "type": "object"
+      },
+      "GoalOffer": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Acceptance Id",
+            "type": "string"
+          },
+          "allowed_paths": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Allowed Paths",
+            "type": "array"
+          },
+          "base_commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Base Commit",
+            "type": "string"
+          },
+          "goal_ref": {
+            "$ref": "#/$defs/GoalRef"
+          },
+          "goal_text": {
+            "maxLength": 16000,
+            "minLength": 1,
+            "title": "Goal Text",
+            "type": "string"
+          },
+          "offer_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Offer Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Policy Revision",
+            "type": "string"
+          },
+          "repository_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Repository Id",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "offer_id",
+          "goal_ref",
+          "title",
+          "goal_text",
+          "repository_id",
+          "base_commit",
+          "policy_revision",
+          "allowed_paths",
+          "acceptance_id"
+        ],
+        "title": "GoalOffer",
+        "type": "object"
+      },
+      "GoalRef": {
+        "additionalProperties": false,
+        "properties": {
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "project": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Project",
+            "type": "string"
+          },
+          "record_id": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+            "title": "Record Id",
+            "type": "string"
+          },
+          "revision": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "record_id",
+          "revision",
+          "content_sha256"
+        ],
+        "title": "GoalRef",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "approved_goal": {
+        "$ref": "#/$defs/ApprovedGoal"
+      },
+      "candidate": {
+        "$ref": "#/$defs/Candidate"
+      },
+      "operation_id": {
+        "format": "uuid",
+        "title": "Operation Id",
+        "type": "string"
+      },
+      "schema_version": {
+        "const": "birbcrew.execution.v1",
+        "default": "birbcrew.execution.v1",
+        "title": "Schema Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "operation_id",
+      "approved_goal",
+      "candidate"
+    ],
+    "title": "ReviewInput",
+    "type": "object"
+  },
+  "review_result": {
+    "additionalProperties": false,
+    "properties": {
+      "candidate_commit": {
+        "pattern": "^[0-9a-f]{40}$",
+        "title": "Candidate Commit",
+        "type": "string"
+      },
+      "disposition": {
+        "enum": [
+          "approved",
+          "changes_requested",
+          "inconclusive"
+        ],
+        "title": "Disposition",
+        "type": "string"
+      },
+      "evidence_ref": {
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$",
+        "title": "Evidence Ref",
+        "type": "string"
+      },
+      "findings_digest": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Findings Digest",
+        "type": "string"
+      },
+      "reviewer": {
+        "const": "claude-cli",
+        "default": "claude-cli",
+        "title": "Reviewer",
+        "type": "string"
+      },
+      "summary": {
+        "default": "Review details unavailable.",
+        "maxLength": 2000,
+        "minLength": 1,
+        "title": "Summary",
+        "type": "string"
+      }
+    },
+    "required": [
+      "candidate_commit",
+      "disposition",
+      "findings_digest",
+      "evidence_ref"
+    ],
+    "title": "ReviewReceipt",
+    "type": "object"
+  },
+  "schema_version": "birbcrew.execution.v1"
+}

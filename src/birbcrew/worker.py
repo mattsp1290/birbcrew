@@ -1,10 +1,9 @@
 import asyncio
 
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
-from temporalio.client import Client
 from temporalio.worker import Worker
 
-from birbcrew.config import settings
+from birbcrew.config import settings, temporal_client
 from birbcrew.telemetry import configure
 
 
@@ -14,7 +13,7 @@ async def main():
     from birbcrew.workflow import ConversationWorkflow
 
     config = settings()
-    client = await Client.connect(config.temporal_address, plugins=[PydanticAIPlugin()])
+    client = await temporal_client(plugins=[PydanticAIPlugin()])
     async with Worker(
         client,
         task_queue=config.task_queue,

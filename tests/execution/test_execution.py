@@ -1,0 +1,719 @@
+import asyncio
+import copy
+import hashlib
+import json
+import shutil
+import subprocess
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+from pydantic import ValidationError
+
+from birbcrew.execution import author, journal, publish
+from birbcrew.execution.contract import (
+    ApprovedGoal,
+    Candidate,
+    ExecutionInput,
+    GoalOffer,
+    PublicationInput,
+    ReviewReceipt,
+    digest,
+)
+from birbcrew.execution.policy import ExecutionSettings, Repository
+
+
+def git(path, *args):
+    return subprocess.check_output(["git", "-C", str(path), *args], text=True).strip()
+
+
+@pytest.fixture
+def setup(tmp_path, monkeypatch):
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    git(checkout, "init", "-b", "main")
+    git(
+        checkout,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@localhost",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "base",
+    )
+    git(checkout, "remote", "add", "origin", "git@github.com:example/factory.git")
+    repo = Repository(
+        repository_id="example/factory",
+        checkout=checkout,
+        remote="git@github.com:example/factory.git",
+        base_branch="main",
+        allowed_paths=("docs/guide.md",),
+        acceptance_id="docs-v1",
+        acceptance_command=("/usr/bin/true",),
+    )
+    config = ExecutionSettings(
+        repository=repo,
+        worktree_root=tmp_path / "work",
+        artifact_root=tmp_path / "artifacts",
+        codex=Path("/bin/false"),
+        claude=Path("/bin/false"),
+        git=Path(shutil.which("git")),
+        gh=Path("/bin/false"),
+        task_queue="test",
+        binding_revision=repo.revision,
+    )
+    config.artifact_root.mkdir()
+    text = "Write docs/guide.md."
+    offer = GoalOffer(
+        offer_id="test-goal",
+        goal_ref={
+            "project": "factory",
+            "record_id": "request-1",
+            "revision": "1",
+            "content_sha256": hashlib.sha256(text.encode()).hexdigest(),
+        },
+        title="Document pilot",
+        goal_text=text,
+        repository_id=repo.repository_id,
+        base_commit=git(checkout, "rev-parse", "HEAD"),
+        policy_revision=repo.revision,
+        allowed_paths=repo.allowed_paths,
+        acceptance_id=repo.acceptance_id,
+    )
+    request = ExecutionInput(
+        operation_id=uuid4(),
+        approved_goal=ApprovedGoal(
+            delivery_id=uuid4(),
+            conversation_id=uuid4(),
+            owner_principal="owner",
+            approval_command_id=uuid4(),
+            offer=offer,
+            offer_sha256=digest(offer),
+        ),
+    )
+    records = {}
+
+    async def claim(kind, identity, value):
+        key = (kind, identity)
+        fresh = key not in records
+        if fresh:
+            records[key] = (digest(value), {"phase": "claimed"})
+        checksum, state = records[key]
+        if checksum != digest(value):
+            raise ValueError("operation_payload_conflict")
+        return fresh, copy.deepcopy(state)
+
+    async def save(kind, identity, state):
+        key = (kind, identity)
+        if records[key][1]["phase"] != "terminal":
+            records[key] = (records[key][0], copy.deepcopy(state))
+
+    async def replace(kind, identity, expected, state):
+        key = (kind, identity)
+        if records[key][1] != expected:
+            return False
+        records[key] = (records[key][0], copy.deepcopy(state))
+        return True
+
+    async def receipt(kind, identity, expected):
+        row = records.get((kind, identity))
+        return copy.deepcopy(row[1].get("result")) if row and row[0] == digest(expected) else None
+
+    monkeypatch.setattr(journal, "receipt", receipt)
+    monkeypatch.setattr(journal, "claim", claim)
+    monkeypatch.setattr(journal, "save", save)
+    monkeypatch.setattr(journal, "replace", replace)
+    monkeypatch.setattr(author, "installation", lambda: config)
+    monkeypatch.setattr(publish, "installation", lambda: config)
+    monkeypatch.setattr(author.activity, "heartbeat", lambda *args: None)
+    return config, request, records
+
+
+class OwnedDaemon:
+    starts = 0
+    turns = []
+    lose_ack = False
+    work = None
+
+    def __init__(self, *_):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        pass
+
+    async def call(self, method, params):
+        if method == "thread/start":
+            self.__class__.work = Path(params["cwd"])
+            return {"thread": {"id": "owned-thread"}}
+        if method == "turn/start":
+            self.__class__.starts += 1
+            assert not params["sandboxPolicy"]["networkAccess"]
+            (self.work / "docs").mkdir(exist_ok=True)
+            (self.work / "docs/guide.md").write_text("# Approved guide\n")
+            self.__class__.turns = [{"id": "owned-turn", "status": "completed"}]
+            if self.lose_ack:
+                raise ConnectionError("lost_reply")
+            return {"turn": self.turns[0]}
+        if method == "thread/turns/list":
+            assert params["threadId"] == "owned-thread"
+            assert params["itemsView"] == "notLoaded"
+            return {"data": self.turns}
+        if method == "thread/resume":
+            assert params["excludeTurns"] is True
+            return {}
+        raise AssertionError(method)
+
+
+@pytest.fixture
+def daemon(monkeypatch):
+    OwnedDaemon.starts = 0
+    OwnedDaemon.turns = []
+    OwnedDaemon.lose_ack = False
+    monkeypatch.setattr(author, "Daemon", OwnedDaemon)
+    return OwnedDaemon
+
+
+def test_real_git_candidate_and_replay_without_second_writer(setup, daemon):
+    config, request, _ = setup
+    result = asyncio.run(author.author_goal(request.model_dump(mode="json")))
+    assert result["status"] == "candidate"
+    candidate = Candidate.model_validate(result["candidate"])
+    assert (
+        git(config.worktree(request), "show", f"{candidate.head_commit}:docs/guide.md")
+        == "# Approved guide"
+    )
+    assert candidate.base_commit == request.approved_goal.offer.base_commit
+    assert asyncio.run(author.author_goal(request.model_dump(mode="json"))) == result
+    assert daemon.starts == 1
+
+
+def test_lost_turn_reply_recovers_only_known_thread(setup, daemon):
+    _, request, _ = setup
+    daemon.lose_ack = True
+    raw = request.model_dump(mode="json")
+    assert asyncio.run(author.author_goal(raw))["status"] == "uncertain"
+    assert asyncio.run(author.author_goal(raw))["status"] == "candidate"
+    assert daemon.starts == 1
+
+
+def test_empty_known_thread_does_not_resubmit(setup, daemon):
+    _, request, records = setup
+    raw = request.model_dump(mode="json")
+    records[("author", str(request.operation_id))] = (
+        digest(raw),
+        {"phase": "submitting", "thread_id": "owned-thread"},
+    )
+    assert asyncio.run(author.author_goal(raw))["status"] == "uncertain"
+    assert daemon.starts == 0
+
+
+def test_scope_rejection_cannot_freeze_extra_file(setup, daemon, monkeypatch):
+    config, request, _ = setup
+    original = daemon.call
+
+    async def call(self, method, params):
+        value = await original(self, method, params)
+        if method == "turn/start":
+            (self.work / "outside.txt").write_text("not approved")
+        return value
+
+    monkeypatch.setattr(daemon, "call", call)
+    result = asyncio.run(author.author_goal(request.model_dump(mode="json")))
+    assert result["status"] == "blocked"
+    assert (
+        git(config.author_worktree(request), "rev-parse", "HEAD")
+        == request.approved_goal.offer.base_commit
+    )
+
+
+def test_changed_approval_or_execution_payload_rejected(setup, daemon):
+    _, request, _ = setup
+    raw = request.model_dump(mode="json")
+    raw["approved_goal"]["offer"]["goal_text"] = "Changed"
+    with pytest.raises(ValidationError):
+        ExecutionInput.model_validate(raw)
+    raw = request.model_dump(mode="json")
+    asyncio.run(author.author_goal(raw))
+    raw["approved_goal"]["owner_principal"] = "other"
+    with pytest.raises(ValueError, match="operation_payload_conflict"):
+        asyncio.run(author.author_goal(raw))
+
+
+def publication_request(request, candidate):
+    review = ReviewReceipt(
+        candidate_commit=candidate.head_commit,
+        disposition="approved",
+        findings_digest="a" * 64,
+        evidence_ref="execution/test/review",
+    )
+    return PublicationInput(**request.model_dump(), candidate=candidate, review=review)
+
+
+def test_publication_lost_reply_reconciles_without_second_create(setup, daemon, monkeypatch):
+    config, request, records = setup
+    candidate = Candidate.model_validate(
+        asyncio.run(author.author_goal(request.model_dump(mode="json")))["candidate"]
+    )
+    publication = publication_request(request, candidate)
+    raw = publication.model_dump(mode="json")
+    review_raw = {k: v for k, v in raw.items() if k != "review"}
+    records[("review", str(request.operation_id))] = (
+        digest(review_raw),
+        {"phase": "terminal", "result": publication.review.model_dump(mode="json")},
+    )
+    writes = []
+    pr = []
+    original_git = publish.git
+
+    async def fake_git(config, work, *args):
+        if args[0] == "fetch":
+            return ""
+        if args[0] == "ls-remote" and args[-1] == "refs/heads/main":
+            return candidate.base_commit + "\trefs/heads/main"
+        if args[0] == "ls-remote":
+            return candidate.head_commit + "\trefs/heads/" + candidate.branch if writes else ""
+        if args[0] == "push":
+            writes.append("push")
+            return ""
+        return await original_git(config, work, *args)
+
+    async def fake_command(argv, cwd, **kwargs):
+        if "list" in argv:
+            return json.dumps(pr)
+        writes.append("create")
+        pr.append(
+            {
+                "number": 1,
+                "url": "https://github.com/example/factory/pull/1",
+                "isDraft": True,
+                "headRefOid": candidate.head_commit,
+                "baseRefName": "main",
+                "state": "OPEN",
+                "body": publish.marker(publication),
+            }
+        )
+        raise RuntimeError("lost_reply")
+
+    monkeypatch.setattr(publish, "git", fake_git)
+    monkeypatch.setattr(publish, "command", fake_command)
+    assert asyncio.run(publish.publish_draft(raw))["status"] == "uncertain"
+    assert asyncio.run(publish.publish_draft(raw))["status"] == "draft_ready"
+    assert writes == ["push", "create"]
+
+
+def test_changed_candidate_cannot_use_prior_review(setup, daemon):
+    _, request, _ = setup
+    candidate = Candidate.model_validate(
+        asyncio.run(author.author_goal(request.model_dump(mode="json")))["candidate"]
+    )
+    raw = publication_request(request, candidate).model_dump(mode="json")
+    raw["candidate"]["head_commit"] = "f" * 40
+    with pytest.raises(ValidationError, match="review_not_approved"):
+        PublicationInput.model_validate(raw)
+
+
+def test_installer_cannot_allow_arbitrary_code(setup):
+    config, _, _ = setup
+    raw = config.repository.model_dump()
+    raw["allowed_paths"] = ("scripts/run.sh",)
+    with pytest.raises(ValidationError, match="documentation_paths"):
+        Repository.model_validate(raw)
+
+
+def test_stale_checkpoint_cannot_overwrite_candidate_receipt(setup):
+    _, request, records = setup
+    raw = request.model_dump(mode="json")
+    identity = str(request.operation_id)
+    asyncio.run(journal.claim("author", identity, raw))
+    starting = {"phase": "claimed"}
+    terminal = {"phase": "terminal", "result": {"status": "cancelled", "reason": "confirmed"}}
+    assert asyncio.run(journal.replace("author", identity, starting, terminal))
+    with pytest.raises(RuntimeError, match="checkpoint_owned_elsewhere"):
+        asyncio.run(author.advance(identity, starting, phase="running"))
+    assert records[("author", identity)][1] == terminal
+
+
+def test_interrupted_turn_with_delayed_absolute_writer_stays_uncertain(setup, daemon):
+    config, request, _ = setup
+    work = config.worktree(request)
+    work.mkdir(parents=True)
+    target = work / "late.txt"
+    daemon.turns = [{"id": "owned-turn", "status": "interrupted"}]
+    process = subprocess.Popen(
+        ["/bin/sh", "-c", 'cd /; sleep 3; printf late > "$1"', "probe", str(target)],
+        cwd=work,
+    )
+    try:
+        state = {"thread_id": "owned-thread", "turn_id": "owned-turn"}
+        result = asyncio.run(author.interrupt(config, state))
+        assert result == {"status": "uncertain", "reason": "cancellation_stop_unconfirmed"}
+        assert process.poll() is None
+        assert not target.exists()
+        process.wait(timeout=5)
+        assert target.read_text() == "late"
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def test_generated_contract_matches_committed_schema():
+    from birbcrew.execution.schema import schemas
+
+    path = Path(__file__).parents[2] / "contracts/execution.v1/schema.json"
+    assert json.loads(path.read_text()) == schemas()
+
+
+def test_subscription_command_strips_api_override(tmp_path, monkeypatch):
+    import sys
+
+    from birbcrew.execution.process import command
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-pass")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "must-not-pass")
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    text = asyncio.run(
+        command(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os; assert not any(k.startswith('ANTHROPIC_') or "
+                    "k.startswith('CLAUDE_CODE_USE_') for k in os.environ); print('subscription')"
+                ),
+            ],
+            tmp_path,
+            subscription=True,
+        )
+    )
+    assert text.strip() == "subscription"
+
+
+def test_existing_document_modification_keeps_porcelain_leading_column(setup, daemon):
+    config, request, _ = setup
+    checkout = config.repository.checkout
+    (checkout / "docs").mkdir()
+    (checkout / "docs/guide.md").write_text("Old guide\n")
+    git(checkout, "add", "docs/guide.md")
+    git(
+        checkout,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@localhost",
+        "commit",
+        "-m",
+        "existing document",
+    )
+    raw = request.model_dump(mode="json")
+    raw["approved_goal"]["offer"]["base_commit"] = git(checkout, "rev-parse", "HEAD")
+    raw["approved_goal"]["offer_sha256"] = digest(raw["approved_goal"]["offer"])
+    result = asyncio.run(author.author_goal(raw))
+    assert result["status"] == "candidate", result
+    assert result["candidate"]["changed_paths"] == ["docs/guide.md"]
+
+
+def test_late_author_writer_cannot_change_the_checked_candidate(
+    setup, daemon, tmp_path, monkeypatch
+):
+    import sys
+
+    config, request, _ = setup
+    signal = tmp_path / "check-started"
+    done = tmp_path / "late-write-done"
+    checker = tmp_path / "installed_check.py"
+    checker.write_text(
+        "import pathlib, time\n"
+        "document = pathlib.Path('docs/guide.md')\n"
+        "assert document.read_text() == '# Approved guide\\n'\n"
+        f"pathlib.Path({str(signal)!r}).touch()\n"
+        f"done = pathlib.Path({str(done)!r})\n"
+        "end = time.monotonic() + 5\n"
+        "while not done.exists():\n"
+        "    assert time.monotonic() < end\n"
+        "    time.sleep(0.02)\n"
+        "assert document.read_text() == '# Approved guide\\n'\n"
+        "print('exact snapshot checked')\n"
+    )
+    updated_repo = config.repository.model_copy(
+        update={"acceptance_command": (sys.executable, str(checker))}
+    )
+    config = config.model_copy(
+        update={"repository": updated_repo, "binding_revision": updated_repo.revision}
+    )
+    monkeypatch.setattr(author, "installation", lambda: config)
+    raw = request.model_dump(mode="json")
+    raw["approved_goal"]["offer"]["policy_revision"] = updated_repo.revision
+    raw["approved_goal"]["offer_sha256"] = digest(raw["approved_goal"]["offer"])
+    scratch = config.author_worktree(request)
+    process = subprocess.Popen(
+        [
+            "/bin/sh",
+            "-c",
+            'cd /; while [ ! -f "$2" ]; do sleep 0.02; done; printf untested > "$1"; touch "$3"',
+            "probe",
+            str(scratch / "docs/guide.md"),
+            str(signal),
+            str(done),
+        ],
+        cwd=tmp_path,
+    )
+    try:
+        result = asyncio.run(author.author_goal(raw))
+        assert result["status"] == "candidate", result
+        process.wait(timeout=5)
+        assert (scratch / "docs/guide.md").read_text() == "untested"
+        candidate = result["candidate"]
+        assert (
+            git(config.worktree(request), "show", f"{candidate['head_commit']}:docs/guide.md")
+            == "# Approved guide"
+        )
+        assert git(config.worktree(request), "status", "--porcelain") == ""
+        assert (
+            candidate["acceptance"]["evidence_digest"]
+            == hashlib.sha256(b"exact snapshot checked\n").hexdigest()
+        )
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def test_document_snapshot_rejects_symlink_and_observed_drift(tmp_path, monkeypatch):
+    import os
+
+    from birbcrew.execution.snapshot import document_bytes
+
+    outside = tmp_path / "outside"
+    outside.write_text("outside")
+    root = tmp_path / "work"
+    root.mkdir()
+    (root / "guide.md").symlink_to(outside)
+    with pytest.raises(OSError):
+        document_bytes(root, "guide.md")
+    (root / "guide.md").unlink()
+    os.mkfifo(root / "guide.md")
+    with pytest.raises(ValueError, match="document_invalid"):
+        document_bytes(root, "guide.md")
+    (root / "guide.md").unlink()
+    (root / "guide.md").write_text("before")
+    original = os.fstat
+    calls = 0
+
+    def change_during_read(descriptor):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            (root / "guide.md").write_text("after with different bytes")
+        return original(descriptor)
+
+    monkeypatch.setattr(os, "fstat", change_during_read)
+    with pytest.raises(ValueError, match="changed_during_snapshot"):
+        document_bytes(root, "guide.md")
+
+
+def test_author_git_redirect_is_rejected_before_trusted_git_executes(setup, daemon, monkeypatch):
+    config, request, _ = setup
+    original = daemon.call
+    invoked = config.artifact_root / "untrusted-git-command"
+    fake = config.artifact_root / "fake.git"
+    git(config.repository.checkout, "init", "--bare", str(fake))
+    git(fake, "config", "core.fsmonitor", f"touch {invoked}")
+
+    async def call(self, method, params):
+        result = await original(self, method, params)
+        if method == "turn/start":
+            (self.work / ".git").write_text(f"gitdir: {fake}\n")
+        return result
+
+    monkeypatch.setattr(daemon, "call", call)
+    result = asyncio.run(author.author_goal(request.model_dump(mode="json")))
+    assert result["status"] == "blocked"
+    assert not invoked.exists()
+    assert not config.worktree(request).exists()
+
+
+def test_trusted_git_disables_fsmonitor_and_ignores_repointed_marker(setup, daemon):
+    from birbcrew.execution.process import git as trusted_git
+
+    config, request, _ = setup
+    assert asyncio.run(author.author_goal(request.model_dump(mode="json")))["status"] == "candidate"
+    invoked = config.artifact_root / "fsmonitor-invoked"
+    script = config.artifact_root / "fsmonitor.sh"
+    script.write_text(f"#!/bin/sh\ntouch '{invoked}'\n")
+    script.chmod(0o700)
+    git(config.repository.checkout, "config", "core.fsmonitor", str(script))
+    work = config.worktree(request)
+    assert asyncio.run(trusted_git(config, work, "status", "--porcelain")) == ""
+    assert not invoked.exists()
+    saved = config.artifact_root / "saved-marker"
+    (work / ".git").rename(saved)
+    (work / ".git").symlink_to(saved)
+    with pytest.raises(OSError):
+        asyncio.run(trusted_git(config, work, "status", "--porcelain"))
+
+
+@pytest.mark.parametrize("status", ["interrupted", "failed"])
+def test_noncompleted_author_is_uncertain_without_terminal_receipt(
+    setup, daemon, monkeypatch, status
+):
+    _, request, records = setup
+    original = daemon.call
+
+    async def call(self, method, params):
+        value = await original(self, method, params)
+        if method == "turn/start":
+            self.__class__.turns[0]["status"] = status
+        return value
+
+    monkeypatch.setattr(daemon, "call", call)
+    result = asyncio.run(author.author_goal(request.model_dump(mode="json")))
+    assert result == {"status": "uncertain", "reason": "author_turn_stop_unconfirmed"}
+    assert "result" not in records[("author", str(request.operation_id))][1]
+
+
+def test_daemon_bad_reply_remains_reconcilable_without_second_turn(setup, daemon, monkeypatch):
+    _, request, records = setup
+    original = daemon.call
+    malformed = True
+
+    async def call(self, method, params):
+        if method == "thread/turns/list" and malformed:
+            raise ValueError("daemon_message_too_large")
+        return await original(self, method, params)
+
+    monkeypatch.setattr(daemon, "call", call)
+    raw = request.model_dump(mode="json")
+    assert asyncio.run(author.author_goal(raw))["status"] == "uncertain"
+    assert "result" not in records[("author", str(request.operation_id))][1]
+    malformed = False
+    assert asyncio.run(author.author_goal(raw))["status"] == "candidate"
+    assert daemon.starts == 1
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "ghp_" + "a" * 36,
+        "github_pat_" + "a" * 82,
+        "sk-ant-api03-" + "a" * 80,
+        "sk-proj-" + "a" * 60,
+        "xoxb-" + "1" * 30,
+        "AKIA" + "A" * 16,
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.abcdefghijklmnop",
+        "AGE-SECRET-KEY-" + "A" * 58,
+    ],
+)
+def test_credential_formats_cannot_enter_candidate(setup, daemon, monkeypatch, secret):
+    config, request, _ = setup
+    original = daemon.call
+
+    async def call(self, method, params):
+        value = await original(self, method, params)
+        if method == "turn/start":
+            (self.work / "docs/guide.md").write_text("# Guide\n" + secret)
+        return value
+
+    monkeypatch.setattr(daemon, "call", call)
+    assert asyncio.run(author.author_goal(request.model_dump(mode="json")))["status"] == "blocked"
+    assert not config.worktree(request).exists()
+
+
+def test_publication_bad_readback_after_create_stays_reconcilable(setup, daemon, monkeypatch):
+    config, request, records = setup
+    candidate = Candidate.model_validate(
+        asyncio.run(author.author_goal(request.model_dump(mode="json")))["candidate"]
+    )
+    publication = publication_request(request, candidate)
+    raw = publication.model_dump(mode="json")
+    records[("review", str(request.operation_id))] = (
+        digest({k: v for k, v in raw.items() if k != "review"}),
+        {"phase": "terminal", "result": publication.review.model_dump(mode="json")},
+    )
+    writes = []
+    original = publish.git
+    bad_readback = True
+
+    async def fake_git(config, work, *args):
+        if args[0] == "fetch":
+            return ""
+        if args[0] == "ls-remote":
+            assert work == config.repository.checkout
+            if args[-1] == "refs/heads/main":
+                return candidate.base_commit + "\trefs/heads/main"
+            return candidate.head_commit + "\trefs/heads/" + candidate.branch if writes else ""
+        if args[0] == "push":
+            writes.append("push")
+            return ""
+        return await original(config, work, *args)
+
+    async def fake_command(argv, cwd, **kwargs):
+        if "create" in argv:
+            writes.append("create")
+            return "created"
+        if "create" not in writes:
+            return "[]"
+        if bad_readback:
+            return "{malformed"
+        return json.dumps(
+            [
+                {
+                    "number": 1,
+                    "url": "https://github.com/example/factory/pull/1",
+                    "isDraft": True,
+                    "headRefOid": candidate.head_commit,
+                    "baseRefName": "main",
+                    "state": "OPEN",
+                    "body": publish.marker(publication),
+                }
+            ]
+        )
+
+    monkeypatch.setattr(publish, "git", fake_git)
+    monkeypatch.setattr(publish, "command", fake_command)
+    assert asyncio.run(publish.publish_draft(raw))["status"] == "uncertain"
+    assert "result" not in records[("publish", str(request.operation_id))][1]
+    bad_readback = False
+    assert asyncio.run(publish.publish_draft(raw))["status"] == "draft_ready"
+    assert writes == ["push", "create"]
+
+
+def test_base_commit_must_be_on_installed_remote_branch(setup, daemon, monkeypatch, tmp_path):
+    config, request, _ = setup
+    candidate = Candidate.model_validate(
+        asyncio.run(author.author_goal(request.model_dump(mode="json")))["candidate"]
+    )
+    publication = publication_request(request, candidate)
+    checkout = config.repository.checkout
+    remote = tmp_path / "remote.git"
+    git(checkout, "init", "--bare", str(remote))
+    git(checkout, "push", str(remote), "main")
+    original = publish.git
+
+    async def local_remote(config, work, *args):
+        args = tuple(str(remote) if value == config.repository.remote else value for value in args)
+        return await original(config, work, *args)
+
+    monkeypatch.setattr(publish, "git", local_remote)
+    asyncio.run(publish.validate_base_branch(config, publication))
+    git(checkout, "checkout", "--orphan", "unrelated")
+    git(
+        checkout,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@localhost",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "unrelated",
+    )
+    git(checkout, "push", "--force", str(remote), "HEAD:main")
+    with pytest.raises(ValueError, match="candidate_base_not_on_target_branch"):
+        asyncio.run(publish.validate_base_branch(config, publication))
