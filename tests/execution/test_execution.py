@@ -271,6 +271,10 @@ def test_publication_lost_reply_reconciles_without_second_create(setup, daemon, 
     original_git = publish.git
 
     async def fake_git(config, work, *args):
+        if args[0] == "fetch":
+            return ""
+        if args[0] == "ls-remote" and args[-1] == "refs/heads/main":
+            return candidate.base_commit + "\trefs/heads/main"
         if args[0] == "ls-remote":
             return candidate.head_commit + "\trefs/heads/" + candidate.branch if writes else ""
         if args[0] == "push":
@@ -511,3 +515,205 @@ def test_document_snapshot_rejects_symlink_and_observed_drift(tmp_path, monkeypa
     monkeypatch.setattr(os, "fstat", change_during_read)
     with pytest.raises(ValueError, match="changed_during_snapshot"):
         document_bytes(root, "guide.md")
+
+
+def test_author_git_redirect_is_rejected_before_trusted_git_executes(setup, daemon, monkeypatch):
+    config, request, _ = setup
+    original = daemon.call
+    invoked = config.artifact_root / "untrusted-git-command"
+    fake = config.artifact_root / "fake.git"
+    git(config.repository.checkout, "init", "--bare", str(fake))
+    git(fake, "config", "core.fsmonitor", f"touch {invoked}")
+
+    async def call(self, method, params):
+        result = await original(self, method, params)
+        if method == "turn/start":
+            (self.work / ".git").write_text(f"gitdir: {fake}\n")
+        return result
+
+    monkeypatch.setattr(daemon, "call", call)
+    result = asyncio.run(author.author_goal(request.model_dump(mode="json")))
+    assert result["status"] == "blocked"
+    assert not invoked.exists()
+    assert not config.worktree(request).exists()
+
+
+def test_trusted_git_disables_fsmonitor_and_ignores_repointed_marker(setup, daemon):
+    from birbcrew.execution.process import git as trusted_git
+
+    config, request, _ = setup
+    assert asyncio.run(author.author_goal(request.model_dump(mode="json")))["status"] == "candidate"
+    invoked = config.artifact_root / "fsmonitor-invoked"
+    script = config.artifact_root / "fsmonitor.sh"
+    script.write_text(f"#!/bin/sh\ntouch '{invoked}'\n")
+    script.chmod(0o700)
+    git(config.repository.checkout, "config", "core.fsmonitor", str(script))
+    work = config.worktree(request)
+    assert asyncio.run(trusted_git(config, work, "status", "--porcelain")) == ""
+    assert not invoked.exists()
+    saved = config.artifact_root / "saved-marker"
+    (work / ".git").rename(saved)
+    (work / ".git").symlink_to(saved)
+    with pytest.raises(OSError):
+        asyncio.run(trusted_git(config, work, "status", "--porcelain"))
+
+
+@pytest.mark.parametrize("status", ["interrupted", "failed"])
+def test_noncompleted_author_is_uncertain_without_terminal_receipt(
+    setup, daemon, monkeypatch, status
+):
+    _, request, records = setup
+    original = daemon.call
+
+    async def call(self, method, params):
+        value = await original(self, method, params)
+        if method == "turn/start":
+            self.__class__.turns[0]["status"] = status
+        return value
+
+    monkeypatch.setattr(daemon, "call", call)
+    result = asyncio.run(author.author_goal(request.model_dump(mode="json")))
+    assert result == {"status": "uncertain", "reason": "author_turn_stop_unconfirmed"}
+    assert "result" not in records[("author", str(request.operation_id))][1]
+
+
+def test_daemon_bad_reply_remains_reconcilable_without_second_turn(setup, daemon, monkeypatch):
+    _, request, records = setup
+    original = daemon.call
+    malformed = True
+
+    async def call(self, method, params):
+        if method == "thread/turns/list" and malformed:
+            raise ValueError("daemon_message_too_large")
+        return await original(self, method, params)
+
+    monkeypatch.setattr(daemon, "call", call)
+    raw = request.model_dump(mode="json")
+    assert asyncio.run(author.author_goal(raw))["status"] == "uncertain"
+    assert "result" not in records[("author", str(request.operation_id))][1]
+    malformed = False
+    assert asyncio.run(author.author_goal(raw))["status"] == "candidate"
+    assert daemon.starts == 1
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "ghp_" + "a" * 36,
+        "github_pat_" + "a" * 82,
+        "sk-ant-api03-" + "a" * 80,
+        "sk-proj-" + "a" * 60,
+        "xoxb-" + "1" * 30,
+        "AKIA" + "A" * 16,
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.abcdefghijklmnop",
+        "AGE-SECRET-KEY-" + "A" * 58,
+    ],
+)
+def test_credential_formats_cannot_enter_candidate(setup, daemon, monkeypatch, secret):
+    config, request, _ = setup
+    original = daemon.call
+
+    async def call(self, method, params):
+        value = await original(self, method, params)
+        if method == "turn/start":
+            (self.work / "docs/guide.md").write_text("# Guide\n" + secret)
+        return value
+
+    monkeypatch.setattr(daemon, "call", call)
+    assert asyncio.run(author.author_goal(request.model_dump(mode="json")))["status"] == "blocked"
+    assert not config.worktree(request).exists()
+
+
+def test_publication_bad_readback_after_create_stays_reconcilable(setup, daemon, monkeypatch):
+    config, request, records = setup
+    candidate = Candidate.model_validate(
+        asyncio.run(author.author_goal(request.model_dump(mode="json")))["candidate"]
+    )
+    publication = publication_request(request, candidate)
+    raw = publication.model_dump(mode="json")
+    records[("review", str(request.operation_id))] = (
+        digest({k: v for k, v in raw.items() if k != "review"}),
+        {"phase": "terminal", "result": publication.review.model_dump(mode="json")},
+    )
+    writes = []
+    original = publish.git
+    bad_readback = True
+
+    async def fake_git(config, work, *args):
+        if args[0] == "fetch":
+            return ""
+        if args[0] == "ls-remote":
+            assert work == config.repository.checkout
+            if args[-1] == "refs/heads/main":
+                return candidate.base_commit + "\trefs/heads/main"
+            return candidate.head_commit + "\trefs/heads/" + candidate.branch if writes else ""
+        if args[0] == "push":
+            writes.append("push")
+            return ""
+        return await original(config, work, *args)
+
+    async def fake_command(argv, cwd, **kwargs):
+        if "create" in argv:
+            writes.append("create")
+            return "created"
+        if "create" not in writes:
+            return "[]"
+        if bad_readback:
+            return "{malformed"
+        return json.dumps(
+            [
+                {
+                    "number": 1,
+                    "url": "https://github.com/example/factory/pull/1",
+                    "isDraft": True,
+                    "headRefOid": candidate.head_commit,
+                    "baseRefName": "main",
+                    "state": "OPEN",
+                    "body": publish.marker(publication),
+                }
+            ]
+        )
+
+    monkeypatch.setattr(publish, "git", fake_git)
+    monkeypatch.setattr(publish, "command", fake_command)
+    assert asyncio.run(publish.publish_draft(raw))["status"] == "uncertain"
+    assert "result" not in records[("publish", str(request.operation_id))][1]
+    bad_readback = False
+    assert asyncio.run(publish.publish_draft(raw))["status"] == "draft_ready"
+    assert writes == ["push", "create"]
+
+
+def test_base_commit_must_be_on_installed_remote_branch(setup, daemon, monkeypatch, tmp_path):
+    config, request, _ = setup
+    candidate = Candidate.model_validate(
+        asyncio.run(author.author_goal(request.model_dump(mode="json")))["candidate"]
+    )
+    publication = publication_request(request, candidate)
+    checkout = config.repository.checkout
+    remote = tmp_path / "remote.git"
+    git(checkout, "init", "--bare", str(remote))
+    git(checkout, "push", str(remote), "main")
+    original = publish.git
+
+    async def local_remote(config, work, *args):
+        args = tuple(str(remote) if value == config.repository.remote else value for value in args)
+        return await original(config, work, *args)
+
+    monkeypatch.setattr(publish, "git", local_remote)
+    asyncio.run(publish.validate_base_branch(config, publication))
+    git(checkout, "checkout", "--orphan", "unrelated")
+    git(
+        checkout,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@localhost",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "unrelated",
+    )
+    git(checkout, "push", "--force", str(remote), "HEAD:main")
+    with pytest.raises(ValueError, match="candidate_base_not_on_target_branch"):
+        asyncio.run(publish.validate_base_branch(config, publication))

@@ -1,7 +1,19 @@
 import os
+import re
 import stat
 from contextlib import ExitStack
 from pathlib import Path
+
+SECRET_FORMATS = re.compile(
+    rb"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"
+    rb"|\bgh[pousr]_[A-Za-z0-9]{20,}"
+    rb"|\bgithub_pat_[A-Za-z0-9_]{20,}"
+    rb"|\bsk-(?:ant-[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{32,})"
+    rb"|\bxox[baprs]-[A-Za-z0-9-]{20,}"
+    rb"|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"
+    rb"|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    rb"|AGE-SECRET-KEY-[A-Z0-9]{40,}"
+)
 
 
 def document_bytes(root: Path, name: str) -> bytes:
@@ -39,6 +51,8 @@ def document_bytes(root: Path, name: str) -> bytes:
         if len(signatures) != 1 or len(content) != after.st_size:
             raise ValueError("candidate_changed_during_snapshot")
         content.decode("utf-8")
+        if SECRET_FORMATS.search(content):
+            raise ValueError("candidate_contains_credential_format")
         return content
 
 

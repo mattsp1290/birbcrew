@@ -59,6 +59,30 @@ async def existing_pr(config, request):
     ).model_dump(mode="json")
 
 
+async def validate_base_branch(config, request):
+    checkout = config.repository.checkout
+    remote = await git(
+        config,
+        checkout,
+        "ls-remote",
+        config.repository.remote,
+        f"refs/heads/{config.repository.base_branch}",
+    )
+    rows = remote.splitlines()
+    if len(rows) != 1:
+        raise ValueError("base_branch_unconfirmed")
+    tip, ref = rows[0].split()
+    if ref != f"refs/heads/{config.repository.base_branch}":
+        raise ValueError("base_branch_unconfirmed")
+    await git(config, checkout, "fetch", "--no-tags", config.repository.remote, tip)
+    try:
+        await git(
+            config, checkout, "merge-base", "--is-ancestor", request.candidate.base_commit, tip
+        )
+    except RuntimeError as error:
+        raise ValueError("candidate_base_not_on_target_branch") from error
+
+
 @activity.defn(name="birbcrew.publish_draft.v1")
 async def publish_draft(raw: dict) -> dict:
     request = PublicationInput.model_validate(raw)
@@ -69,6 +93,7 @@ async def publish_draft(raw: dict) -> dict:
     if "result" in state:
         return state["result"]
     work = config.worktree(request)
+    effects_started = not fresh
     try:
         if await git(
             config, work, "rev-parse", "HEAD"
@@ -86,7 +111,7 @@ async def publish_draft(raw: dict) -> dict:
             raise ValueError("review_not_producer_receipt")
         remote = await git(
             config,
-            work,
+            config.repository.checkout,
             "ls-remote",
             config.repository.remote,
             f"refs/heads/{request.candidate.branch}",
@@ -102,7 +127,9 @@ async def publish_draft(raw: dict) -> dict:
                     "status": "uncertain",
                     "reason": "publication_intent_requires_reconciliation",
                 }
+            await validate_base_branch(config, request)
             await journal.save("publish", identity, {"phase": "submitting"})
+            effects_started = True
             if not remote:
                 await git(
                     config,
@@ -146,6 +173,8 @@ async def publish_draft(raw: dict) -> dict:
     except asyncio.CancelledError:
         return {"status": "uncertain", "reason": "publication_cancellation_needs_readback"}
     except ValueError:
+        if effects_started:
+            return {"status": "uncertain", "reason": "publication_readback_requires_reconciliation"}
         result = {"status": "blocked", "reason": "publication_identity_conflict"}
     except Exception:
         return {"status": "uncertain", "reason": "publication_reply_missing"}

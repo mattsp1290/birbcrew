@@ -2,6 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from temporalio import activity
 from wsproto import ConnectionType, WSConnection
 from wsproto.events import AcceptConnection, CloseConnection, Ping, Request, TextMessage
 
@@ -32,6 +33,8 @@ class Daemon:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
+        if activity.in_activity():
+            activity.heartbeat()
         await self.send_event(Request(host="localhost", target="/"))
         async with asyncio.timeout(15):
             while True:
@@ -62,6 +65,8 @@ class Daemon:
         await self.send_event(TextMessage(data=json.dumps(value)))
 
     async def call(self, method: str, params: dict):
+        if activity.in_activity():
+            activity.heartbeat()
         self.sequence += 1
         identity = self.sequence
         await self.send({"id": identity, "method": method, "params": params})

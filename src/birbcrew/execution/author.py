@@ -6,8 +6,12 @@ from birbcrew.execution import journal
 from birbcrew.execution.contract import Candidate, CandidateResult, ExecutionInput
 from birbcrew.execution.daemon import Daemon
 from birbcrew.execution.policy import installation
-from birbcrew.execution.process import command, git
+from birbcrew.execution.process import command, git, git_output, register_worktree
 from birbcrew.execution.snapshot import document_bytes, write_document
+
+
+class CandidateRejected(ValueError):
+    pass
 
 
 async def advance(identity, state, **changes):
@@ -56,6 +60,13 @@ async def interrupt(config, state):
 
 
 async def freeze_candidate(config, request, work):
+    try:
+        return await snapshot_candidate(config, request, work)
+    except (ValueError, OSError) as error:
+        raise CandidateRejected("candidate_snapshot_rejected") from error
+
+
+async def snapshot_candidate(config, request, work):
     offer = request.approved_goal.offer
     if await git(config, work, "rev-parse", "HEAD") != offer.base_commit:
         raise ValueError("agent_changed_git_history")
@@ -81,6 +92,7 @@ async def freeze_candidate(config, request, work):
         str(frozen),
         offer.base_commit,
     )
+    await register_worktree(config, frozen)
     for name, content in documents.items():
         write_document(frozen, name, content)
     output = await command(list(config.repository.acceptance_command), frozen, timeout=60)
@@ -104,17 +116,7 @@ async def freeze_candidate(config, request, work):
     )
     head = await git(config, frozen, "rev-parse", "HEAD")
     for name, content in documents.items():
-        committed = await command(
-            [
-                str(config.git),
-                "-c",
-                "core.hooksPath=/dev/null",
-                "show",
-                "--no-textconv",
-                f"{head}:{name}",
-            ],
-            frozen,
-        )
+        committed = await git_output(config, frozen, "show", "--no-textconv", f"{head}:{name}")
         if committed.encode() != content:
             raise ValueError("committed_content_differs_from_checked_document")
     return Candidate(
@@ -161,7 +163,7 @@ async def author_goal(raw: dict) -> dict:
                 await git(config, config.repository.checkout, "remote", "get-url", "origin")
                 != config.repository.remote
             ):
-                raise ValueError("repository_origin_mismatch")
+                raise CandidateRejected("repository_origin_mismatch")
             await git(
                 config,
                 config.repository.checkout,
@@ -178,6 +180,8 @@ async def author_goal(raw: dict) -> dict:
                 str(work),
                 request.approved_goal.offer.base_commit,
             )
+            await register_worktree(config, work)
+            activity.heartbeat({"operation_id": identity, "phase": "connecting"})
             async with Daemon(config.codex) as client:
                 thread = await client.call(
                     "thread/start",
@@ -240,7 +244,7 @@ async def author_goal(raw: dict) -> dict:
                         break
                     await asyncio.sleep(1)
         if turn["status"] != "completed":
-            result = {"status": "blocked", "reason": "author_turn_not_completed"}
+            return {"status": "uncertain", "reason": "author_turn_stop_unconfirmed"}
         else:
             state = await advance(identity, state, phase="freezing")
             candidate = await freeze_candidate(config, request, work)
@@ -256,8 +260,12 @@ async def author_goal(raw: dict) -> dict:
         )
     except (TimeoutError, ConnectionError, RuntimeError):
         return {"status": "uncertain", "reason": "external_operation_requires_reconciliation"}
-    except (ValueError, OSError):
+    except CandidateRejected:
         result = {"status": "blocked", "reason": "candidate_or_identity_validation_failed"}
+    except (ValueError, OSError):
+        return {"status": "uncertain", "reason": "external_operation_requires_reconciliation"}
+    if result["status"] == "uncertain":
+        return result
     if not await journal.replace(
         "author", identity, state, {**state, "phase": "terminal", "result": result}
     ):
