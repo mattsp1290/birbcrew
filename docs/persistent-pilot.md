@@ -53,3 +53,13 @@ Run `uv run --group dev pytest` and `uv run --group dev ruff check src tests`. T
 Injected daemon and GitHub responses establish failure handling, not live provider or device acceptance. The persistent installation must separately prove the actual Codex and Claude subscription journey, exact draft PR, service recovery, and shared physical-phone/Mac controls. Fixture checks do not establish k3s candidate verification or native candidate isolation.
 
 Build the container with digest-pinned `PYTHON_IMAGE` (Python 3.13 Debian slim) and `UV_IMAGE` build arguments. The Dockerfile installs the frozen dependency lock under `/venv` and runs as UID/GID 10001. Runtime configuration and credentials are mounted privately and excluded from the build context.
+
+## Recent conversations
+
+Conversation listing orders owner-scoped results by persisted activity. Creation, new events and changed snapshots advance activity. Reads and replayed writes do not. The additive migration gives existing conversations the same initial timestamp; those ties sort by identity until new activity occurs. Temporal-only delivery progress and opening a conversation do not change this ordering. Clients may show the first five of the bounded list.
+
+## Independent review retry
+
+An owner can request another review only after a confirmed terminal inconclusive receipt. Numbered attempts retain the frozen candidate, original author receipt and earlier reviews. A specific Claude CLI usage-credit error can fall back once to Sonnet through the existing subscription. A valid rejection never triggers fallback. The English error classifier fails closed if the CLI changes its wording; check it when upgrading the installed CLI. Model labels in private evidence report what the CLI returned and are not independent model attestation.
+
+Worker loss or an interrupted claim does not establish a stopped reviewer. Unconfirmed attempts require operator reconciliation; do not manufacture a terminal receipt or blindly start another reviewer. Deploy the updated Crew activity worker before a Forge workflow that sends numbered attempts.

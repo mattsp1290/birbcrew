@@ -30,7 +30,7 @@ async def review_candidate(raw: dict) -> dict:
         )
         if (
             not prior
-            or ReviewReceipt.model_validate(prior).disposition != "inconclusive"
+            or not ReviewReceipt.model_validate(prior).can_retry
             or prior["candidate_commit"] != request.candidate.head_commit
             or ReviewReceipt.model_validate(prior).review_attempt != previous.review_attempt
         ):
@@ -45,6 +45,10 @@ async def review_candidate(raw: dict) -> dict:
             disposition="inconclusive",
             findings_digest="0" * 64,
             evidence_ref=f"execution/{identity}/review-interrupted",
+            summary=(
+                "Review termination is unconfirmed. "
+                "Supervisor recovery is required before another review."
+            ),
         ).model_dump(mode="json")
     work = config.worktree(request)
     disposition = "inconclusive"
@@ -128,7 +132,7 @@ async def review_candidate(raw: dict) -> dict:
                             name
                             for name in models
                             if re.fullmatch(r"claude-[a-zA-Z0-9.-]{1,100}", name)
-                        ]
+                        ][:3]
                         if isinstance(models, dict)
                         else [],
                     }
@@ -147,8 +151,19 @@ async def review_candidate(raw: dict) -> dict:
         disposition = (
             "approved" if verdict.approved and not verdict.findings else "changes_requested"
         )
+        reported_models = diagnostics[-1]["reported_models"]
+        model_label = (
+            "Claude CLI reported model: " + ", ".join(reported_models) + ". "
+            if reported_models
+            else f"Claude CLI model selection: {model}. "
+        )
         summary = (
-            "No blocking findings." if disposition == "approved" else "\n".join(verdict.findings)
+            model_label
+            + (
+                "No blocking findings."
+                if disposition == "approved"
+                else "\n".join(verdict.findings)
+            )
         )[:2000]
         error_code = None
     except (Exception, asyncio.CancelledError) as error:

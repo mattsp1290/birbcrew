@@ -53,6 +53,9 @@ def test_usage_failure_falls_back_once_and_replay_preserves_receipt(setup, daemo
     calls = provider(monkeypatch, [CommandFailure(True), verdict()])
     result = asyncio.run(review.review_candidate(request.model_dump(mode="json")))
     assert result["disposition"] == "approved"
+    assert result["summary"] == (
+        "Claude CLI reported model: claude-sonnet-5-5. No blocking findings."
+    )
     assert len(calls) == 2
     assert "--model" not in calls[0]
     assert calls[1][-2:] == ["--model", "sonnet"]
@@ -192,3 +195,42 @@ def test_publication_requires_selected_attempt_receipt(
     result = asyncio.run(publish.publish_draft(publication.model_dump(mode="json")))
     assert result["status"] == ("draft_ready" if selected_attempt == 1 else "blocked")
     assert len(network) == (1 if selected_attempt == 1 else 0)
+
+
+def test_claimed_review_remains_unconfirmed_and_cannot_start_another_review(
+    setup, daemon, monkeypatch
+):
+    _, request, records = prepare(setup, monkeypatch)
+    claimed = (digest(request.model_dump(mode="json")), {"phase": "claimed"})
+    records[("review", request.review_identity)] = claimed
+    calls = provider(monkeypatch, [])
+    result = asyncio.run(review.review_candidate(request.model_dump(mode="json")))
+    receipt = ReviewReceipt.model_validate(result)
+    assert receipt.disposition == "inconclusive"
+    assert not receipt.can_retry
+    assert "Supervisor recovery" in receipt.summary
+    assert records[("review", request.review_identity)] == claimed
+    with pytest.raises(ValueError, match="prior_inconclusive_review_required"):
+        asyncio.run(
+            review.review_candidate(
+                request.model_copy(update={"review_attempt": 1}).model_dump(mode="json")
+            )
+        )
+    assert calls == []
+    assert ("review", f"{request.operation_id}/review-1") not in records
+    assert daemon.starts == 1
+
+
+def test_legacy_review_receipt_wire_and_retryability():
+    legacy = {
+        "candidate_commit": "a" * 40,
+        "reviewer": "claude-cli",
+        "disposition": "inconclusive",
+        "findings_digest": "b" * 64,
+        "evidence_ref": "execution/old/review",
+        "summary": "Review details unavailable.",
+    }
+    assert ReviewReceipt.model_validate(legacy).can_retry
+    assert ReviewReceipt.model_validate(legacy).model_dump(mode="json") == legacy
+    interrupted = {**legacy, "findings_digest": "0" * 64}
+    assert not ReviewReceipt.model_validate(interrupted).can_retry

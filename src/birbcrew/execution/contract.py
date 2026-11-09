@@ -119,6 +119,11 @@ class ReviewReceipt(Record):
     evidence_ref: Identity
     summary: str = Field(default="Review details unavailable.", min_length=1, max_length=2000)
 
+    @property
+    def can_retry(self) -> bool:
+        # Interrupted claims use a zero digest because no terminal evidence exists.
+        return self.disposition == "inconclusive" and self.findings_digest != "0" * 64
+
 
 class PublicationInput(ReviewInput):
     review: ReviewReceipt
