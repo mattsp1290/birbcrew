@@ -54,7 +54,6 @@ class ExecutionSettings(Record):
     claude: Path
     git: Path
     gh: Path
-    lsof: Path = Path("/usr/sbin/lsof")
     task_queue: str
     binding_revision: Digest
     turn_timeout_seconds: int = Field(default=1800, ge=60, le=3600)
@@ -88,6 +87,9 @@ class ExecutionSettings(Record):
 
     def worktree(self, request: ExecutionInput) -> Path:
         return self.worktree_root / str(request.approved_goal.delivery_id)
+
+    def author_worktree(self, request: ExecutionInput) -> Path:
+        return self.worktree_root / f"{request.approved_goal.delivery_id}-author"
 
     def evidence(self, operation_id: str, kind: str, content: str) -> tuple[str, str]:
         from hashlib import sha256

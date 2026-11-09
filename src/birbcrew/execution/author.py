@@ -7,6 +7,7 @@ from birbcrew.execution.contract import Candidate, CandidateResult, ExecutionInp
 from birbcrew.execution.daemon import Daemon
 from birbcrew.execution.policy import installation
 from birbcrew.execution.process import command, git
+from birbcrew.execution.snapshot import document_bytes, write_document
 
 
 async def advance(identity, state, **changes):
@@ -33,7 +34,7 @@ async def turn_status(client, thread_id, turn_id):
     return matches[0]
 
 
-async def interrupt(config, state, work):
+async def interrupt(config, state):
     try:
         async with Daemon(config.codex) as client:
             await client.call(
@@ -49,14 +50,9 @@ async def interrupt(config, state, work):
                     "status"
                 ] == "inProgress":
                     await asyncio.sleep(1)
-        from birbcrew.execution.quiescence import confirmed_quiet
-
-        async with asyncio.timeout(60):
-            while not await confirmed_quiet(config, work):
-                await asyncio.sleep(1)
-        return {"status": "cancelled", "reason": "owned_turn_and_worktree_stopped"}
     except (Exception, asyncio.CancelledError):
-        return {"status": "uncertain", "reason": "cancellation_stop_unconfirmed"}
+        pass
+    return {"status": "uncertain", "reason": "cancellation_stop_unconfirmed"}
 
 
 async def freeze_candidate(config, request, work):
@@ -71,26 +67,33 @@ async def freeze_candidate(config, request, work):
     changed = tuple(sorted(line[3:] for line in names))
     if not changed or any(name not in offer.allowed_paths for name in changed):
         raise ValueError("candidate_scope_mismatch")
-    for name in changed:
-        path = work / name
-        if (
-            path.is_symlink()
-            or not path.is_file()
-            or path.stat().st_size > 65536
-            or not path.resolve().is_relative_to(work.resolve())
-            or any(parent.is_symlink() for parent in path.parents if parent != work.parent)
-            or path.stat().st_mode & 0o111
-        ):
-            raise ValueError("candidate_document_invalid")
-    output = await command(list(config.repository.acceptance_command), work, timeout=60)
+    documents = {name: document_bytes(work, name) for name in changed}
+    if any(document_bytes(work, name) != content for name, content in documents.items()):
+        raise ValueError("candidate_changed_during_snapshot")
+    frozen = config.worktree(request)
+    await git(
+        config,
+        config.repository.checkout,
+        "worktree",
+        "add",
+        "-b",
+        f"birbforge/pilot/{request.approved_goal.delivery_id}",
+        str(frozen),
+        offer.base_commit,
+    )
+    for name, content in documents.items():
+        write_document(frozen, name, content)
+    output = await command(list(config.repository.acceptance_command), frozen, timeout=60)
+    if any(document_bytes(frozen, name) != content for name, content in documents.items()):
+        raise ValueError("acceptance_changed_document")
     checksum, ref = config.evidence(str(request.operation_id), "acceptance", output)
-    await git(config, work, "add", "--", *changed)
-    entries = (await git(config, work, "ls-files", "--stage", "--", *changed)).splitlines()
+    await git(config, frozen, "add", "--", *changed)
+    entries = (await git(config, frozen, "ls-files", "--stage", "--", *changed)).splitlines()
     if len(entries) != len(changed) or any(not entry.startswith("100644 ") for entry in entries):
         raise ValueError("candidate_requires_regular_nonexecutable_files")
     await git(
         config,
-        work,
+        frozen,
         "-c",
         "user.name=Birbcrew",
         "-c",
@@ -99,8 +102,8 @@ async def freeze_candidate(config, request, work):
         "-m",
         offer.title,
     )
-    head = await git(config, work, "rev-parse", "HEAD")
-    for name in changed:
+    head = await git(config, frozen, "rev-parse", "HEAD")
+    for name, content in documents.items():
         committed = await command(
             [
                 str(config.git),
@@ -110,9 +113,9 @@ async def freeze_candidate(config, request, work):
                 "--no-textconv",
                 f"{head}:{name}",
             ],
-            work,
+            frozen,
         )
-        if committed.encode() != (work / name).read_bytes():
+        if committed.encode() != content:
             raise ValueError("committed_content_differs_from_checked_document")
     return Candidate(
         repository_id=offer.repository_id,
@@ -138,15 +141,19 @@ async def author_goal(raw: dict) -> dict:
     fresh, state = await journal.claim("author", identity, raw)
     if "result" in state:
         return state["result"]
-    work = config.worktree(request)
+    work = config.author_worktree(request)
     try:
         if fresh:
-            if work.exists() or await git(
-                config,
-                config.repository.checkout,
-                "branch",
-                "--list",
-                f"birbforge/pilot/{request.approved_goal.delivery_id}",
+            if (
+                work.exists()
+                or config.worktree(request).exists()
+                or await git(
+                    config,
+                    config.repository.checkout,
+                    "branch",
+                    "--list",
+                    f"birbforge/pilot/{request.approved_goal.delivery_id}",
+                )
             ):
                 return {"status": "uncertain", "reason": "external_work_exists_without_receipt"}
             config.worktree_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -167,8 +174,7 @@ async def author_goal(raw: dict) -> dict:
                 config.repository.checkout,
                 "worktree",
                 "add",
-                "-b",
-                f"birbforge/pilot/{request.approved_goal.delivery_id}",
+                "--detach",
                 str(work),
                 request.approved_goal.offer.base_commit,
             )
@@ -236,10 +242,6 @@ async def author_goal(raw: dict) -> dict:
         if turn["status"] != "completed":
             result = {"status": "blocked", "reason": "author_turn_not_completed"}
         else:
-            from birbcrew.execution.quiescence import confirmed_quiet
-
-            if not await confirmed_quiet(config, work):
-                return {"status": "uncertain", "reason": "author_worktree_not_quiet"}
             state = await advance(identity, state, phase="freezing")
             candidate = await freeze_candidate(config, request, work)
             result = CandidateResult(candidate=candidate).model_dump(mode="json")
@@ -248,13 +250,13 @@ async def author_goal(raw: dict) -> dict:
         if details is None or not details.cancel_requested:
             raise
         result = (
-            await asyncio.shield(interrupt(config, state, work))
+            await asyncio.shield(interrupt(config, state))
             if "thread_id" in state
             else {"status": "uncertain", "reason": "cancellation_before_thread_ack"}
         )
     except (TimeoutError, ConnectionError, RuntimeError):
         return {"status": "uncertain", "reason": "external_operation_requires_reconciliation"}
-    except ValueError:
+    except (ValueError, OSError):
         result = {"status": "blocked", "reason": "candidate_or_identity_validation_failed"}
     if not await journal.replace(
         "author", identity, state, {**state, "phase": "terminal", "result": result}

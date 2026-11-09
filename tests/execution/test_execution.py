@@ -226,7 +226,7 @@ def test_scope_rejection_cannot_freeze_extra_file(setup, daemon, monkeypatch):
     result = asyncio.run(author.author_goal(request.model_dump(mode="json")))
     assert result["status"] == "blocked"
     assert (
-        git(config.worktree(request), "rev-parse", "HEAD")
+        git(config.author_worktree(request), "rev-parse", "HEAD")
         == request.approved_goal.offer.base_commit
     )
 
@@ -346,7 +346,7 @@ def test_interrupted_turn_with_delayed_absolute_writer_stays_uncertain(setup, da
     )
     try:
         state = {"thread_id": "owned-thread", "turn_id": "owned-turn"}
-        result = asyncio.run(author.interrupt(config, state, work))
+        result = asyncio.run(author.interrupt(config, state))
         assert result == {"status": "uncertain", "reason": "cancellation_stop_unconfirmed"}
         assert process.poll() is None
         assert not target.exists()
@@ -390,7 +390,6 @@ def test_subscription_command_strips_api_override(tmp_path, monkeypatch):
     assert text.strip() == "subscription"
 
 
-
 def test_existing_document_modification_keeps_porcelain_leading_column(setup, daemon):
     config, request, _ = setup
     checkout = config.repository.checkout
@@ -413,3 +412,102 @@ def test_existing_document_modification_keeps_porcelain_leading_column(setup, da
     result = asyncio.run(author.author_goal(raw))
     assert result["status"] == "candidate", result
     assert result["candidate"]["changed_paths"] == ["docs/guide.md"]
+
+
+def test_late_author_writer_cannot_change_the_checked_candidate(
+    setup, daemon, tmp_path, monkeypatch
+):
+    import sys
+
+    config, request, _ = setup
+    signal = tmp_path / "check-started"
+    done = tmp_path / "late-write-done"
+    checker = tmp_path / "installed_check.py"
+    checker.write_text(
+        "import pathlib, time\n"
+        "document = pathlib.Path('docs/guide.md')\n"
+        "assert document.read_text() == '# Approved guide\\n'\n"
+        f"pathlib.Path({str(signal)!r}).touch()\n"
+        f"done = pathlib.Path({str(done)!r})\n"
+        "end = time.monotonic() + 5\n"
+        "while not done.exists():\n"
+        "    assert time.monotonic() < end\n"
+        "    time.sleep(0.02)\n"
+        "assert document.read_text() == '# Approved guide\\n'\n"
+        "print('exact snapshot checked')\n"
+    )
+    updated_repo = config.repository.model_copy(
+        update={"acceptance_command": (sys.executable, str(checker))}
+    )
+    config = config.model_copy(
+        update={"repository": updated_repo, "binding_revision": updated_repo.revision}
+    )
+    monkeypatch.setattr(author, "installation", lambda: config)
+    raw = request.model_dump(mode="json")
+    raw["approved_goal"]["offer"]["policy_revision"] = updated_repo.revision
+    raw["approved_goal"]["offer_sha256"] = digest(raw["approved_goal"]["offer"])
+    scratch = config.author_worktree(request)
+    process = subprocess.Popen(
+        [
+            "/bin/sh",
+            "-c",
+            'cd /; while [ ! -f "$2" ]; do sleep 0.02; done; printf untested > "$1"; touch "$3"',
+            "probe",
+            str(scratch / "docs/guide.md"),
+            str(signal),
+            str(done),
+        ],
+        cwd=tmp_path,
+    )
+    try:
+        result = asyncio.run(author.author_goal(raw))
+        assert result["status"] == "candidate", result
+        process.wait(timeout=5)
+        assert (scratch / "docs/guide.md").read_text() == "untested"
+        candidate = result["candidate"]
+        assert (
+            git(config.worktree(request), "show", f"{candidate['head_commit']}:docs/guide.md")
+            == "# Approved guide"
+        )
+        assert git(config.worktree(request), "status", "--porcelain") == ""
+        assert (
+            candidate["acceptance"]["evidence_digest"]
+            == hashlib.sha256(b"exact snapshot checked\n").hexdigest()
+        )
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def test_document_snapshot_rejects_symlink_and_observed_drift(tmp_path, monkeypatch):
+    import os
+
+    from birbcrew.execution.snapshot import document_bytes
+
+    outside = tmp_path / "outside"
+    outside.write_text("outside")
+    root = tmp_path / "work"
+    root.mkdir()
+    (root / "guide.md").symlink_to(outside)
+    with pytest.raises(OSError):
+        document_bytes(root, "guide.md")
+    (root / "guide.md").unlink()
+    os.mkfifo(root / "guide.md")
+    with pytest.raises(ValueError, match="document_invalid"):
+        document_bytes(root, "guide.md")
+    (root / "guide.md").unlink()
+    (root / "guide.md").write_text("before")
+    original = os.fstat
+    calls = 0
+
+    def change_during_read(descriptor):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            (root / "guide.md").write_text("after with different bytes")
+        return original(descriptor)
+
+    monkeypatch.setattr(os, "fstat", change_during_read)
+    with pytest.raises(ValueError, match="changed_during_snapshot"):
+        document_bytes(root, "guide.md")
