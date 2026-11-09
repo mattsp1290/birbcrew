@@ -100,12 +100,14 @@ async def publish_draft(raw: dict) -> dict:
         ) != request.candidate.head_commit or await git(config, work, "status", "--porcelain"):
             raise ValueError("candidate_changed_after_review")
         author = await journal.receipt(
-            "author", identity, {k: v for k, v in raw.items() if k not in {"candidate", "review"}}
+            "author",
+            identity,
+            {k: v for k, v in raw.items() if k not in {"candidate", "review", "review_attempt"}},
         )
         if not author or author.get("candidate") != request.candidate.model_dump(mode="json"):
             raise ValueError("candidate_not_author_receipt")
         review = await journal.receipt(
-            "review", identity, {k: v for k, v in raw.items() if k != "review"}
+            "review", request.review_identity, {k: v for k, v in raw.items() if k != "review"}
         )
         if review != request.review.model_dump(mode="json"):
             raise ValueError("review_not_producer_receipt")
