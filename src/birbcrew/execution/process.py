@@ -50,4 +50,6 @@ async def command(
 
 
 async def git(config, cwd: Path, *args: str) -> str:
-    return (await command([str(config.git), "-c", "core.hooksPath=/dev/null", *args], cwd)).strip()
+    return (await command([str(config.git), "-c", "core.hooksPath=/dev/null", *args], cwd)).rstrip(
+        "\n"
+    )

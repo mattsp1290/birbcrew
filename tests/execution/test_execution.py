@@ -153,7 +153,7 @@ class OwnedDaemon:
         if method == "turn/start":
             self.__class__.starts += 1
             assert not params["sandboxPolicy"]["networkAccess"]
-            (self.work / "docs").mkdir()
+            (self.work / "docs").mkdir(exist_ok=True)
             (self.work / "docs/guide.md").write_text("# Approved guide\n")
             self.__class__.turns = [{"id": "owned-turn", "status": "completed"}]
             if self.lose_ack:
@@ -405,3 +405,27 @@ def test_terminal_label_cannot_hide_live_owned_shell_writer(tmp_path):
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
+
+
+def test_existing_document_modification_keeps_porcelain_leading_column(setup, daemon):
+    config, request, _ = setup
+    checkout = config.repository.checkout
+    (checkout / "docs").mkdir()
+    (checkout / "docs/guide.md").write_text("Old guide\n")
+    git(checkout, "add", "docs/guide.md")
+    git(
+        checkout,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@localhost",
+        "commit",
+        "-m",
+        "existing document",
+    )
+    raw = request.model_dump(mode="json")
+    raw["approved_goal"]["offer"]["base_commit"] = git(checkout, "rev-parse", "HEAD")
+    raw["approved_goal"]["offer_sha256"] = digest(raw["approved_goal"]["offer"])
+    result = asyncio.run(author.author_goal(raw))
+    assert result["status"] == "candidate", result
+    assert result["candidate"]["changed_paths"] == ["docs/guide.md"]
