@@ -334,27 +334,28 @@ def test_stale_checkpoint_cannot_overwrite_candidate_receipt(setup):
     assert records[("author", identity)][1] == terminal
 
 
-def test_cancel_requires_terminal_and_quiet_worktree(setup, daemon, monkeypatch):
-    from birbcrew.execution import quiescence
-
+def test_interrupted_turn_with_delayed_absolute_writer_stays_uncertain(setup, daemon):
     config, request, _ = setup
     work = config.worktree(request)
     work.mkdir(parents=True)
+    target = work / "late.txt"
     daemon.turns = [{"id": "owned-turn", "status": "interrupted"}]
-
-    async def noisy(*args):
-        raise TimeoutError("writer_not_stopped")
-
-    monkeypatch.setattr(quiescence, "confirmed_quiet", noisy)
-    state = {"thread_id": "owned-thread", "turn_id": "owned-turn"}
-    result = asyncio.run(author.interrupt(config, state, work))
-    assert result == {"status": "uncertain", "reason": "cancellation_stop_unconfirmed"}
-
-    async def quiet(*args):
-        return True
-
-    monkeypatch.setattr(quiescence, "confirmed_quiet", quiet)
-    assert asyncio.run(author.interrupt(config, state, work))["status"] == "cancelled"
+    process = subprocess.Popen(
+        ["/bin/sh", "-c", 'cd /; sleep 3; printf late > "$1"', "probe", str(target)],
+        cwd=work,
+    )
+    try:
+        state = {"thread_id": "owned-thread", "turn_id": "owned-turn"}
+        result = asyncio.run(author.interrupt(config, state, work))
+        assert result == {"status": "uncertain", "reason": "cancellation_stop_unconfirmed"}
+        assert process.poll() is None
+        assert not target.exists()
+        process.wait(timeout=5)
+        assert target.read_text() == "late"
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
 
 
 def test_generated_contract_matches_committed_schema():
@@ -388,23 +389,6 @@ def test_subscription_command_strips_api_override(tmp_path, monkeypatch):
     )
     assert text.strip() == "subscription"
 
-
-def test_terminal_label_cannot_hide_live_owned_shell_writer(tmp_path):
-    from birbcrew.execution.quiescence import no_open_handles
-
-    lsof = Path("/usr/sbin/lsof")
-    if not lsof.exists():
-        pytest.skip("requires lsof for the owned-worktree stop probe")
-    process = subprocess.Popen(["/bin/sh", "-c", "sleep 2; printf late > late.txt"], cwd=tmp_path)
-    try:
-        assert not asyncio.run(no_open_handles(lsof, tmp_path))
-        process.wait(timeout=5)
-        assert (tmp_path / "late.txt").read_text() == "late"
-        assert asyncio.run(no_open_handles(lsof, tmp_path))
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=5)
 
 
 def test_existing_document_modification_keeps_porcelain_leading_column(setup, daemon):
