@@ -195,3 +195,14 @@ async def operation_rows(cid: str) -> list[dict]:
                 "SELECT * FROM operations WHERE conversation_id=%s ORDER BY operation_id", (cid,)
             )
         ).fetchall()
+
+
+async def conversations_for_owner(owner: str) -> list[dict]:
+    async with await connect() as db:
+        rows = await (
+            await db.execute(
+                "SELECT id, revision FROM conversations WHERE owner=%s ORDER BY id LIMIT 100",
+                (owner,),
+            )
+        ).fetchall()
+        return rows

@@ -22,7 +22,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import TypeAdapter
 from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
 from temporalio.client import (
-    Client,
     WorkflowUpdateFailedError,
     WorkflowUpdateRPCTimeoutOrCancelledError,
 )
@@ -31,7 +30,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from birbcrew import store
-from birbcrew.config import settings
+from birbcrew.config import settings, temporal_client
 from birbcrew.domain import (
     Conversation,
     CreateConversation,
@@ -44,9 +43,7 @@ from birbcrew.domain import (
 
 @asynccontextmanager
 async def lifespan(app):
-    app.state.temporal = await Client.connect(
-        settings().temporal_address, plugins=[PydanticAIPlugin()]
-    )
+    app.state.temporal = await temporal_client(plugins=[PydanticAIPlugin()])
     yield
 
 
@@ -81,6 +78,8 @@ async def create(body: CreateConversation, principal: str = Depends(owner)):
     state = Conversation(id=str(body.id), owner=principal, context=settings().context)
     await store.create(state)
     existing = await authorized(body.id, principal)
+    if settings().mode == "approved-goal":
+        return {**existing, "mode": "approved-goal"}
     if existing["revision"] > 0:
         return existing
     state = Conversation.model_validate({k: v for k, v in existing.items() if k != "cursor"})
@@ -99,10 +98,18 @@ async def create(body: CreateConversation, principal: str = Depends(owner)):
 
 @app.get("/conversations/{cid}")
 async def get_state(cid: UUID, principal: str = Depends(owner)):
-    return await authorized(cid, principal)
+    value = await authorized(cid, principal)
+    return {**value, "mode": settings().mode} if settings().mode == "approved-goal" else value
+
+
+@app.get("/conversations")
+async def list_conversations(principal: str = Depends(owner)):
+    return await store.conversations_for_owner(principal)
 
 
 async def update(cid: UUID, principal: str, name: str, value):
+    if settings().mode == "approved-goal":
+        raise HTTPException(409, "approved_goal_mode_requires_delivery_command")
     state = await authorized(cid, principal)
     if state["phase"] in {"cancelled", "failed"}:
         raise HTTPException(409, "conversation_closed")
@@ -166,9 +173,12 @@ async def events(
         yield f"id: {cursor}\n" + encoder.encode(
             StateSnapshotEvent(
                 snapshot={
-                    k: v
-                    for k, v in initial.items()
-                    if k not in {"messages", "native_messages", "owner"}
+                    **({"mode": "approved-goal"} if settings().mode == "approved-goal" else {}),
+                    **{
+                        k: v
+                        for k, v in initial.items()
+                        if k not in {"messages", "native_messages", "owner"}
+                    },
                 }
             )
         )
