@@ -25,11 +25,13 @@ class Settings(BaseModel):
     token_hashes: dict[str, str]
     context: NoteContext
     evidence_dir: Path
-    mode: Literal["test", "live", "approved-goal"] = "test"
+    mode: Literal["test", "live", "approved-goal", "project-test", "project-live"] = "test"
     namespace: str = "default"
     temporal_tls: TemporalTLS | None = None
     interrupt_after_effect: bool = False
     live_attestation: Path | None = None
+    project_service_token_sha256: str | None = None
+    project_task_queue: str | None = None
 
 
 @cache

@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -50,13 +51,25 @@ def read_go_key() -> str:
 
 def model(evidence_path: Path) -> OpenAIChatModel:
     check_evidence(evidence_path)
-    return OpenAIChatModel(MODEL, provider=OpenAIProvider(base_url=ENDPOINT, api_key=read_go_key()))
+    return OpenAIChatModel(
+        MODEL,
+        provider=OpenAIProvider(
+            openai_client=AsyncOpenAI(base_url=ENDPOINT, api_key=read_go_key(), max_retries=0)
+        ),
+    )
 
 
 def model_settings(cid: str) -> dict:
     return {
         "extra_headers": {"User-Agent": "birbcrew-coding-proof/0.1.0", "x-opencode-session": cid},
         "max_tokens": 1200,
+    }
+
+
+def project_model_settings(cid: str) -> dict:
+    return {
+        "extra_headers": {"User-Agent": "birbcrew-project-chat/0.1.0", "x-opencode-session": cid},
+        "max_tokens": 4096,
     }
 
 

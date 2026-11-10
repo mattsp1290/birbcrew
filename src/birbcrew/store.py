@@ -60,7 +60,13 @@ async def snapshot(cid: str, owner: str) -> dict | None:
                 (cid, owner),
             )
         ).fetchone()
-        return {**row["snapshot"], "cursor": row["cursor"]} if row else None
+        if not row:
+            return None
+        result = {**row["snapshot"], "cursor": row["cursor"]}
+        if result.get("kind") == "project":
+            context = Conversation.model_validate(row["snapshot"]).project_context
+            result["context_sha256"] = context.digest
+        return result
 
 
 async def append_locked(db, cid: str, key: str, payload: dict) -> None:
@@ -138,7 +144,10 @@ async def save(state: Conversation) -> Conversation:
 
 
 def public_state(state: Conversation) -> dict:
-    return state.model_dump(mode="json", exclude={"native_messages", "messages", "owner"})
+    result = state.model_dump(mode="json", exclude={"native_messages", "messages", "owner"})
+    if state.kind == "project":
+        result["context_sha256"] = state.project_context.digest
+    return result
 
 
 async def events_after(cid: str, after: int) -> tuple[int, list[dict]]:
@@ -203,13 +212,21 @@ async def operation_rows(cid: str) -> list[dict]:
         ).fetchall()
 
 
-async def conversations_for_owner(owner: str) -> list[dict]:
+async def conversations_for_owner(owner: str, project_id: str | None = None) -> list[dict]:
     async with await connect() as db:
-        rows = await (
-            await db.execute(
-                "SELECT id, revision FROM conversations WHERE owner=%s "
-                "ORDER BY last_activity_at DESC, id LIMIT 100",
-                (owner,),
+        if project_id is None:
+            query = "SELECT id, revision FROM conversations WHERE owner=%s "
+            params = (owner,)
+        else:
+            query = (
+                "SELECT id, revision, snapshot->'project_context'->>'project_id' AS project_id, "
+                "snapshot->'project_context'->>'project_revision' AS project_revision "
+                "FROM conversations WHERE owner=%s "
+                "AND snapshot->>'kind'='project' "
+                "AND snapshot->'project_context'->>'project_id'=%s "
             )
+            params = (owner, project_id)
+        rows = await (
+            await db.execute(query + "ORDER BY last_activity_at DESC, id LIMIT 100", params)
         ).fetchall()
         return rows
