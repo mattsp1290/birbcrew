@@ -21,7 +21,7 @@ if(!database)throw new Error("Set BIRBCREW_TEST_DATABASE_URL to a disposable Pos
 async function providerFixture(engine:"pi"|"claude"|"codex") {
   const seen:string[]=[];
   if(engine === "codex") {
-    const fixture=await startProvider(()=>{},(_prompt,system,messages)=>{seen.push(system+messages);});
+    const fixture=await startProvider(()=>{},(_prompt,system,messages)=>{seen.push(system+messages);},"application");
     return {...fixture,seen};
   }
   const server=createServer(async(req,res)=>{

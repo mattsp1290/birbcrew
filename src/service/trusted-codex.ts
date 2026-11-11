@@ -14,7 +14,7 @@ import type { TrustedNativeInput } from "./trusted-native-types.ts";
 const hash=(value:string)=>createHash("sha256").update(value).digest("hex");
 const saved=z.strictObject({version:z.literal(1),engine:z.literal("codex-app-server"),threadId:z.uuid(),nativeId:z.uuid(),
   memberId:z.uuid(),ownerDigest:z.hash("sha256"),model:z.string(),requestId:z.uuid(),rollout:z.string(),bytes:z.int().positive(),sha256:z.hash("sha256")});
-const callSchema=z.object({threadId:z.uuid(),turnId:z.uuid(),callId:z.string().min(1).max(256),namespace:z.literal("mcp__birbcrew"),tool:z.string(),arguments:z.unknown()});
+const callSchema=z.object({threadId:z.uuid(),turnId:z.uuid(),callId:z.string().min(1).max(256),namespace:z.literal("application"),tool:z.string(),arguments:z.unknown()});
 
 export async function runTrustedCodex(input:TrustedNativeInput,profile:CodexProfile) {
   input={...input,signal:AbortSignal.any([input.signal,AbortSignal.timeout(170_000)])};
@@ -61,7 +61,7 @@ export async function runTrustedCodex(input:TrustedNativeInput,profile:CodexProf
   const decoder=new StringDecoder("utf8");
   let finished=false;
   let sequence=0,buffer="",bytes=0,failure:unknown,nativeId:string|undefined,turnId:string|undefined,text="";
-  const pending=new Map<number,{resolve:(value:any)=>void;reject:(reason:unknown)=>void;timer:ReturnType<typeof setTimeout>}>();
+  const pending=new Map<number,{method:string;resolve:(value:any)=>void;reject:(reason:unknown)=>void;timer:ReturnType<typeof setTimeout>}>();
   const completion=Promise.withResolvers<void>();completion.promise.catch(()=>{});
   const turnReady=Promise.withResolvers<string>();turnReady.promise.catch(()=>{});
   const results=new Map<string,{toolName:string;text:string;success:boolean}>();
@@ -71,7 +71,7 @@ export async function runTrustedCodex(input:TrustedNativeInput,profile:CodexProf
   const send=(value:unknown)=>{input.signal.throwIfAborted();if(!child.stdin.writable)throw new Error("Native transport closed");child.stdin.write(JSON.stringify(value)+"\n");};
   const request=(method:string,params:unknown)=>new Promise<any>((resolve,reject)=>{
     const id=++sequence,timer=setTimeout(()=>{pending.delete(id);const error=new Error("Native protocol deadline");reject(error);fail(error);},15000);
-    pending.set(id,{resolve,reject,timer});try{send({id,method,params});}catch(error){clearTimeout(timer);pending.delete(id);reject(error);}
+    pending.set(id,{method,resolve,reject,timer});try{send({id,method,params});}catch(error){clearTimeout(timer);pending.delete(id);reject(error);}
   });
   const closed=new Promise<void>(resolve=>child.once("close",()=>{resolve();if(!failure && !finished)fail(new Error("Native app-server exited"));}));
   child.once("error",fail);child.stdin.on("error",fail);
@@ -93,7 +93,7 @@ export async function runTrustedCodex(input:TrustedNativeInput,profile:CodexProf
       if(thread!==nativeId || turn!==await turnReady.promise)throw new Error("Native item identity mismatch");
       if(item.type==="dynamicToolCall") {
         const result=results.get(item.id);
-        if(!result || item.namespace!=="mcp__birbcrew" || item.tool!==result.toolName || item.success!==result.success ||
+        if(!result || item.namespace!=="application" || item.tool!==result.toolName || item.success!==result.success ||
             JSON.stringify(item.contentItems)!==JSON.stringify([{type:"inputText",text:result.text}]))throw new Error("Native result correlation mismatch");
         await input.onToolDelivered?.({nativeCallId:item.id,toolName:item.tool});results.delete(item.id);
       } else if(item.type==="agentMessage") {
@@ -113,7 +113,7 @@ export async function runTrustedCodex(input:TrustedNativeInput,profile:CodexProf
     while((at=buffer.indexOf("\n"))>=0){const line=buffer.slice(0,at);buffer=buffer.slice(at+1);if(!line)continue;
       try {const message=JSON.parse(line);if(message.method===undefined && typeof message.id==="number") {
         const p=pending.get(message.id);if(!p)throw new Error("Unexpected native RPC response");pending.delete(message.id);clearTimeout(p.timer);
-        if(message.error)p.reject(new Error("Native RPC rejected "+String(message.error.code)));else p.resolve(message.result);
+        if(message.error)p.reject(new Error("Native RPC rejected "+p.method+" "+String(message.error.code)));else p.resolve(message.result);
       }else handling=handling.then(()=>event(message)).catch(fail);
       }catch(error){fail(error);}
     }
@@ -121,7 +121,7 @@ export async function runTrustedCodex(input:TrustedNativeInput,profile:CodexProf
   try {
     await request("initialize",{clientInfo:{name:"birbcrew-trusted",version:"1"},capabilities:{experimentalApi:true,requestAttestation:false}});send({method:"initialized"});
     const options={model:profile.model,modelProvider:"trusted",cwd:scratch,approvalPolicy:"never",sandbox:"read-only",developerInstructions:"You are a BirbCrew coworker.\n"+input.context};
-    const thread=await request(prior?"thread/resume":"thread/start",prior?{...options,threadId:prior.nativeId}:{...options,environments:[],dynamicTools:[{type:"namespace",name:"mcp__birbcrew",description:"Only registered application tools",tools:input.tools.map(t=>({type:"function",name:t.name,description:t.description,inputSchema:t.inputSchema,deferLoading:false}))}]});
+    const thread=await request(prior?"thread/resume":"thread/start",prior?{...options,threadId:prior.nativeId}:{...options,environments:[],dynamicTools:[{type:"namespace",name:"application",description:"Only registered application tools",tools:input.tools.map(t=>({type:"function",name:t.name,description:t.description,inputSchema:t.inputSchema,deferLoading:false}))}]});
     nativeId=z.uuid().parse(thread.thread.id);if(prior && nativeId!==prior.nativeId)throw new Error("Native thread changed");
     const turn=await request("turn/start",{threadId:nativeId,environments:[],input:[{type:"text",text:input.text,text_elements:[]}]});
     turnId=z.uuid().parse(turn.turn.id);turnReady.resolve(turnId);

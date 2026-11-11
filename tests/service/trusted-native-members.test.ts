@@ -40,7 +40,7 @@ async function piProvider() {
 for(const engine of ["pi","claude","codex"] as const) {
   test(`${engine}: trusted registered read/effect, native result correlation, restore and scope rotation`,{timeout:120000},async t=>{
     const observed:string[][]=[];
-    const provider=engine==="pi"?await piProvider():engine==="claude"?await startClaudeFixtureProvider(()=>{},value=>{observed.push(value.tools);}):await startProvider();
+    const provider=engine==="pi"?await piProvider():engine==="claude"?await startClaudeFixtureProvider(()=>{},value=>{observed.push(value.tools);}):await startProvider(undefined,undefined,"application");
     t.after(provider.close);
     const model=engine==="pi"?"fixture-chat":engine==="claude"?"claude-sonnet-4-6":"gpt-5.4";
     const profile=await createProxyProfile({engine,model,protocol:engine==="pi"?"openai-chat-completions":engine==="claude"?"anthropic-messages":"openai-responses",
@@ -68,7 +68,7 @@ for(const engine of ["pi","claude","codex"] as const) {
       const seen=new Set<string>();
       const inspect=(entry:any)=>{
         if(entry.type === "namespace") {
-          assert.equal(entry.name,"mcp__birbcrew","Unexpected native namespace");
+          assert.equal(entry.name,"application","Unexpected native namespace");
           assert.ok(Array.isArray(entry.tools));for(const nested of entry.tools)inspect(nested);
         } else {
           assert.equal(entry.type,"function","Unexpected native built-in tool type");
