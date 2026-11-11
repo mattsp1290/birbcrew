@@ -55,3 +55,25 @@ The raw Temporal histories stay in the disposable evidence directory.
 Treat missing, failed, or inconclusive gates as unresolved. Source review cannot
 replace a live integration run. Human review of authentication and permissions
 is required before merge, even when all automated proof checks pass.
+
+### TypeScript history replay and traces
+
+Run `node tests/proof/replay-traces.mts` from the checkout against disposable
+PostgreSQL and Temporal instances using `BIRBCREW_DATABASE_URL` and
+`BIRBCREW_TEMPORAL_ADDRESS`. The probe uses local Claude and Pi providers and
+requires Linux `unshare --user --net`. It replaces the worker during two
+protected calls, completes both conversations and the Pi child, and exports
+their private histories into a temporary directory. It replays them with
+Temporal’s TypeScript Worker in a separate process with no network interfaces,
+checks that the provider request log and receipt ledger are unchanged, and
+removes the histories when it exits. To retain the redacted report with span
+correlations, history hashes, package integrity values and source revision, set
+`BIRBCREW_REPLAY_EVIDENCE` to an output file outside the checkout.
+
+Set `BIRBCREW_TRACE_FILE` on a member worker to write local OpenTelemetry
+spans to a private JSONL file. Model invocations, workflow segments, native
+restores and tool settlement carry the conversation, request, engine and
+Temporal run IDs. A Pi child also carries its child ID. Completed spans from
+the same conversation and request share a trace ID across processes and worker
+replacements. The exporter only records correlation IDs, span relationships,
+timing and status.

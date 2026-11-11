@@ -24,10 +24,10 @@ export async function runMemberWorker(store: MemberStore, address: string, profi
       workflowsPath: fileURLToPath(new URL("./workflow.ts", import.meta.url)),
     }));
     supervisor = await startSupervisor(configPath, stateDir);
-    const activities = memberActivities(store, supervisor, profiles, stateDir);
     for (const [profile, engines] of profiles) {
       for (const engine of engineSchema.options) {
         if (!engines[engine]) continue;
+        const activities = memberActivities(store, supervisor, profiles, stateDir, engine);
         workers.push(await Worker.create({
           connection, activities, taskQueue: activityQueue(engine, profile),
           ...(engine === "codex" && { maxConcurrentActivityTaskExecutions: 2 }),

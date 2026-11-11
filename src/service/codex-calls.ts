@@ -1,3 +1,4 @@
+import { traced } from "./telemetry.ts";
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";

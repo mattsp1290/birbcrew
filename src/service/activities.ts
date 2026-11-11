@@ -1,5 +1,6 @@
 import { nativeProposal } from "./deferral.ts";
 import type { z } from "zod";
+import { traced } from "./telemetry.ts";
 import type { Supervisor } from "./supervisor.ts";
 import type { MemberProfile } from "./profiles.ts";
 import { recoverClaudeProposal } from "./claude.ts";
@@ -38,7 +39,7 @@ export type MemberProfiles = ReadonlyMap<string, Readonly<Partial<Record<Convers
 export type PublicSegment = { kind: "complete"; text: string } | { kind: "pending"; approval: Approval } | { kind: "delegated"; children: ChildKey[] };
 export type Resume = { approval: Approval; outcome: ToolOutcome };
 
-export function memberActivities(store: MemberStore, supervisor: Supervisor, profiles: ReadonlyMap<string, MemberProfile>, stateDir: string) {
+export function memberActivities(store: MemberStore, supervisor: Supervisor, profiles: ReadonlyMap<string, MemberProfile>, stateDir: string, engine: Conversation["engine"]) {
   const ledger = new ApprovalStore(store.pool);
   const children = new ChildStore(store.pool);
   return {
@@ -55,10 +56,11 @@ export function memberActivities(store: MemberStore, supervisor: Supervisor, pro
         const { conversation: member, token, checkpoint } = recovery;
         const profile = profiles.get(member.profile);
         const tool = profile?.protectedTool ?? profile?.humanTool;
-        if (!profile?.claude || !tool) return null;
-        const result = await recoverClaudeProposal({
+        const claude = profile?.claude;
+        if (!claude || !tool) return null;
+        const result = await traced("native.restore", { ...request, engine, workflowRunId }, () => recoverClaudeProposal({
           threadId: request.conversationId, runId: request.requestId, text: request.text, checkpoint, signal,
-        }, { ...profile.claude, ownerId: member.ownerId, memberId: member.memberId, stateDir }, tool);
+        }, { ...claude, ownerId: member.ownerId, memberId: member.memberId, stateDir }, tool));
         const approval = await ledger.propose({ ownerId: request.ownerId, conversationId: request.conversationId,
           requestId: request.requestId, memberId: member.memberId, token, invocationId: request.requestId,
           nativeCallId: result.proposal.nativeCallId, toolName: result.proposal.name, arguments: result.proposal.arguments }, result.checkpoint, {recoverStopped:true});
@@ -115,7 +117,10 @@ export function memberActivities(store: MemberStore, supervisor: Supervisor, pro
       }
     },
     async settleApproval(approval: Approval) {
-      return await ledger.settleConfirmed(approval);
+      const workflowRunId = Context.current().info.workflowExecution!.runId;
+      return traced("tool.settle", { ...approval, engine, workflowRunId,
+        ...(approval.requestId !== approval.invocationId && { childId: approval.invocationId }) },
+      () => ledger.settleConfirmed(approval));
     },
     async executeTurn(request: TurnRequest, resume?: Resume | { children: true }): Promise<PublicSegment> {
       const ctx = Context.current();

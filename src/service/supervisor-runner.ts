@@ -1,6 +1,7 @@
 import { MemberStore } from "./store.ts";
 import { runLiveTool } from "./codex-live.ts";
 import { trustedProjectContext } from "./project-notes.ts";
+import { traced } from "./telemetry.ts";
 import { withNativeAdmission } from "./native-admission.ts";
 import type { Launch } from "./supervisor.ts";
 import { pathToFileURL } from "node:url";
@@ -55,9 +56,11 @@ process.once("message", async (command: AdmittedTurn) => {
           : delta => { process.send?.({ delta }); },
         checkpoint: command.checkpoint, continuation: command.continuation, signal,
         };
-        return member.engine === "codex" && tool
+        const scope = {...command.launch, engine:member.engine, workflowRunId:command.launch.execution.workflowRunId};
+        const invoke = () => traced("model.invoke",scope, () => member.engine === "codex" && tool
           ? runLiveTool(pool, command.launch, member, tool, input, value => driver(value, member))
-          : driver(input, member);
+          : driver(input, member));
+        return traced("workflow.segment",scope, () => command.checkpoint ? traced("native.restore",scope,invoke) : invoke());
       });
     } finally {
       await close?.();
