@@ -1,3 +1,4 @@
+import { nativeTranscriptBytes } from "./native-limits.ts";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath } from "node:fs/promises";
 import { codexExecutable } from "./codex-executable.ts";
@@ -58,7 +59,7 @@ export async function nativeHistory(home: string, scratch: string, nativeId: str
   const file = resolve(home, path);
   if (relative(home, file) !== path || await realpath(file) !== file) throw new Error("Invalid native rollout path");
   const stat = await lstat(file);
-  if (!stat.isFile() || stat.nlink !== 1 || !stat.size || stat.size > 32 * 1024 * 1024) throw new Error("Invalid native rollout file");
+  if (!stat.isFile() || stat.nlink !== 1 || !stat.size || stat.size > nativeTranscriptBytes) throw new Error("Invalid native rollout file");
   const bytes = await readFile(file);
   const lines = bytes.toString("utf8").trimEnd().split("\n");
   const first = JSON.parse(lines[0]), last = JSON.parse(lines[lines.length - 1]);

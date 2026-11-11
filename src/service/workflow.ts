@@ -1,7 +1,8 @@
 import {
-  allHandlersFinished, ApplicationFailure, CancellationScope, workflowInfo, condition, defineSignal, defineUpdate,
+  allHandlersFinished, ApplicationFailure, CancellationScope, workflowInfo, condition, continueAsNew, patched, defineSignal, defineUpdate,
   executeChild, getExternalWorkflowHandle, isCancellation, proxyActivities, setHandler
 } from "@temporalio/workflow";
+import { workflowGenerationTurnLimit } from "./limits.ts";
 import { acceptsChoice } from "./deferral.ts";
 import { submitSchema, type Conversation, type TurnRequest } from "./domain.ts";
 import type { Approval, Decision, Choice } from "./approvals.ts";
@@ -12,6 +13,7 @@ import type { MemberStore } from "./store.ts";
 import { activityQueue, memberTaskQueue } from "./queues.ts";
 
 export const submitTurn = defineUpdate<string, [TurnRequest]>("submitTurn");
+export const acceptTurn = defineUpdate<string, [TurnRequest]>("acceptTurn");
 
 const childDecision = defineSignal("childDecision");
 
@@ -52,6 +54,12 @@ export async function piChildWorkflow(key: ChildKey, profile: string): Promise<v
 }
 
 export async function memberConversation(conversation: Conversation): Promise<void> {
+  // Preserve pre-rollover histories: existing proof workflows still close after four turns.
+  const rollover = patched("bounded-conversations-v1");
+  const generationLimit = rollover ? workflowGenerationTurnLimit : 4;
+  const { conversationProgress, recordAcceptance, rejectAccepted } = proxyActivities<Pick<MemberStore, "conversationProgress" | "recordAcceptance" | "rejectAccepted">>({
+    taskQueue: memberTaskQueue, startToCloseTimeout: "20 seconds", scheduleToCloseTimeout: "60 seconds",
+  });
   const { executeTurn, decideApproval, settleApproval, cancelPending } = actions(activityQueue(conversation.engine, conversation.profile));
   const { reconcileTurn } = proxyActivities<Pick<MemberStore, "reconcileTurn">>({
     taskQueue: memberTaskQueue, startToCloseTimeout: "20 seconds",
@@ -66,10 +74,11 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   const { quarantineDelegation } = proxyActivities<Pick<ChildStore, "quarantineDelegation">>({
     taskQueue: memberTaskQueue, startToCloseTimeout: "15 seconds",
   });
-  const turns = new Map<string, { text: string; result: Promise<string> }>();
+  const turns = new Map<string, { text: string; durable: boolean; admission: Promise<void>; result: Promise<string> }>();
   let previous = Promise.resolve();
   let failed = false;
   let cancelled = false;
+  let inFlight = 0;
 
   const liveCalls = new Map<string,string>();
   const commands = proxyActivities<{
@@ -232,23 +241,63 @@ export async function memberConversation(conversation: Conversation): Promise<vo
       if (existing.text !== request.text) throw ApplicationFailure.nonRetryable("Request payload conflict");
       return request;
     }
-    if (failed || cancelled || turns.size >= 4) throw ApplicationFailure.nonRetryable("Conversation closed to new turns");
+    if (failed || cancelled) throw ApplicationFailure.nonRetryable("Conversation closed to new turns");
+    if (turns.size >= generationLimit) {
+      if (rollover) throw ApplicationFailure.nonRetryable("Conversation history is rolling over", "RolloverInProgress");
+      throw ApplicationFailure.nonRetryable("Conversation closed to new turns");
+    }
     return request;
   }
 
-  setHandler(submitTurn, (value) => {
+  async function persistAdmission(request: TurnRequest) {
+    await recordAcceptance(request);
+  }
+
+  function enqueue(value: TurnRequest, durable = rollover) {
     const request = validate(value);
     const existing = turns.get(request.requestId);
-    if (existing) return existing.result;
+    if (existing) {
+      if (durable && !existing.durable) {
+        existing.admission = persistAdmission(request);
+        void existing.admission.catch(() => {});
+        existing.durable = true;
+      }
+      return existing;
+    }
+    // Admission is persisted before acknowledging acceptTurn. History owns the queued
+    // execution; if an earlier turn prevents it from running, persist that outcome too.
+    const admission = durable ? persistAdmission(request) : Promise.resolve();
+    void admission.catch(() => {}); // Also observed by the queued runner and admission handler.
+    const entry = { text: request.text, durable, admission, result: undefined! as Promise<string> };
+    inFlight++;
     const result = previous.then(async () => {
-      if (failed || cancelled) throw ApplicationFailure.nonRetryable("Conversation closed");
+      await entry.admission;
+      if (failed || cancelled) {
+        if (entry.durable) await rejectAccepted(request, cancelled ? "predecessor_cancelled" : "predecessor_failed");
+        throw ApplicationFailure.nonRetryable("Accepted request did not execute because the conversation closed", "RequestRejected");
+      }
       return run(request);
     });
-    turns.set(request.requestId, { text: request.text, result });
-    previous = result.then(() => {}, () => { failed = true; });
-    return result;
+    entry.result = result;
+    turns.set(request.requestId, entry);
+    previous = result.then(() => { inFlight--; }, () => { inFlight--; failed = true; });
+    return entry;
+  }
+  setHandler(submitTurn, value => enqueue(value).result, { validator: validate });
+  // Completing admission separately from execution makes a rejection distinguishable
+  // from acceptance without waiting for a model or human decision.
+  setHandler(acceptTurn, async value => {
+    await enqueue(value, true).admission;
+    return value.requestId;
   }, { validator: validate });
 
-  await condition(() => (failed || cancelled || turns.size === 4) && allHandlersFinished());
+  await condition(() => (failed || cancelled || turns.size >= generationLimit) && inFlight === 0 && allHandlersFinished());
   if (failed) throw ApplicationFailure.nonRetryable("Member conversation failed");
+  if (rollover && !cancelled) {
+    const progress = await conversationProgress(conversation);
+    // Updates/signals can arrive while the progress activity runs. Never abandon a handler,
+    // pending approval, child batch or cancellation acknowledgement at the run boundary.
+    await condition(() => allHandlersFinished());
+    if (!cancelled && !failed && !progress.terminal) await continueAsNew<typeof memberConversation>(conversation);
+  }
 }

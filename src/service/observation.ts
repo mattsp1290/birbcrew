@@ -74,9 +74,9 @@ export function toolBootstrap(tool: OpenTool, includePreamble = true): Event[] {
   ];
 }
 
-type StoredSnapshot = PublicSnapshot & { complete: boolean };
+type StoredSnapshot = PublicSnapshot & { complete: boolean; turnLimit: number };
 
-const selection = `SELECT COALESCE(s.open_tools,'{}'::jsonb) AS "openTools", COALESCE(s.child_open_text,'{}'::jsonb) AS "childText", s.open_text AS "openText", COALESCE(s.history_complete, true) AS complete, COALESCE(s.cursor, 0) AS cursor, COALESCE(s.messages, '[]'::jsonb) AS messages,
+const selection = `SELECT c.turn_limit AS "turnLimit", COALESCE(s.open_tools,'{}'::jsonb) AS "openTools", COALESCE(s.child_open_text,'{}'::jsonb) AS "childText", s.open_text AS "openText", COALESCE(s.history_complete, true) AS complete, COALESCE(s.cursor, 0) AS cursor, COALESCE(s.messages, '[]'::jsonb) AS messages,
   COALESCE(s.state, jsonb_build_object('conversationId', c.conversation_id, 'memberId', m.member_id,
   'engine', m.engine, 'profile', m.profile, 'phase', 'idle', 'openStep', NULL, 'pendingApprovals', '[]'::jsonb)) AS state
   FROM birbcrew_ts.conversations c JOIN birbcrew_ts.members m USING (owner_id, member_id)
@@ -108,7 +108,7 @@ function logicalKey(change: Change) {
   }
 }
 
-function apply(snapshot: PublicSnapshot, change: Change): Event[] {
+function apply(snapshot: StoredSnapshot, change: Change): Event[] {
   const { messages, state } = snapshot;
   const frames: Event[] = [];
   function startStep(name: string) {
@@ -298,7 +298,7 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
           throw new MemberStoreError("conflict");
         }
         finishStep();
-        state.phase = change.cancelled ? "cancelled" : messages.filter(m => m.role === "user").length >= 4 ? "complete" : "idle";
+        state.phase = change.cancelled ? "cancelled" : messages.filter(m => m.role === "user").length >= snapshot.turnLimit ? "complete" : "idle";
         break;
       }
       const initialId = change.requestId + "/assistant";
@@ -312,7 +312,7 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
       }
       messages.push({ id, role: "assistant", content: change.text });
       finishStep();
-      state.phase = change.cancelled ? "cancelled" : messages.filter((m) => m.role === "user").length >= 4 ? "complete" : "idle";
+      state.phase = change.cancelled ? "cancelled" : messages.filter((m) => m.role === "user").length >= snapshot.turnLimit ? "complete" : "idle";
       break;
     }
     case "stopped":

@@ -77,7 +77,7 @@ test("one start wins, a lost acknowledgement replays, private context advances o
   await assert.rejects(store.markUncertain(claim), { code: "stale" });
   assert.deepEqual(await store.beginTurn(input, { ...execution, attempt: 2 }), { kind: "replay", reply: "one reply" });
   await assert.rejects(store.beginTurn({ ...input, text: input.text.trim() }), { code: "conflict" });
-  for (let i = 2; i <= 4; i++) {
+  for (let i = 2; i <= 128; i++) {
     const requestId = randomUUID();
     const next = await store.beginTurn({ ...key, requestId, text: "next" });
     assert.equal(next.kind, "start");
@@ -139,4 +139,73 @@ test("a committed stop request fences a late native argument frame", async () =>
   await pool.query("INSERT INTO birbcrew_ts.native_stop_requests (conversation_id,request_id,token) VALUES ($1,$2,$3)", ids);
   await assert.rejects(store.previewTool(claim, "late-call", true), { code: "stale" });
   assert.equal((await pool.query("SELECT 1 FROM birbcrew_ts.tool_previews WHERE conversation_id=$1", [key.conversationId])).rowCount, 0);
+});
+
+test("rollover preserves ordered receipts, first-run audit and complete AG-UI history", async () => {
+  const key = await newConversation("pi");
+  const requests: {requestId:string;text:string;ownerId:string;conversationId:string}[] = [];
+  const runs = [randomUUID(),randomUUID(),randomUUID()];
+  for (let i=0;i<12;i++) {
+    const request = {...key,requestId:randomUUID(),text:`turn ${i+1}`};
+    requests.push(request);
+    const started = await store.beginTurn(request,{workflowRunId:runs[Math.floor(i/4)],activityId:`turn-${i+1}`,attempt:1});
+    assert.equal(started.kind,"start");
+    if(started.kind!=="start")throw new Error("not started");
+    await store.commitTurn({...key,requestId:request.requestId,token:started.token,reply:`reply ${i+1}`,
+      checkpoint:{version:1,engine:"pi",state:{turns:i+1}}});
+  }
+  assert.equal(await store.workflowRunId(key),runs[0]);
+  assert.deepEqual(await store.conversationProgress(key),{turns:12,limit:128,terminal:false});
+  for(let i=0;i<12;i++) {
+    assert.equal(await store.committedReply(requests[i]),`reply ${i+1}`);
+    assert.deepEqual(await store.beginTurn(requests[i]),{kind:"replay",reply:`reply ${i+1}`});
+    await assert.rejects(store.committedReply({...requests[i],text:"changed"}),{code:"conflict"});
+  }
+  const {readSnapshot}=await import("../../src/service/observation.ts");
+  const snapshot=await readSnapshot(pool,key.ownerId,key.conversationId);
+  assert.equal(snapshot.state.phase,"idle");
+  assert.deepEqual(snapshot.messages.filter(m=>m.role==="user").map(m=>m.content),requests.map(r=>r.text));
+  assert.equal(snapshot.messages.length,24);
+  await assert.rejects(store.conversationProgress({...key,ownerId:randomUUID()}),{code:"not_found"});
+});
+
+test("legacy proof budget remains four and does not resurrect closed conversations", async () => {
+  const key=await newConversation("pi");
+  // Migration16 sets existing conversations to4 before changing only the default.
+  await pool.query("UPDATE birbcrew_ts.conversations SET turn_limit=4 WHERE conversation_id=$1",[key.conversationId]);
+  for(let i=0;i<4;i++) {
+    const request={...key,requestId:randomUUID(),text:`legacy ${i}`};
+    const started=await store.beginTurn(request);
+    assert.equal(started.kind,"start");
+    if(started.kind!=="start")throw new Error("not started");
+    await store.commitTurn({...key,requestId:request.requestId,token:started.token,reply:"ok",checkpoint:{version:1,engine:"pi",state:{}}});
+  }
+  assert.deepEqual(await store.conversationProgress(key),{turns:4,limit:4,terminal:true});
+  await assert.rejects(store.beginTurn({...key,requestId:randomUUID(),text:"fifth"}),{code:"input_limit"});
+  const {readSnapshot}=await import("../../src/service/observation.ts");
+  assert.equal((await readSnapshot(pool,key.ownerId,key.conversationId)).state.phase,"complete");
+});
+
+test("durable admissions preserve rejected queue outcomes without replay or identity reuse", async () => {
+  const key=await newConversation("pi");
+  const first={...key,requestId:randomUUID(),text:"pending first"};
+  const queued={...key,requestId:randomUUID(),text:"queued private prompt"};
+  await store.recordAcceptance(first);
+  await Promise.all([store.recordAcceptance(queued),store.recordAcceptance(queued)]);
+  await assert.rejects(store.recordAcceptance({...queued,text:"changed"}),{code:"conflict"});
+  assert.deepEqual(await store.requestStatus({...key,requestId:queued.requestId}),{requestId:queued.requestId,phase:"accepted"});
+  await store.rejectAccepted(queued,"predecessor_cancelled");
+  await store.rejectAccepted(queued,"predecessor_cancelled");
+  const fresh=new MemberStore(pool);
+  assert.deepEqual(await fresh.requestStatus({...key,requestId:queued.requestId}),{
+    requestId:queued.requestId,phase:"rejected",reason:"predecessor_cancelled"});
+  await assert.rejects(fresh.recordAcceptance(queued),{code:"request_rejected"});
+  await assert.rejects(fresh.committedReply(queued),{code:"request_rejected"});
+  await assert.rejects(fresh.beginTurn(queued),{code:"request_rejected"});
+  await assert.rejects(fresh.requestStatus({...key,ownerId:randomUUID(),requestId:queued.requestId}),{code:"not_found"});
+  const active=await store.beginTurn(first);
+  assert.equal(active.kind,"start");
+  await assert.rejects(store.rejectAccepted(first,"predecessor_failed"),{code:"conflict"});
+  const count=await pool.query("SELECT count(*)::int AS count FROM birbcrew_ts.turns WHERE conversation_id=$1",[key.conversationId]);
+  assert.equal(count.rows[0].count,1);
 });
