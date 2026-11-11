@@ -1,0 +1,25 @@
+[
+  {
+    "name": "@ag-ui/pi",
+    "version": "0.0.1",
+    "archive": "ag-ui-pi-0.0.1.tgz",
+    "integrity": "sha512-OImhsyC+QD8qa+PsABPAQOemUqXL6IG3msOK5t6L3gDd74ADHfFVlLXqGpFaRiJdBiJg4g8JYr/4y3itCHRTFA==",
+    "repository": "https://github.com/mattsp1290/ag-ui",
+    "revision": "ddc3279ad40b16b1e124c23738caf2eb1bc419b8",
+    "path": "integrations/community/pi/typescript",
+    "download": "https://github.com/mattsp1290/ag-ui/releases/download/pi-preview-ddc3279ad40b/ag-ui-pi-0.0.1.tgz",
+    "license": "MIT",
+    "notices": ["LICENSE", "PROVENANCE.md"]
+  },
+  {
+    "name": "@ag-ui/claude-agent-sdk",
+    "version": "0.0.8",
+    "archive": "claude-agent-sdk-0.0.8.tgz",
+    "integrity": "sha512-9tteUCCbLzPL004P10KHr2OLJUAbefqnNG2D+hhjqCS/8wC37u2PY2iV43UGXbaT3B44NzplD05o41r1/5GhYA==",
+    "repository": "https://github.com/mattsp1290/ag-ui",
+    "revision": "ed2c1d5b63299d3f08676a1418cc2640bbe55fd1",
+    "path": "integrations/claude-agent-sdk/typescript",
+    "license": "MIT",
+    "notices": ["LICENSE"]
+  }
+]
