@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { ChildStore } from "./children.ts";
 import { startSupervisor } from "./supervisor.ts";
+import { engineSchema } from "./domain.ts";
 import type { MemberProfile } from "./profiles.ts";
 import { memberActivities } from "./activities.ts";
 import { memberTaskQueue, activityQueue } from "./queues.ts";
@@ -23,9 +24,12 @@ export async function runMemberWorker(store: MemberStore, address: string, profi
     supervisor = await startSupervisor(configPath, stateDir);
     const activities = memberActivities(store, supervisor, profiles, stateDir);
     for (const [profile, engines] of profiles) {
-      for (const engine of ["claude", "pi"] as const) {
+      for (const engine of engineSchema.options) {
         if (!engines[engine]) continue;
-        workers.push(await Worker.create({ connection, activities, taskQueue: activityQueue(engine, profile) }));
+        workers.push(await Worker.create({
+          connection, activities, taskQueue: activityQueue(engine, profile),
+          ...(engine === "codex" && { maxConcurrentActivityTaskExecutions: 2 }),
+        }));
       }
     }
     if (workers.length === 1) throw new Error("No member engines configured");

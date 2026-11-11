@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import type { Pool } from "pg";
 import { z } from "zod";
 import type { MemberProfile } from "./profiles.ts";
-import { spawnSchema } from "./domain.ts";
+import { engineSchema, spawnSchema } from "./domain.ts";
 
 async function nativeVolume(directory: string) {
   if (!isAbsolute(directory)) throw new Error("Use an absolute private native state directory");
@@ -24,7 +24,13 @@ async function nativeVolume(directory: string) {
 }
 
 export async function registerProfiles(pool: Pool, config: ReadonlyMap<string, MemberProfile>, directory: string) {
-  const volume = [...config.values()].some((entry) => entry.claude) ? await nativeVolume(directory) : null;
+  const profiles = [...config.values()];
+  const volumes = {
+    pi: null,
+    claude: profiles.some((entry) => entry.claude) ? await nativeVolume(directory) : null,
+    codex: profiles.some((entry) => entry.codex) ? await nativeVolume(join(directory, "codex")) : null,
+  };
+  if (volumes.codex && volumes.codex === volumes.claude) throw new Error("Codex needs its own native state volume");
   const db = await pool.connect();
   try {
     await db.query("BEGIN");
@@ -32,9 +38,9 @@ export async function registerProfiles(pool: Pool, config: ReadonlyMap<string, M
       spawnSchema.shape.profile.parse(name);
       if (typeof entry.accountId !== "string" || !entry.accountId.trim()) throw new Error("Missing profile account identity");
       const digest = createHash("sha256").update(entry.accountId).digest();
-      for (const engine of ["claude", "pi"] as const) {
+      for (const engine of engineSchema.options) {
         if (!entry[engine]) continue;
-        const key = [name, engine, digest, engine === "claude" ? volume : null, entry.protectedTool ?? null, engine === "pi" && entry.delegateTask === true, entry.humanTool ?? null];
+        const key = [name, engine, digest, volumes[engine], entry.protectedTool ?? null, engine === "pi" && entry.delegateTask === true, entry.humanTool ?? null];
         await db.query(`INSERT INTO birbcrew_ts.profiles (name,engine,account_digest,volume,protected_tool,delegate_task,human_tool)
                         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, key);
         const match = await db.query(`SELECT 1 FROM birbcrew_ts.profiles WHERE name=$1 AND engine=$2

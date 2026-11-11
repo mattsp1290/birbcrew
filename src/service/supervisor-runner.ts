@@ -43,7 +43,7 @@ process.once("message", async (command: AdmittedTurn) => {
         ...(command.childResults && {childResults: command.childResults}),
         threadId: command.threadId, runId: command.runId, text: command.text,
         onToolArgs: (toolArgs, matchedOperation) => process.send?.({ toolArgs, matchedOperation }),
-        onText: (delta) => process.send?.({ delta }),
+        onText: (delta) => { process.send?.({ delta }); },
         checkpoint: command.checkpoint, continuation: command.continuation, signal,
       }, member));
     } finally {

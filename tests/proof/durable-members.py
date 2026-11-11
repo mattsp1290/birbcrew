@@ -77,7 +77,7 @@ def verify(directory, stack):
         "BIRBCREW_PROOF_REQUESTS": str(directory / "requests.jsonl"),
     }
     cli = [node, "src/service/cli.ts"]
-    run(node, "--test", "tests/service/store.test.ts", "tests/service/providers.test.ts",
+    run(node, "--test", "tests/service/codex-registration.test.ts", "tests/service/store.test.ts", "tests/service/providers.test.ts",
         "tests/service/approvals.test.ts", "tests/fixtures/engines/pi/protected.test.ts", "tests/fixtures/engines/pi/delegation.test.ts",
         "tests/fixtures/engines/claude/protected.test.ts",
         "tests/fixtures/engines/pi/durable.test.ts", "tests/fixtures/engines/claude/durable.test.ts", env=env)
@@ -122,7 +122,7 @@ def verify(directory, stack):
         services(runtime, split=True)
         def ready_profiles():
             result = subprocess.run(["docker", "exec", db, "psql", "-U", "postgres", "-d", "birbcrew_ts",
-                                     "-Atc", "SELECT count(*) FROM birbcrew_ts.profiles WHERE name='fixture.v1'"],
+                                     "-Atc", "SELECT count(*) FROM birbcrew_ts.profiles WHERE name='fixture.v1' AND engine IN ('claude','pi')"],
                                     text=True, capture_output=True)
             return result.returncode == 0 and result.stdout.strip() == "2"
         wait_until(ready_profiles, "worker profiles registered")
@@ -190,7 +190,7 @@ def verify(directory, stack):
         interrupted = {cases[0][0]["conversationId"], cases[2][0]["conversationId"]}
         assert interrupted.issubset(uncertain.stdout.splitlines())
         print("Both interrupted native calls stayed uncertain after worker replacement; neither was resubmitted.")
-        run(node, "--test", "tests/service/observation.test.ts", env=env)
+        run(node, "--test", "tests/service/observation.test.ts", "tests/service/codex-chat.test.ts", env=env)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ import type { ChildKey } from "./children.ts";
 import type { Approval } from "./approvals.ts";
 import { z } from "zod";
 
-export const engineSchema = z.enum(["pi", "claude"]);
+export const engineSchema = z.enum(["pi", "claude", "codex"]);
 export type Engine = z.infer<typeof engineSchema>;
 
 function boundedText(bytes: number) {

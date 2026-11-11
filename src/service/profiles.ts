@@ -1,3 +1,4 @@
+import { runCodexTurn } from "./codex.ts";
 import { runPiTurn, runPiSegment, runPiDelegatingSegment } from "./pi.ts";
 import { runClaudeTurn, runClaudeSegment } from "./claude.ts";
 import type { MemberProfiles, TurnDriver } from "./activities.ts";
@@ -9,12 +10,13 @@ export interface MemberProfile {
   humanTool?: "choose_next_step";
   protectedTool?: "record_work_item";
   pi?: Parameters<typeof runPiTurn>[1];
+  codex?: Omit<Parameters<typeof runCodexTurn>[1], "ownerId" | "memberId" | "stateDir">;
   claude?: Omit<Parameters<typeof runClaudeTurn>[1], "ownerId" | "memberId" | "stateDir" | "invocationGroup">;
 }
 
 export function memberProfiles(config: ReadonlyMap<string, MemberProfile>, stateDir: string, invocationGroup?: number): MemberProfiles {
   const profiles = new Map<string, Partial<Record<Engine, TurnDriver>>>();
-  for (const [name, { pi, claude, protectedTool, delegateTask, humanTool }] of config) {
+  for (const [name, { pi, claude, codex, protectedTool, delegateTask, humanTool }] of config) {
     const tool = protectedTool ?? humanTool;
     const drivers: Partial<Record<Engine, TurnDriver>> = {};
     if (pi) drivers.pi = async (input) => {
@@ -33,6 +35,13 @@ export function memberProfiles(config: ReadonlyMap<string, MemberProfile>, state
     if (claude) drivers.claude = async (input, { ownerId, memberId }) => {
       const options = { ...claude, ownerId, memberId, stateDir, invocationGroup };
       return tool ? runClaudeSegment(input, options, tool) : { kind: "complete", ...await runClaudeTurn(input, options) };
+    };
+    if (codex) drivers.codex = async (input, { ownerId, memberId }) => {
+      const turn: Parameters<typeof runCodexTurn>[0] = input;
+      if (input.childProfile || input.childResults || input.continuation || turn.mcp?.tool !== tool) {
+        throw new Error("Codex invocation differs from the member profile");
+      }
+      return { kind: "complete", ...await runCodexTurn(turn, { ...codex, ownerId, memberId, stateDir }) };
     };
     profiles.set(name, drivers);
   }
