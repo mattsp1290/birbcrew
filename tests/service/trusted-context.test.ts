@@ -359,16 +359,21 @@ if (process.argv.includes("--fixture-effect-child")) {
     assert.equal(deadlineRow.released,false); assert.equal(deadlineRow.acknowledged,false);
   });
 
-  test("a noncooperative timed-out tool retains its durable lease until settlement", async t => {
+  test("a noncooperative timed-out tool retains its durable lease until settlement", {timeout:10_000}, async t => {
     const entered = gate(), release = gate();
     t.after(() => release.resolve());
     const app = application({effect:async ({operationId}) => {entered.resolve(); await release.promise; return {receipt:operationId};}});
-    app.tools[1].deadlineMs = 20;
+    // Include connection/admission latency without racing a 20ms budget on shared CI.
+    app.tools[1].deadlineMs = 2_000;
     const store = new TrustedContextStore(pool,app), key = await newKey();
     await store.open(key,snapshot); const turn = await start(store,key);
     const pending = store.dispatch(turn.claim,"slow","record_effect",{note:"slow"},noAbort());
     const rejected = assert.rejects(pending,errorCode("uncertain"));
-    await entered.promise; await rejected;
+    await Promise.race([entered.promise,pending.then(
+      () => {throw new Error("Fixture completed before its gate");},
+      () => {throw new Error("Fixture deadline expired before callback admission");},
+    )]);
+    await rejected;
     await assert.rejects(store.recover(key),errorCode("busy"));
     await store.invalidate(key,1,nextSnapshot);
     await assert.rejects(store.finishRotation(key),errorCode("busy"));
