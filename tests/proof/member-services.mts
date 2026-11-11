@@ -31,6 +31,8 @@ export async function services(selected?: Engine) {
   };
   const temporal = process.env.TEMPORAL_CLI ?? "temporal";
   const db = "birb-proof-" + randomUUID(), password = randomBytes(24).toString("hex");
+  const controller = new AbortController();
+  const interrupt = () => { void close().finally(() => process.exit(130)); };
   const stopProcesses = new Set<() => Promise<void>>();
   async function child(program: string, args: string[], options = env, log = "worker.log") {
     const file = await open(join(directory, log), "a", 0o600);
@@ -51,6 +53,8 @@ export async function services(selected?: Engine) {
   }
   let disposed: Promise<void> | undefined;
   function close(): Promise<void> {
+    controller.abort();
+    process.off("SIGINT", interrupt); process.off("SIGTERM", interrupt);
     return disposed ??= (async () => {
       try { await Promise.allSettled([...stopProcesses].map((stop) => stop())); }
       finally {
@@ -87,11 +91,13 @@ export async function services(selected?: Engine) {
     }, "Temporal");
     return stop;
   }
+  process.once("SIGINT", interrupt); process.once("SIGTERM", interrupt);
   try {
     const cliVersion = await run(temporal, ["--version"]);
     assert.match(cliVersion.stdout, /^temporal version 1\.10\.0\b/);
-    await run("docker", ["run", "--rm", "--name", db, "-d", "-e", "POSTGRES_PASSWORD=" + password, "-e", "POSTGRES_DB=birbcrew_ts",
-      "-p", "127.0.0.1::5432", "postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94"]);
+    await run("docker", ["run", "--rm", "--name", db, "-d", "-e", "POSTGRES_PASSWORD", "-e", "POSTGRES_DB=birbcrew_ts",
+      "-p", "127.0.0.1::5432", "postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94"],
+      { env: { ...process.env, POSTGRES_PASSWORD: password }, signal: controller.signal });
     await databaseReady();
     const probe = createServer().listen(0, "127.0.0.1");
     await once(probe, "listening");
@@ -99,7 +105,7 @@ export async function services(selected?: Engine) {
     assert.ok(address && typeof address === "object");
     env.BIRBCREW_TEMPORAL_ADDRESS = "127.0.0.1:" + address.port;
     await new Promise<void>((done) => probe.close(() => done()));
-    return { env, sql, worker, child, directory, startTemporal, close,
+    return { env, signal: controller.signal, sql, worker, child, directory, startTemporal, close,
       restartDatabase: async () => { await run("docker", ["restart", db]); await databaseReady(); } };
   } catch (error) { await close(); throw error; }
 }

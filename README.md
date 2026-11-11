@@ -31,21 +31,13 @@ uses Temporal to order turns and PostgreSQL to store the member, each
 conversation's native checkpoint, and its committed replies. Claude and Codex also need
 the same private state directory when a worker is replaced.
 
-Run `scripts/setup` to install the locked dependencies and pinned Node and
-Temporal binaries. On Linux with Docker and Python 3, verify either SDK independently:
-
-```sh
-scripts/verify --engine pi --mode fixture
-scripts/verify --engine claude --mode fixture
-```
-
-Each command spawns members of the selected engine, runs the native SDK against
-a local scripted provider, and drives the HTTP gateway with AG-UI clients.
-It checks protected decisions, cold restart, and interrupted native work.
-Claude requires Linux Landlock ABI 3 or newer. Use `scripts/verify --mode fixture`
-for both engines and the shared member tests. `npm run test:integration` runs
-that same suite. See the [live profile guide](docs/member-profiles.md) to run
-a worker with an approved account.
+Run `scripts/setup --mode fixture` to install the locked dependencies and build
+the native launcher. Run `scripts/verify --mode fixture` for the combined
+TypeScript verification, or add `--engine claude`, `--engine pi`, or
+`--engine codex` to exercise a single SDK. The verifier runs on Linux with
+Docker, Git, Beans, a C compiler and Linux development headers. The
+[verification procedure](docs/verification.md) describes kernel requirements,
+the pinned toolchain and the optional redacted evidence file.
 
 For an existing local installation, set `BIRBCREW_DATABASE_URL` to a dedicated
 PostgreSQL database, `BIRBCREW_TEMPORAL_ADDRESS` to the Temporal endpoint,

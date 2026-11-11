@@ -9,29 +9,42 @@ are pinned. The JavaScript lockfile pins the AG-UI clients.
 2. Run `scripts/verify`.
 3. Read `report.json` in the printed temporary evidence directory.
 
-With no arguments, the command runs the Python checks and journey followed by the
-TypeScript member fixtures. Use `scripts/verify --mode test` for the original
-Python proof alone or `scripts/verify --mode fixture` for the TypeScript suite.
-To select one member SDK, add `--engine pi` or `--engine claude` to the fixture
-command. Each selected run checks the adapter archive, exercises a member across
-a cold restart, and verifies the provider calls and stored member identities. All listeners bind to loopback. Each run uses a fresh PostgreSQL
-container, Temporal development database, credentials, and Beans hub. The
-verifier removes its container and stops its processes. Evidence and disposable
-fixture files remain in the printed temporary directory for inspection. They
-include test credentials and must not be committed wholesale.
+For the historical Python journey, use `scripts/verify` or
+`scripts/verify-legacy --mode test`. Its report and private temporary files
+belong to that run.
 
-Python runs in isolated mode to prevent the host's automatic Datadog injection
-from changing workflow behavior. The proof records OpenTelemetry locally.
-Local capture does not verify Datadog installation or delivery.
+### TypeScript fixture verification
 
-## Check a live member account
+Run `scripts/setup --mode fixture` on Linux with Docker, Git, curl, ripgrep,
+sha256sum, a C compiler and Linux development headers. Claude needs Landlock ABI
+3 or newer and Codex needs ABI 4. Install Beans (`bn`) for the project-note
+cases. Setup installs the pinned Node and Temporal executables, both npm
+lockfiles, and the native launcher. The member fixture path requires no Python
+interpreter. Offline replay also needs Linux user and network namespaces.
 
-`scripts/verify --engine pi --mode live --attestation /absolute/private/account.json`
-validates the selected engine's local account evidence and credential configuration.
-Use `--engine claude` for Claude. The live member acceptance journey is still
-unimplemented. Even a successful account preflight exits nonzero and sends no
-model request. See the [account and profile guide](member-profiles.md) for the
-supported worker configuration.
+Run `scripts/verify --mode fixture` for the combined matrix, or add
+`--engine pi`, `--engine claude`, or `--engine codex` for one member SDK.
+`scripts/verify-members` and `npm run test:integration` use the same Node
+entrypoint. Each run starts disposable PostgreSQL and Temporal on loopback,
+checks two distinct conversations per member before and after cold replacement,
+and cleans up its processes, containers, and native transcripts. Engine-specific
+tests cover native calls, approvals, isolation, cancellation and observers.
+The combined run also exercises simultaneous cancellation and offline replay.
+
+Set `BIRBCREW_FIXTURE_EVIDENCE` to an output file outside the checkout for the
+redacted JSON report. It records selected engines, passed stages, pinned package
+integrities, launcher checksum, source fingerprint, and result. Release evidence
+requires a clean checkout or a verified `git archive`. For an independently
+attested source copy set both `BIRBCREW_SOURCE_REVISION` and
+`BIRBCREW_SOURCE_SHA256` to the revision and source fingerprint established
+from the original checkout.
+
+### Live member verification
+
+The opt-in member entrypoint is `scripts/verify --mode live --engine ENGINE
+--attestation /absolute/private/account.json`. Each provider needs its own
+approved account and credential. Fixture results apply only to the controlled
+local providers. See the [account and profile guide](member-profiles.md).
 
 ## Run the Python subscription journey
 
