@@ -28,7 +28,6 @@ jobs:
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       BIRBCREW_TEST_DATABASE_URL: postgresql://birbcrew:fixture-only@127.0.0.1:5432/recovery_test
-      BIRBCREW_RECOVERY_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -38,5 +37,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:recovery
+        env:
+          BIRBCREW_RECOVERY_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
       - run: node --test tests/service/store.test.ts
       - run: npm run test:recovery:native
