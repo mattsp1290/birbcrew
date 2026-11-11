@@ -18,7 +18,8 @@ function send(response: ServerResponse, type: string, value: Record<string, unkn
   response.write("event: " + type + "\ndata: " + JSON.stringify({ type, ...value }) + "\n\n");
 }
 
-export async function startProvider(onFailure = () => {}) {
+export async function startProvider(onFailure = () => {},
+  onRequest?: (prompt:string, instructions:string, messages:string, continuation:boolean) => void) {
   const toolSurfaces: z.infer<typeof providerInput>["tools"][] = [];
   const requests: InputItem[][] = [];
   const server = createServer(async (request, response) => {
@@ -26,7 +27,8 @@ export async function startProvider(onFailure = () => {}) {
       if (request.method !== "POST" || request.url !== "/responses") {
         response.writeHead(404).end(); return;
       }
-      const {input,tools} = providerInput.parse(await json(request));
+      const body = await json(request);
+      const {input,tools} = providerInput.parse(body);
       const additional = input.filter(i => i.type === "additional_tools").flatMap(i => nativeTools.parse(i.tools));
       toolSurfaces.push([...tools, ...additional]);
       requests.push(input);
@@ -36,6 +38,12 @@ export async function startProvider(onFailure = () => {}) {
       });
       const prompt = prompts.at(-1);
       const memory = prompts.findLast(text => text.startsWith("remember "))?.slice(9);
+      if (prompt && onRequest) {
+        const trusted = input.filter(i => i.role === "developer" || i.role === "system");
+        const others = input.filter(i => i.role !== "developer" && i.role !== "system");
+        const instructions = z.object({instructions:z.string().optional()}).parse(body).instructions ?? "";
+        onRequest(prompt, instructions + JSON.stringify(trusted), JSON.stringify(others), input.some(i => i.type === "function_call_output"));
+      }
       const id = "resp_" + randomUUID();
       response.writeHead(200, { "Content-Type": "text/event-stream" });
       send(response, "response.created", { response: { id } });

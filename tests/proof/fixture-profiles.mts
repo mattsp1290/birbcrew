@@ -18,7 +18,10 @@ function noteEvidence(engine: string, system: string, messages: string, continua
 }
 
 const engine = process.env.BIRBCREW_PROOF_ENGINE;
-const codexProvider = !engine || engine === "codex" ? await startProvider() : undefined;
+const codexProvider = !engine || engine === "codex" ? await startProvider(undefined, (prompt,instructions,messages,continuation) => {
+  observed("codex",prompt);
+  noteEvidence("codex",instructions,messages,continuation);
+}) : undefined;
 const provider = !engine || engine === "claude" ? await startClaudeFixtureProvider(undefined, ({ prompt }) => observed("claude", prompt),
   (system, messages, continuation) => noteEvidence("claude", system, messages, continuation)) : undefined;
 export const profiles = new Map<string, MemberProfile>([["fixture.v1", {
