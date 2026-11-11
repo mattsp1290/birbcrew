@@ -38,9 +38,9 @@ export async function services(selected?: Engine) {
   async function child(program: string, args: string[], options = env, log = "worker.log") {
     const file = await open(join(directory, log), "a", 0o600);
     const proc = spawn(program, args, { env: options, detached: true, stdio: ["ignore", file.fd, file.fd] });
-    await file.close();
     const exit = once(proc, "exit");
     void exit.catch(() => {});
+    await file.close();
     const stop = async () => {
       if (proc.pid && proc.exitCode === null && proc.signalCode === null) {
         try { process.kill(-proc.pid, "SIGKILL"); }
@@ -57,12 +57,13 @@ export async function services(selected?: Engine) {
     controller.abort();
     process.off("SIGINT", interrupt); process.off("SIGTERM", interrupt);
     return disposed ??= (async () => {
-      try { await Promise.allSettled([...stopProcesses].map((stop) => stop())); }
-      finally {
-        await run("docker", ["rm", "-f", db], { timeout: 30_000 }).catch(() => {});
-        await rm(directory, { recursive: true, force: true });
-      }
-    })();
+      const workers = await Promise.allSettled([...stopProcesses].map((stop) => stop()));
+      const resources = await Promise.allSettled([
+        run("docker", ["rm", "-f", db], { timeout: 30_000 }), rm(directory, { recursive: true, force: true }),
+      ]);
+      const failures = [...workers, ...resources].filter(result => result.status === "rejected");
+      if (failures.length) throw new AggregateError(failures.map(failure => failure.reason), "Fixture cleanup failed");
+    })().catch(error => { disposed = undefined; throw error; });
   }
   async function databaseReady() {
     await until(async () => {

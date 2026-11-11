@@ -139,13 +139,13 @@ if (values.help) {
     const engines: Engine[] = engine ? [engine] : ["pi", "claude", "codex"];
     const report = await fixtureReport(engines);
     let passed = false;
-    let s: Services | undefined;
     try {
-      s = await services(engine);
-      await verify(s, engines, report.pass, engine);
+      const s = await services(engine);
+      try { await verify(s, engines, report.pass, engine); }
+      finally { await s.close(); }
+      report.pass("Fixture processes, PostgreSQL container and private state removed");
       passed = true;
     } finally {
-      await s?.close();
       await report.finish(passed);
     }
   }
