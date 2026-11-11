@@ -359,14 +359,25 @@ test("a worker exits when its native supervisor dies", { timeout: 30_000 }, asyn
   const dir = await mkdtemp(join(tmpdir(), "birb-supervisor-loss-"));
   const fixture = new URL("../proof/fixture-profiles.mts", import.meta.url).href;
   const config = join(dir, "config.mjs");
+  const profile = "lost-" + randomUUID();
   await writeFile(config, `import { profiles as p, close } from ${JSON.stringify(fixture)};
-    export {close}; export const profiles = new Map([[${JSON.stringify(randomUUID())}, p.get("fixture.v1")]]);`);
+    export {close}; export const profiles = new Map([[${JSON.stringify(profile)}, p.get("fixture.v1")]]);`);
   const worker = spawn(process.execPath, ["src/service/cli.ts", "worker", config], {
     stdio: "ignore",
     env: { ...process.env, BIRBCREW_STATE_DIR: dir, BIRBCREW_PROOF_ENGINE: "pi", BIRBCREW_DATABASE_URL: process.env.BIRBCREW_TEST_DATABASE_URL }
   });
   const closed = once(worker, "close");
   t.after(async () => { if (worker.exitCode === null && !worker.signalCode) worker.kill("SIGKILL"); await closed; await rm(dir, { recursive: true, force: true }); });
+  const pool = new Pool({ connectionString: process.env.BIRBCREW_TEST_DATABASE_URL });
+  const connection = await Connection.connect({ address: process.env.BIRBCREW_TEMPORAL_ADDRESS });
+  t.after(async () => { await connection.close(); await pool.end(); });
+  const store = new MemberStore(pool);
+  const client = new MemberClient(store, new Client({ connection }));
+  const ownerId = randomUUID(), conversationId = randomUUID();
+  const {memberId} = await store.spawn({ownerId, engine:"pi", profile, requestId:randomUUID()});
+  await client.open({memberId, ownerId, conversationId});
+  const text = await client.submit({ownerId, conversationId, requestId:randomUUID(), text:"remember ready"});
+  assert.equal(text, "stored ready");
   let hostPid: number | undefined;
   await until(async () => {
     const children = await optionalFile(`/proc/${worker.pid}/task/${worker.pid}/children`);
@@ -375,6 +386,7 @@ test("a worker exits when its native supervisor dies", { timeout: 30_000 }, asyn
     }
     return hostPid !== undefined;
   }, "Worker opened a native supervisor");
-  process.kill(hostPid!, "SIGKILL");
+  assert.ok(hostPid);
+  process.kill(hostPid, "SIGKILL");
   assert.notEqual((await closed)[0], 0);
 });
