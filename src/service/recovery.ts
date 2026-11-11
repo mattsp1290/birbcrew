@@ -75,7 +75,7 @@ export class InstallationRecovery {
  /** Durable write barrier is established BEFORE teardown. Running requests cannot
   * write completion after it. Their unchanged started/pending/uncertain records
   * are held for operator reconciliation, not asserted to be cancelled. */
- private async freezeImpl(generation=randomUUID()) {
+ private async freezeImpl(generation:string=randomUUID()) {
   id.parse(generation);
   const {control:c}=await this.status();
   if(c.phase==='restored') throw new Error('Restored installation requires reconciliation');

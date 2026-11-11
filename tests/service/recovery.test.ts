@@ -72,7 +72,7 @@ test('source cannot resume after authority transfers; arbitrary second clone is 
   const {generation}=await t.recovery.capture(t.bundle,pins,t.hooks);
   const {control:c}=await t.recovery.status();const target=randomUUID();
   await t.fence.transfer(c.installation,c.instance,target,generation);
-  await assert.rejects(t.recovery.resume(t.hooks),/mismatch/);
+  await assert.rejects(t.recovery.resume(t.hooks),/fenced/);
   await assert.rejects(t.fence.transfer(c.installation,c.instance,randomUUID(),generation),/overlap/);
   await assert.rejects(t.fence.hold(c.installation,c.instance,generation),/fenced/);
   assert.equal((await t.recovery.status()).control.phase,'frozen');
@@ -136,7 +136,7 @@ test('real PostgreSQL archive restores mappings, checkpoint, committed replay an
   await assert.rejects(store.beginTurn({...request,requestId:randomUUID()}));
   assert.deepEqual((await restored.query('SELECT * FROM birbcrew_ts.public_events ORDER BY cursor')).rows,(await t.pool.query('SELECT * FROM birbcrew_ts.public_events ORDER BY cursor')).rows);
   assert.ok((await restored.query('SELECT * FROM birbcrew_ts.public_events')).rowCount!>0);
-  await assert.rejects(t.recovery.resume(t.hooks),/mismatch/);
+  await assert.rejects(t.recovery.resume(t.hooks),/fenced/);
   const manifest=await readRecoveryManifest(relocated);await recovery.resume(t.hooks,manifest);
   assert.deepEqual(await store.beginTurn(request),{kind:'replay',reply:'recorded'});
   assert.equal((await restored.query('SELECT phase FROM birbcrew_ts.turns WHERE request_id=$1',[pending.requestId])).rows[0].phase,'started');
