@@ -9,7 +9,7 @@ const endpoints = z.strictObject({ claude: z.url(), codex: z.url(), pi: z.url() 
 const engines = ["claude", "codex", "pi"] as const;
 const models = { claude: "claude-sonnet-4-6", codex: "gpt-5.4", pi: "fixture-chat" } as const;
 const protocols = { claude: "anthropic-messages", codex: "openai-responses", pi: "openai-chat-completions" } as const;
-const configured = [];
+const configured: Awaited<ReturnType<typeof createProxyProfile>>[] = [];
 const profile: MemberProfile = { accountId: "synthetic-restart-account" };
 try {
   for (const engine of engines) {
