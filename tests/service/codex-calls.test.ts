@@ -82,6 +82,7 @@ test("live MCP consumes one authenticated decision and confirms native delivery 
   assert.equal(final.state.interruptedCalls,undefined);
   assert.equal((await writes()).length,1);
   assert.ok(!JSON.stringify(final).includes(body.nativeCallId));
+  assert.ok(!JSON.stringify(final).includes(body.threadId));
   assert.ok(!JSON.stringify(final).includes("private note"));
 });
 
@@ -165,3 +166,57 @@ test("a hanging Codex chat can be cancelled while its native grant is held",asyn
   }
   assert.deepEqual(await writes(),[]);
 });
+
+test("a live native denial returns once and consumes none of the work-item budget",async () => {
+  const {launch,proposal,writes}=await conversation(await member("record_work_item"));
+  const a=await proposeLive(pool,launch,proposal());
+  assert.equal(await answerLive(pool,decision(a,"deny")),"deny");
+  assert.deepEqual(await settleLive(pool,launch,a.approvalId),{kind:"denied",nativeCallId:a.nativeCallId});
+  await confirmDelivery(pool,launch,a.approvalId);
+  assert.equal((await settleLive(pool,launch,a.approvalId)).kind,"interrupted");
+  assert.deepEqual(await writes(),[]);
+  for (const expected of ["recorded","budget_exhausted"]) {
+    const other=await proposeLive(pool,launch,proposal());
+    await answerLive(pool,decision(other,"approve"));
+    assert.equal((await settleLive(pool,launch,other.approvalId)).kind,expected);
+    await confirmDelivery(pool,launch,other.approvalId);
+  }
+  assert.equal((await writes()).length,1);
+});
+
+for (const first of ["stop","effect"] as const) {
+  test(`live stop and effect serialize when ${first} obtains the conversation first`,async () => {
+    const {scope,launch,proposal,writes}=await conversation(await member("record_work_item"));
+    const a=await proposeLive(pool,launch,proposal());
+    await answerLive(pool,decision(a,"approve"));
+    const gate=await pool.connect();
+    let settle,stop;
+    try {
+      await gate.query("BEGIN");
+      const {rows:[blocker]}=await gate.query("SELECT pg_backend_pid() AS pid FROM birbcrew_ts.conversations WHERE conversation_id=$1 FOR UPDATE",
+        [scope.conversationId]);
+      const stopping=()=>requestNativeStop(pool,launch,{token:launch.token});
+      const settling=()=>settleLive(pool,launch,a.approvalId);
+      if (first==="stop") stop=stopping();
+      else settle=settling();
+      let blocked=false;
+      for (let i=0;i<100 && !blocked;i++) {
+        const current=await pool.query("SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))",[blocker.pid]);
+        blocked=Boolean(current.rowCount);
+        if (!blocked) await delay(10);
+      }
+      assert.ok(blocked,"The first operation is waiting on the conversation lock");
+      if (first==="stop") settle=settling();
+      else stop=stopping();
+    } finally {
+      await gate.query("ROLLBACK");
+      gate.release();
+    }
+    await stop;
+    assert.equal((await settle)?.kind,first==="stop" ? "interrupted" : "recorded");
+    assert.equal((await writes()).length,first==="stop" ? 0 : 1);
+    await interruptLive(pool,launch);
+    const after=await settleLive(pool,launch,a.approvalId);
+    assert.equal(after.kind,"interrupted");
+  });
+}

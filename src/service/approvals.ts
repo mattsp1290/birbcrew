@@ -265,8 +265,10 @@ export class ApprovalStore {
     if (call.version !== key.version || call.argumentDigest !== key.argumentDigest) throw new MemberStoreError("conflict");
     if (call.decision === key.choice) return call.decision;
     if (call.decision || turn.phase !== "started" || call.childStopped || await cancelled(db, key)) throw new MemberStoreError("conflict");
-    await db.query("UPDATE birbcrew_ts.deferred_calls SET decision = $2 WHERE approval_id = $1",
-      [key.approvalId, key.choice]);
+    const accepted = await db.query(`UPDATE birbcrew_ts.deferred_calls SET decision=$2 WHERE approval_id=$1
+      AND (NOT $3::boolean OR EXISTS (SELECT 1 FROM birbcrew_ts.codex_live_calls l WHERE l.approval_id=$1
+        AND l.phase='waiting' AND l.expires_at>clock_timestamp()))`, [key.approvalId,key.choice,live]);
+    if (!accepted.rowCount) throw new MemberStoreError("stale");
     await publishObservation(db, key.conversationId, { kind: "answered", approvalId: key.approvalId });
     return key.choice;
   }

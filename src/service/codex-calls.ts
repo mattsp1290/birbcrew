@@ -135,7 +135,13 @@ export async function answerLive(pool: Pool, input: Decision): Promise<Decision[
       if (!call.active) await interruptLiveLocked(db,key,call.token,key.approvalId);
       return null;
     }
-    return ledger.decideLocked(db,key,true);
+    try {
+      return await ledger.decideLocked(db,key,true);
+    } catch (error) {
+      if (!(error instanceof MemberStoreError) || error.code !== "stale") throw error;
+      await interruptLiveLocked(db,key,call.token,key.approvalId);
+      return null;
+    }
   });
   if (!answer) throw new MemberStoreError("conflict");
   return answer;
@@ -163,7 +169,13 @@ Promise<ToolOutcome | {kind:"pending"|"interrupted"}> {
     }
     const approval = await confirmedApproval(db,{...member,ownerId:launch.ownerId,conversationId:launch.conversationId,
       requestId:launch.requestId,invocationId:launch.requestId,approvalId});
-    return ledger.settleLocked(db,{...approval,token:launch.token},true);
+    try {
+      return await ledger.settleLocked(db,{...approval,token:launch.token},true);
+    } catch (error) {
+      if (!(error instanceof MemberStoreError) || error.code !== "stale") throw error;
+      await interruptLiveLocked(db,launch,launch.token,approvalId);
+      return {kind:"interrupted"};
+    }
   });
 }
 
