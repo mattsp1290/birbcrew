@@ -30,7 +30,8 @@ The existing observer gateway continues to reject those inputs.
   old Temporal `submitTurn` workflow. Legacy turn admission rejects conversations
   attached to this seam. Do not start that workflow for a trusted conversation.
 - This initial lane is bounded to 1,024 accepted requests per conversation,
-  16 tool calls per request, 4 MiB checkpoints and 64 KiB final replies.
+  16 tool calls per request, a 170-second native turn deadline, 4 MiB checkpoints
+  and 64 KiB final replies.
   It does not implement the separate unlimited-conversation/rollover request.
 
 ## Backend integration

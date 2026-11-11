@@ -466,4 +466,18 @@ if (process.argv.includes("--fixture-effect-child")) {
     assert.equal(row.outcome,"uncertain"); assert.equal(row.result,null);
   });
 
+  test("native and effect leases cannot exhaust the single-slot control pool", {timeout:5_000}, async () => {
+    const control = new Pool({connectionString:url,max:1});
+    try {
+      const store = new TrustedContextStore(control,application()), key = await newKey();
+      await store.open(key,snapshot); const turn = await start(store,key);
+      await store.admitted(turn.claim,noAbort(),async signal => {
+        const result = await store.dispatch(turn.claim,"small-pool","read_context",{note:"ok"},signal);
+        await store.acknowledge(turn.claim,"small-pool","read_context");
+        await store.commit(turn.claim,result.text,{safe:true});
+      });
+      assert.equal((await store.result(key,turn.claim.requestId)).phase,"completed");
+    } finally {await control.end();}
+  });
+
 }

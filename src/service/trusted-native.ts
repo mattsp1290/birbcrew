@@ -12,6 +12,7 @@ const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(valu
 
 /** Host-only seam. Never construct this input from AG-UI tools/context or client labels. */
 export async function runTrustedNativeTurn(input: TrustedNativeInput, profile: TrustedNativeProfile) {
+  input = {...input,signal:AbortSignal.any([input.signal,AbortSignal.timeout(170_000)])};
   input.signal.throwIfAborted();
   z.uuid().parse(input.threadId); z.uuid().parse(input.runId);
   if (profile.engine !== input.engine || !input.binding || Buffer.byteLength(input.binding) > 4096 ||
