@@ -63,7 +63,9 @@ export class MemberStore {
       await db.query("SELECT pg_advisory_xact_lock(hashtextextended('birbcrew_ts.migration', 0))");
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
-      for (const [version, name] of [[1, "001-members.sql"], [2, "002-approvals.sql"], [4, "004-observation.sql"]] as const) {
+      const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
+        [4, "004-observation.sql"]] as const;
+      for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
         await db.query(await readFile(new URL("./sql/" + name, import.meta.url), "utf8"));
@@ -133,6 +135,71 @@ export class MemberStore {
     return turn.reply ?? undefined;
   }
 
+  async reconcileTurn(input: z.input<typeof submitSchema>, workflowRunId: string, resuming: boolean, allowRecovery = true) {
+    const key = submitSchema.parse(input);
+    const digest = createHash("sha256").update(key.text).digest();
+    return this.transaction(async (db) => {
+      const conversation = await conversationFor(db, key, true);
+      const { rows: [turn] } = await db.query<TurnRow>(
+        "SELECT reply, phase, prompt_digest, workflow_run_id FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",
+        [key.conversationId, key.requestId],
+      );
+      if (turn) {
+        if (turn.workflow_run_id !== workflowRunId || !turn.prompt_digest.equals(digest)) {
+          throw new MemberStoreError("conflict");
+        }
+        if (turn.reply !== null) return { kind: "complete", text: turn.reply } as const;
+        if (!resuming && turn.phase === "started") {
+          const approval = await savedProposal(db, conversation, key.requestId);
+          if (approval) return { kind: "pending", approval } as const;
+        }
+        await db.query("UPDATE birbcrew_ts.turns SET phase='uncertain' WHERE conversation_id=$1 AND request_id=$2",
+          [key.conversationId, key.requestId]);
+        if (!resuming && allowRecovery && conversation.engine === "claude") {
+          const admitted = await db.query(`SELECT 1 FROM birbcrew_ts.native_launches n
+            JOIN birbcrew_ts.turns t USING (conversation_id,request_id,token)
+            JOIN birbcrew_ts.profiles p ON p.name=$3 AND p.engine='claude' AND p.protected_tool='record_work_item'
+            WHERE n.conversation_id=$1 AND n.request_id=$2 AND NOT n.recovery_closed`, [key.conversationId, key.requestId, conversation.profile]);
+          if (admitted.rowCount) return { kind: "recover" } as const;
+        }
+      } else {
+        await db.query(`INSERT INTO birbcrew_ts.turns
+          (conversation_id,request_id,position,prompt_digest,phase,workflow_run_id,activity_id,attempt)
+          SELECT $1,$2,coalesce(max(position),0)+1,$3,'uncertain',$4,'unadmitted',1
+          FROM birbcrew_ts.turns WHERE conversation_id=$1`, [key.conversationId, key.requestId, digest, workflowRunId]);
+      }
+      await db.query("UPDATE birbcrew_ts.native_launches SET recovery_closed=true WHERE conversation_id=$1 AND request_id=$2",
+        [key.conversationId, key.requestId]);
+      await publishObservation(db, key.conversationId, { kind: "failed", requestId: key.requestId });
+      return null;
+    });
+  }
+
+  async stoppedProposal(input: TurnRequest, workflowRunId: string) {
+    const key = submitSchema.parse(input);
+    return this.transaction(async (db) => {
+      const conversation = await conversationFor(db, key, true);
+      if (conversation.engine !== "claude") return null;
+      const { rows: [row] } = await db.query<{ token: string; stopped: boolean; phase: string; checkpoint: unknown }>(
+        `SELECT t.token, n.stopped, t.phase, previous.checkpoint FROM birbcrew_ts.turns t
+         JOIN birbcrew_ts.native_launches n USING (conversation_id,request_id,token)
+         LEFT JOIN birbcrew_ts.turns previous ON previous.conversation_id=t.conversation_id AND previous.position=t.position-1
+         WHERE t.conversation_id=$1 AND t.request_id=$2 AND t.workflow_run_id=$3 AND t.prompt_digest=$4 AND NOT n.recovery_closed
+           AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.paused_segments s
+             WHERE s.conversation_id=t.conversation_id AND s.request_id=t.request_id AND s.resume_activity_id IS NOT NULL)`,
+        [key.conversationId, key.requestId, workflowRunId, createHash("sha256").update(key.text).digest()]);
+      if (!row) return null;
+      if (row.phase === "started") {
+        const approval = await savedProposal(db, conversation, key.requestId);
+        return approval ? { kind: "pending", approval } as const : null;
+      }
+      if (row.phase !== "uncertain") return null;
+      if (!row.stopped) return { kind: "stopping" } as const;
+      return { kind: "recover" as const, conversation, token: row.token,
+        checkpoint: row.checkpoint === null ? null : checkpointSchema.parse(row.checkpoint) };
+    });
+  }
+
   async beginTurn(input: z.input<typeof submitSchema>, identity?: Execution): Promise<BeginTurn> {
     const key = submitSchema.parse(input);
     const execution = executionSchema.optional().parse(identity);
@@ -160,7 +227,6 @@ export class MemberStore {
                 WHERE conversation_id = $1 AND request_id = $2`,
               [key.conversationId, key.requestId, execution.attempt],
             );
-            await publishObservation(db, key.conversationId, { kind: "failed", requestId: key.requestId });
           }
         }
         return { kind: "uncertain" };
@@ -205,7 +271,6 @@ export class MemberStore {
         if (turn.attempt < execution.attempt) {
           await db.query("UPDATE birbcrew_ts.turns SET phase='uncertain',attempt=$3 WHERE conversation_id=$1 AND request_id=$2",
             [key.conversationId, key.requestId, execution.attempt]);
-          await publishObservation(db, key.conversationId, { kind: "failed", requestId: key.requestId });
         }
         return { kind: "uncertain" as const };
       }

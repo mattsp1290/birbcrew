@@ -1,9 +1,10 @@
-import { allHandlersFinished, ApplicationFailure, condition, defineUpdate, proxyActivities, setHandler } from "@temporalio/workflow";
+import { allHandlersFinished, ApplicationFailure, CancellationScope, workflowInfo, condition, defineUpdate, proxyActivities, setHandler } from "@temporalio/workflow";
 import { submitSchema, type Conversation, type TurnRequest } from "./domain.ts";
 import type { Approval, Decision } from "./approvals.ts";
-import type { MemberActivities } from "./activities.ts";
+import type { MemberActivities, Resume } from "./activities.ts";
 
-import { activityQueue } from "./queues.ts";
+import type { MemberStore } from "./store.ts";
+import { activityQueue, memberTaskQueue } from "./queues.ts";
 
 export const submitTurn = defineUpdate<string, [TurnRequest]>("submitTurn");
 
@@ -14,6 +15,13 @@ export async function memberConversation(conversation: Conversation): Promise<vo
     scheduleToCloseTimeout: "10 minutes",
     heartbeatTimeout: "15 seconds",
     retry: { maximumAttempts: 3 },
+  });
+  const { reconcileTurn } = proxyActivities<Pick<MemberStore, "reconcileTurn">>({
+    taskQueue: memberTaskQueue, startToCloseTimeout: "20 seconds",
+  });
+  const { recoverPending } = proxyActivities<MemberActivities>({
+    taskQueue: activityQueue(conversation.engine, conversation.profile),
+    startToCloseTimeout: "20 seconds", scheduleToCloseTimeout: "60 seconds", retry: { maximumAttempts: 2 },
   });
   const turns = new Map<string, { text: string; result: Promise<string> }>();
   let previous = Promise.resolve();
@@ -57,14 +65,36 @@ export async function memberConversation(conversation: Conversation): Promise<vo
       answered = true;
     });
 
+  async function segment(request: TurnRequest, resume?: Resume) {
+    try {
+      return await executeTurn(request, resume);
+    } catch (error) {
+      const run = workflowInfo().runId;
+      const result = await CancellationScope.nonCancellable(() => reconcileTurn(request, run, Boolean(resume)));
+      if (result?.kind === "recover") {
+        try {
+          const pending = await recoverPending(request, run);
+          if (pending) return pending;
+        } catch {
+          // The final database check also handles a lost recovery acknowledgement.
+        }
+        const final = await CancellationScope.nonCancellable(() => reconcileTurn(request, run, false, false));
+        if (final?.kind === "pending" || final?.kind === "complete") return final;
+      } else if (result) {
+        return result;
+      }
+      throw error;
+    }
+  }
+
   async function run(request: TurnRequest) {
-    const first = await executeTurn(request);
+    const first = await segment(request);
     if (first.kind === "complete") return first.text;
     pending = first.approval;
     answered = false;
     await condition(() => answered);
     const outcome = await settleApproval(first.approval);
-    const resumed = await executeTurn(request, { approval: first.approval, outcome });
+    const resumed = await segment(request, { approval: first.approval, outcome });
     pending = undefined;
     if (resumed.kind !== "complete") throw ApplicationFailure.nonRetryable("Expected a completed continuation");
     return resumed.text;

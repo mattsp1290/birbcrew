@@ -22,13 +22,12 @@ async function main() {
     if (operation === "worker") {
       const stateDir = process.env.BIRBCREW_STATE_DIR;
       if (!stateDir || !configPath) throw new Error("Supply BIRBCREW_STATE_DIR and the trusted provider module path");
-      const { memberProfiles } = await import("./profiles.ts");
       const { runMemberWorker } = await import("./worker.ts");
       const { registerProfiles } = await import("./deployment.ts");
       const { profiles, close } = await import(pathToFileURL(resolve(configPath)).href);
       try {
         await registerProfiles(pool, profiles, stateDir);
-        await runMemberWorker(store, address, memberProfiles(profiles, stateDir));
+        await runMemberWorker(store, address, profiles, resolve(configPath), stateDir);
       } finally {
         await close?.();
       }

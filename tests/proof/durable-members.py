@@ -122,7 +122,7 @@ def verify(directory, stack):
                                     text=True, capture_output=True)
             return result.returncode == 0 and result.stdout.strip() == "2"
         wait_until(ready_profiles, "worker profiles registered")
-        run(node, "--test", "tests/service/closure.test.ts", env=env)
+        run(node, "--test", "tests/service/closure.test.ts", "tests/service/supervisor.test.ts", env=env)
         for engine in ["pi", "claude"]:
             owner = f"{engine}-{uuid4()}"
             spawn = {"ownerId": owner, "requestId": str(uuid4()), "engine": engine, "profile": "fixture.v1"}

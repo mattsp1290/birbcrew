@@ -1,0 +1,225 @@
+import { fork, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { z } from "zod";
+import { Pool, type PoolClient } from "pg";
+import { ApprovalStore, savedProposal, recordWorkItemArguments } from "./approvals.ts";
+import type { PublicSegment } from "./activities.ts";
+import { commitSchema, type Conversation, type Checkpoint } from "./domain.ts";
+import { MemberStore } from "./store.ts";
+import { commandSchema, type Launch } from "./supervisor.ts";
+
+const pool = new Pool({ connectionString: process.env.BIRBCREW_DATABASE_URL });
+const store = new MemberStore(pool);
+const ledger = new ApprovalStore(pool);
+const active = new Map<string, ChildProcess>();
+const starts = new Map<string, { launch: Launch; result: Promise<PublicSegment> }>();
+let closing = false;
+const stopping = new WeakSet<ChildProcess>();
+
+function stopRunner(child: ChildProcess | undefined) {
+  if (!child || !child.connected || stopping.has(child)) return;
+  stopping.add(child);
+  child.send("stop", () => {});
+  const timeout = setTimeout(() => child.kill("SIGKILL"), 3000);
+  timeout.unref();
+  child.once("close", () => clearTimeout(timeout));
+}
+
+async function transaction<T>(body: (db: PoolClient) => Promise<T>): Promise<T> {
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    const result = await body(db);
+    await db.query("COMMIT");
+    return result;
+  } catch (error) {
+    await db.query("ROLLBACK");
+    throw error;
+  } finally {
+    db.release();
+  }
+}
+
+async function lockedTurn(db: PoolClient, launch: Launch, allowRevokedAttempt = false) {
+  const lock = await db.query("SELECT 1 FROM birbcrew_ts.conversations WHERE owner_id=$1 AND conversation_id=$2 FOR UPDATE",
+    [launch.ownerId, launch.conversationId]);
+  if (!lock.rowCount) throw new Error("Unknown conversation");
+  const { rows: [turn] } = await db.query<Conversation & {
+    phase: string; reply: string | null; checkpoint: Checkpoint | null; paused: boolean; resuming: boolean;
+  }>(`SELECT c.owner_id AS "ownerId", c.member_id AS "memberId", c.conversation_id AS "conversationId",
+          m.engine, m.profile, t.phase, t.reply, s.approval_id IS NOT NULL AS paused,
+          s.resume_activity_id IS NOT NULL AS resuming,
+          CASE WHEN s.resume_activity_id IS NOT NULL THEN s.checkpoint ELSE previous.checkpoint END AS checkpoint
+       FROM birbcrew_ts.turns t JOIN birbcrew_ts.conversations c USING (conversation_id)
+       JOIN birbcrew_ts.members m USING (owner_id, member_id)
+       LEFT JOIN birbcrew_ts.paused_segments s USING (conversation_id,request_id)
+       LEFT JOIN birbcrew_ts.turns previous ON previous.conversation_id=t.conversation_id AND previous.position=t.position-1
+      WHERE c.owner_id=$1 AND t.conversation_id=$2 AND t.request_id=$3 AND t.token=$4
+        AND t.workflow_run_id=$5 AND t.activity_id=$6 AND t.prompt_digest=$8
+        AND (t.attempt=$7 OR ($9 AND t.attempt>$7 AND t.phase='uncertain'))`,
+    [launch.ownerId, launch.conversationId, launch.requestId, launch.token, launch.execution.workflowRunId,
+      launch.execution.activityId, launch.execution.attempt, createHash("sha256").update(launch.text).digest(), allowRevokedAttempt]);
+  if (!turn) throw new Error("Invalid native generation");
+  return turn;
+}
+
+async function start(launch: Launch): Promise<PublicSegment> {
+  const args = [launch.conversationId, launch.requestId, launch.token];
+  // Commit the one-shot reservation before forking; a lost fork acknowledgement must never start a second process.
+  const inspect = async (db: PoolClient) => {
+    const turn = await lockedTurn(db, launch);
+    if (turn.reply !== null) return { kind: "complete", text: turn.reply } as const;
+    if (turn.phase !== "started") throw new Error("Native admission revoked");
+    const approval = turn.paused ? await savedProposal(db, turn, launch.requestId) : undefined;
+    if (turn.paused && !approval) throw new Error("Missing canonical proposal");
+    if (approval && !turn.resuming) return { kind: "pending", approval } as const;
+    return { kind: "ready", approval } as const;
+  };
+  const admission = await transaction(async (db) => {
+    const status = await inspect(db);
+    if (status.kind !== "ready") return status;
+    const { approval } = status;
+    const continuation = approval ? { nativeCallId: approval.nativeCallId,
+      result: await ledger.settleLocked(db, { ...approval, token: launch.token }) } : undefined;
+    const digest = continuation ? createHash("sha256").update(JSON.stringify(continuation.result)).digest() : null;
+    const inserted = await db.query(`INSERT INTO birbcrew_ts.native_launches
+      (conversation_id,request_id,token,approval_id,receipt_digest,workflow_run_id,activity_id,attempt)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (conversation_id,request_id,token) DO NOTHING`,
+      [...args, approval?.approvalId ?? null, digest, launch.execution.workflowRunId, launch.execution.activityId, launch.execution.attempt]);
+    return { kind: inserted.rowCount ? "launch" : "observe", continuation } as const;
+  });
+  if (admission.kind === "complete" || admission.kind === "pending") return admission;
+  if (admission.kind === "observe") {
+    const until = Date.now() + 170_000;
+    while (!closing && Date.now() < until) {
+      const status = await transaction(inspect);
+      if (status.kind !== "ready") return status;
+      await delay(100);
+    }
+    throw new Error("Previous SDK launch outcome is uncertain");
+  }
+
+  let reply: unknown;
+  let exited: Promise<boolean> | undefined;
+  let confirmed = false;
+  try {
+    const { continuation } = admission;
+    // Recheck under the takeover lock after reservation. Both the fork and its command happen before releasing it.
+    const member = await transaction(async (db) => {
+      const { phase, checkpoint, reply: previousReply, paused, resuming, ...conversation } = await lockedTurn(db, launch);
+      if (closing || phase !== "started" || previousReply !== null || (paused && !resuming)) throw new Error("Native admission revoked");
+      const child = fork(new URL("./supervisor-runner.ts", import.meta.url), process.argv.slice(2), {
+        stdio: ["ignore", "ignore", "ignore", "ipc"], execArgv: [],
+      });
+      active.set(launch.token, child);
+      child.once("message", (value) => { reply = value; });
+      exited = new Promise<boolean>((resolve) => {
+        child.once("error", () => resolve(false));
+        child.once("close", (code) => resolve(code === 0));
+      });
+      child.send({ conversation, checkpoint, continuation, runId: launch.requestId, text: launch.text }, (error) => {
+        if (error) child.kill("SIGKILL");
+      });
+      return conversation;
+    });
+    confirmed = Boolean(await exited && reply !== undefined);
+    if (!confirmed) throw new Error("SDK process stopped");
+    const result = z.discriminatedUnion("kind", [
+      z.strictObject({ kind: z.literal("complete"), text: commitSchema.shape.reply, checkpoint: commitSchema.shape.checkpoint }),
+      z.strictObject({ kind: z.literal("pending"), checkpoint: commitSchema.shape.checkpoint,
+        proposal: z.strictObject({ name: z.literal("record_work_item"), nativeCallId: z.string(), arguments: recordWorkItemArguments }) }),
+    ]).parse(reply);
+    const { ownerId, conversationId, requestId, token } = launch;
+    if (result.kind === "pending") {
+      if (continuation || result.checkpoint.engine !== member.engine) throw new Error("Invalid protected call");
+      const { name: toolName, nativeCallId, arguments: args } = result.proposal;
+      const approval = await ledger.propose({ ownerId, conversationId, requestId, token, memberId: member.memberId,
+        invocationId: requestId, toolName, nativeCallId, arguments: args }, result.checkpoint);
+      return { kind: "pending", approval };
+    }
+    const text = await store.commitTurn({ ownerId, conversationId, requestId, token,
+      reply: result.text, checkpoint: result.checkpoint });
+    return { kind: "complete", text };
+  } finally {
+    const runner = active.get(launch.token);
+    if (runner && !confirmed) runner.kill("SIGKILL");
+    active.delete(launch.token);
+    if (!runner || confirmed) {
+      await pool.query("UPDATE birbcrew_ts.native_launches SET stopped=true WHERE conversation_id=$1 AND request_id=$2 AND token=$3", args);
+    }
+  }
+}
+
+async function handle(launch: Launch, action: "start" | "stop") {
+  if (action === "stop") {
+    await transaction(async (db) => {
+      const retired = await db.query(`SELECT 1 FROM birbcrew_ts.native_launches n
+        JOIN birbcrew_ts.turns t USING (conversation_id,request_id)
+        JOIN birbcrew_ts.conversations c USING (conversation_id)
+        WHERE c.owner_id=$1 AND n.conversation_id=$2 AND n.request_id=$3 AND n.token=$4 AND n.stopped
+          AND n.workflow_run_id=$5 AND n.activity_id=$6 AND n.attempt=$7 AND t.prompt_digest=$8 AND t.token<>n.token`,
+        [launch.ownerId, launch.conversationId, launch.requestId, launch.token, launch.execution.workflowRunId,
+          launch.execution.activityId, launch.execution.attempt, createHash("sha256").update(launch.text).digest()]);
+      if (retired.rowCount) return;
+      const turn = await lockedTurn(db, launch, true);
+      if (turn.phase === "started" && (!turn.paused || turn.resuming)) {
+        await db.query("UPDATE birbcrew_ts.turns SET phase='uncertain' WHERE conversation_id=$1 AND request_id=$2 AND token=$3",
+          [launch.conversationId, launch.requestId, launch.token]);
+      }
+    });
+    stopRunner(active.get(launch.token));
+    const until = Date.now() + 6000;
+    while (Date.now() < until) {
+      const { rows: [admitted] } = await pool.query<{ stopped: boolean }>(
+        "SELECT stopped FROM birbcrew_ts.native_launches WHERE conversation_id=$1 AND request_id=$2 AND token=$3",
+        [launch.conversationId, launch.requestId, launch.token]);
+      if (!admitted || admitted.stopped) return null;
+      await delay(100);
+    }
+    throw new Error("Native stop unconfirmed");
+  }
+  const existing = starts.get(launch.token);
+  if (existing) {
+    if (JSON.stringify(existing.launch) !== JSON.stringify(launch)) throw new Error("Conflicting launch");
+    return existing.result;
+  }
+  const pending = start(launch);
+  starts.set(launch.token, { launch: launch, result: pending });
+  try { return await pending; }
+  finally { starts.delete(launch.token); }
+}
+
+let checking = false;
+const timer = setInterval(async () => {
+  if (checking || !active.size) return;
+  checking = true;
+  const tokens = [...active.keys()];
+  try {
+    const { rows } = await pool.query<{token: string}>(
+      "SELECT token FROM birbcrew_ts.turns WHERE token = ANY($1::uuid[]) AND phase <> 'started'", [tokens]);
+    for (const {token} of rows) stopRunner(active.get(token));
+  } catch {
+    for (const token of tokens) stopRunner(active.get(token));
+  } finally {
+    checking = false;
+  }
+}, 250);
+process.once("disconnect", async () => {
+  closing = true;
+  clearInterval(timer);
+  for (const child of active.values()) stopRunner(child);
+  await Promise.allSettled([...starts.values()].map(({ result }) => result));
+  await pool.end();
+});
+process.on("message", async (message) => {
+  const { id, action, launch } = commandSchema.parse(message);
+  let response;
+  try {
+    response = { id, ok: true, reply: await handle(launch, action) };
+  } catch {
+    response = { id, ok: false, error: "Native turn denied or outcome uncertain" };
+  }
+  if (process.connected) process.send?.(response, () => {});
+});
+process.send?.("ready");

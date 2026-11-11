@@ -29,10 +29,11 @@ type Scope = z.infer<typeof scopeSchema>;
 type CallKey = z.infer<typeof approvalKey>;
 export type Decision = z.infer<typeof decisionSchema>;
 export type Choice = z.infer<typeof decisionSchema>["choice"];
-export type Approval = CallKey & {
-  toolName: "record_work_item"; argumentDigest: string; version: 1; policyVersion: 1;
-  summary: "Record one work item";
-};
+export const approvalSchema = approvalKey.extend({
+  toolName: z.literal("record_work_item"), argumentDigest: decisionSchema.shape.argumentDigest,
+  version: z.literal(1), policyVersion: z.literal(1), summary: z.literal("Record one work item"),
+});
+export type Approval = z.infer<typeof approvalSchema>;
 export type ToolOutcome =
   | { nativeCallId: string; kind: "recorded"; receipt: { receiptId: string; operationId: string } }
   | { nativeCallId: string; kind: "denied" | "cancelled" | "budget_exhausted" };
@@ -121,7 +122,7 @@ export class ApprovalStore {
     });
   }
 
-  async propose(input: z.input<typeof proposalSchema>, pendingCheckpoint?: unknown): Promise<Approval> {
+  async propose(input: z.input<typeof proposalSchema>, pendingCheckpoint?: unknown, recoverStopped = false): Promise<Approval> {
     const key = proposalSchema.parse(input);
     if (key.arguments.operation_id !== key.requestId) throw new MemberStoreError("conflict");
     const checkpoint = pendingCheckpoint === undefined ? undefined : checkpointSchema.parse(pendingCheckpoint);
@@ -130,7 +131,15 @@ export class ApprovalStore {
     const ids = [key.conversationId, key.requestId, key.invocationId, key.nativeCallId];
     return this.transaction(async (db) => {
       const turn = await lockTurn(db, key);
-      if (turn.token !== key.token || turn.phase !== "started") throw new MemberStoreError("stale");
+      if (turn.token !== key.token) throw new MemberStoreError("stale");
+      if (recoverStopped && turn.phase === "uncertain" && checkpoint?.engine === "claude") {
+        const recovered = await db.query(`UPDATE birbcrew_ts.turns t SET phase='started'
+          FROM birbcrew_ts.native_launches n WHERE n.conversation_id=t.conversation_id AND n.request_id=t.request_id
+            AND n.token=t.token AND t.token=$3 AND t.conversation_id=$1 AND t.request_id=$2 AND n.stopped AND NOT n.recovery_closed
+            AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.paused_segments s
+              WHERE s.conversation_id=t.conversation_id AND s.request_id=t.request_id)`, [key.conversationId, key.requestId, key.token]);
+        if (!recovered.rowCount) throw new MemberStoreError("stale");
+      } else if (turn.phase !== "started") throw new MemberStoreError("stale");
       if (await cancelled(db, key)) throw new MemberStoreError("conflict");
       const existing = await db.query<CallRow>(
         `SELECT ${columns} FROM birbcrew_ts.protected_calls p WHERE p.conversation_id = $1 AND p.request_id = $2
@@ -242,38 +251,40 @@ export class ApprovalStore {
 
   async settle(input: z.input<typeof settleSchema>): Promise<ToolOutcome> {
     const key = settleSchema.parse(input);
-    return this.transaction(async (db) => {
-      const turn = await lockTurn(db, key);
-      if (turn.token !== key.token) throw new MemberStoreError("stale");
-      const call = await findCall(db, key);
-      const nativeCallId = key.nativeCallId;
-      async function finish(outcome: ToolOutcome) {
-        await publishObservation(db, key.conversationId, { kind: "result", approvalId: key.approvalId, outcome });
-        return outcome;
-      }
-      if (call.budget_exhausted) return finish({ nativeCallId, kind: "budget_exhausted" });
-      if (call.decision === "deny") return finish({ nativeCallId, kind: "denied" });
-      const existing = await db.query<{ approval_id: string; receipt_id: string }>(
-        "SELECT approval_id, receipt_id FROM birbcrew_ts.work_items WHERE conversation_id = $1 AND request_id = $2",
-        [key.conversationId, key.requestId],
-      );
-      if (existing.rows[0]?.approval_id === key.approvalId) {
-        return finish({ nativeCallId, kind: "recorded", receipt: { receiptId: existing.rows[0].receipt_id, operationId: key.requestId } });
-      }
-      if (await cancelled(db, key)) return finish({ nativeCallId, kind: "cancelled" });
-      if (call.decision !== "approve") throw new MemberStoreError("conflict");
-      if (existing.rows.length) {
-        await db.query("UPDATE birbcrew_ts.protected_calls SET budget_exhausted = true WHERE approval_id = $1",
-          [key.approvalId]);
-        return finish({ nativeCallId, kind: "budget_exhausted" });
-      }
-      if (turn.phase !== "started") throw new MemberStoreError("stale");
-      const inserted = await db.query<{ receipt_id: string }>(
-        `INSERT INTO birbcrew_ts.work_items (conversation_id, request_id, approval_id, note)
-         SELECT conversation_id, request_id, approval_id, arguments->>'note' FROM birbcrew_ts.protected_calls
-         WHERE approval_id = $1 AND decision = 'approve' RETURNING receipt_id`, [key.approvalId],
-      );
-      return finish({ nativeCallId, kind: "recorded", receipt: { receiptId: inserted.rows[0].receipt_id, operationId: key.requestId } });
-    });
+    return this.transaction((db) => this.settleLocked(db, key));
+  }
+
+  async settleLocked(db: PoolClient, key: z.infer<typeof settleSchema>): Promise<ToolOutcome> {
+    const turn = await lockTurn(db, key);
+    if (turn.token !== key.token) throw new MemberStoreError("stale");
+    const call = await findCall(db, key);
+    const nativeCallId = key.nativeCallId;
+    async function finish(outcome: ToolOutcome) {
+      await publishObservation(db, key.conversationId, { kind: "result", approvalId: key.approvalId, outcome });
+      return outcome;
+    }
+    if (call.budget_exhausted) return finish({ nativeCallId, kind: "budget_exhausted" });
+    if (call.decision === "deny") return finish({ nativeCallId, kind: "denied" });
+    const existing = await db.query<{ approval_id: string; receipt_id: string }>(
+      "SELECT approval_id, receipt_id FROM birbcrew_ts.work_items WHERE conversation_id = $1 AND request_id = $2",
+      [key.conversationId, key.requestId],
+    );
+    if (existing.rows[0]?.approval_id === key.approvalId) {
+      return finish({ nativeCallId, kind: "recorded", receipt: { receiptId: existing.rows[0].receipt_id, operationId: key.requestId } });
+    }
+    if (await cancelled(db, key)) return finish({ nativeCallId, kind: "cancelled" });
+    if (call.decision !== "approve") throw new MemberStoreError("conflict");
+    if (existing.rows.length) {
+      await db.query("UPDATE birbcrew_ts.protected_calls SET budget_exhausted = true WHERE approval_id = $1",
+        [key.approvalId]);
+      return finish({ nativeCallId, kind: "budget_exhausted" });
+    }
+    if (turn.phase !== "started") throw new MemberStoreError("stale");
+    const inserted = await db.query<{ receipt_id: string }>(
+      `INSERT INTO birbcrew_ts.work_items (conversation_id, request_id, approval_id, note)
+       SELECT conversation_id, request_id, approval_id, arguments->>'note' FROM birbcrew_ts.protected_calls
+       WHERE approval_id = $1 AND decision = 'approve' RETURNING receipt_id`, [key.approvalId],
+    );
+    return finish({ nativeCallId, kind: "recorded", receipt: { receiptId: inserted.rows[0].receipt_id, operationId: key.requestId } });
   }
 }

@@ -1,7 +1,11 @@
+import type { Supervisor } from "./supervisor.ts";
+import type { MemberProfile } from "./profiles.ts";
+import { recoverClaudeProposal } from "./claude.ts";
+import { setTimeout as delay } from "node:timers/promises";
 import { Context } from "@temporalio/activity";
 import { ApplicationFailure } from "@temporalio/client";
 import { ApprovalStore, recordWorkItemArguments, type Approval, type Decision, type ToolOutcome } from "./approvals.ts";
-import { checkpointSchema, MemberStoreError, type Checkpoint, type Conversation, type TurnRequest } from "./domain.ts";
+import { MemberStoreError, type Checkpoint, type Conversation, type TurnRequest } from "./domain.ts";
 import type { MemberStore } from "./store.ts";
 
 export interface DriverInput {
@@ -18,12 +22,36 @@ export type DriverResult =
   | { kind: "pending"; proposal: { nativeCallId: string; name: "record_work_item"; arguments: unknown }; checkpoint: unknown };
 export type TurnDriver = (input: DriverInput, member: Conversation) => Promise<DriverResult>;
 export type MemberProfiles = ReadonlyMap<string, Readonly<Partial<Record<Conversation["engine"], TurnDriver>>>>;
-type PublicSegment = { kind: "complete"; text: string } | { kind: "pending"; approval: Approval };
-type Resume = { approval: Approval; outcome: ToolOutcome };
+export type PublicSegment = { kind: "complete"; text: string } | { kind: "pending"; approval: Approval };
+export type Resume = { approval: Approval; outcome: ToolOutcome };
 
-export function memberActivities(store: MemberStore, profiles: MemberProfiles) {
+export function memberActivities(store: MemberStore, supervisor: Supervisor, profiles: ReadonlyMap<string, MemberProfile>, stateDir: string) {
   const ledger = new ApprovalStore(store.pool);
   return {
+    async recoverPending(request: TurnRequest, workflowRunId: string): Promise<PublicSegment | null> {
+      const signal = Context.current().cancellationSignal;
+      for (let count = 0; count < 30; count++) {
+        const recovery = await store.stoppedProposal(request, workflowRunId);
+        if (!recovery) return null;
+        if (recovery.kind === "pending") return recovery;
+        if (recovery.kind === "stopping") {
+          await delay(200, undefined, { signal });
+          continue;
+        }
+        const { conversation: member, token, checkpoint } = recovery;
+        const profile = profiles.get(member.profile);
+        if (!profile?.claude || profile.protectedTool !== "record_work_item") return null;
+        const result = await recoverClaudeProposal({
+          threadId: request.conversationId, runId: request.requestId, text: request.text, checkpoint, signal,
+        }, { ...profile.claude, ownerId: member.ownerId, memberId: member.memberId, stateDir });
+        const approval = await ledger.propose({ ownerId: request.ownerId, conversationId: request.conversationId,
+          requestId: request.requestId, memberId: member.memberId, token, invocationId: request.requestId,
+          nativeCallId: result.proposal.nativeCallId, toolName: result.proposal.name,
+          arguments: recordWorkItemArguments.parse(result.proposal.arguments) }, result.checkpoint, true);
+        return { kind: "pending", approval };
+      }
+      return null;
+    },
     async decideApproval(input: Decision) {
       try {
         return await ledger.decide(input);
@@ -50,39 +78,7 @@ export function memberActivities(store: MemberStore, profiles: MemberProfiles) {
         if (turn.kind === "replay") return { kind: "complete", text: turn.reply };
         if (turn.kind === "pending") return turn;
         if (turn.kind === "uncertain") throw ApplicationFailure.nonRetryable("Native turn outcome unknown");
-        const { conversation, token } = turn;
-        const { ownerId, conversationId, requestId } = request;
-        const claim = { ownerId, conversationId, requestId, token };
-        let result;
-        let proposal;
-        try {
-          const driver = profiles.get(conversation.profile)?.[conversation.engine];
-          if (!driver) throw new Error("Unsupported member profile");
-          ctx.cancellationSignal.throwIfAborted();
-          result = await driver({
-            threadId: conversationId, runId: requestId, text: request.text,
-            checkpoint: turn.checkpoint, signal: ctx.cancellationSignal,
-            ...(resume && { continuation: { nativeCallId: resume.approval.nativeCallId, result: resume.outcome } }),
-          }, conversation);
-          ctx.cancellationSignal.throwIfAborted();
-          if (result.kind === "pending") {
-            if (resume) throw new Error("Unexpected second protected call");
-            const { nativeCallId, name: toolName } = result.proposal;
-            const args = recordWorkItemArguments.parse(result.proposal.arguments);
-            const checkpoint = checkpointSchema.parse(result.checkpoint);
-            if (checkpoint.engine !== conversation.engine || args.operation_id !== requestId) throw new Error("Unbound proposal");
-            proposal = { input: {
-              ...claim, memberId: conversation.memberId, invocationId: requestId, nativeCallId, toolName, arguments: args,
-            }, checkpoint };
-          }
-        } catch {
-          await store.markUncertain(claim);
-          throw ApplicationFailure.nonRetryable(`${conversation.engine} turn failed before a confirmed checkpoint`);
-        }
-        if (proposal) return { kind: "pending", approval: await ledger.propose(proposal.input, proposal.checkpoint) };
-        if (result.kind !== "complete") throw ApplicationFailure.nonRetryable("Missing protected proposal");
-        const text = await store.commitTurn({ ...claim, reply: result.text, checkpoint: result.checkpoint });
-        return { kind: "complete", text };
+        return await supervisor.start({ ...request, token: turn.token, execution: identity }, ctx.cancellationSignal);
       } catch (error) {
         if (error instanceof MemberStoreError) throw ApplicationFailure.nonRetryable(error.code);
         throw error;

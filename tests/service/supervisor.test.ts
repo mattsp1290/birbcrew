@@ -1,0 +1,251 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test, { type TestContext } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import { Client, Connection } from "@temporalio/client";
+import { Pool } from "pg";
+import { ApprovalStore } from "../../src/service/approvals.ts";
+import { MemberClient } from "../../src/service/client.ts";
+import type { Engine } from "../../src/service/domain.ts";
+import { MemberStore } from "../../src/service/store.ts";
+import { startSupervisor } from "../../src/service/supervisor.ts";
+
+async function until(check: () => Promise<boolean>, name: string) {
+  const deadline = Date.now() + 55_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await delay(100);
+  }
+  assert.fail(name);
+}
+
+async function optionalFile(path: string) {
+  try { return await readFile(path, "utf8"); }
+  catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+async function prove(t: TestContext, engine: Engine, exhaust = false) {
+  const dir = await mkdtemp(join(tmpdir(), "birb-launch-"));
+  const requests = join(dir, "requests.jsonl");
+  const native = join(dir, "native");
+  const marker = join(dir, "paused");
+  const config = join(dir, "profile.mjs");
+  const profile = "fence-" + randomUUID();
+  const fixture = new URL("../proof/fixture-profiles.mts", import.meta.url).href;
+  await writeFile(config, `import {profiles as p,close} from ${JSON.stringify(fixture)};\nexport {close};\nexport const profiles = new Map([[${JSON.stringify(profile)},p.get("fixture.v1")]]);\n`);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const pool = new Pool({ connectionString: process.env.BIRBCREW_TEST_DATABASE_URL });
+  const connection = await Connection.connect({address: process.env.BIRBCREW_TEMPORAL_ADDRESS});
+  t.after(async () => { await connection.close(); await pool.end(); });
+  const store = new MemberStore(pool);
+  const client = new MemberClient(store, new Client({ connection }));
+  const env = { ...process.env, BIRBCREW_DATABASE_URL: process.env.BIRBCREW_TEST_DATABASE_URL,
+    BIRBCREW_STATE_DIR: native, BIRBCREW_PROOF_REQUESTS: requests, BIRBCREW_PROOF_ENGINE: engine };
+  function worker(pause: boolean) {
+    const args = pause || exhaust ? ["--import", "./tests/service/supervisor-pause.ts"] : [];
+    const child = spawn(process.execPath, [...args, "src/service/cli.ts", "worker", config], {
+      env: { ...env, BIRBCREW_PROOF_PAUSE: pause ? marker : "", BIRBCREW_PROOF_DROP_RETRIES: !pause && exhaust ? "1" : "" }, stdio: "ignore",
+    });
+    const exited = once(child, "close");
+    t.after(async () => {
+      if (child.exitCode === null && !child.signalCode) child.kill("SIGKILL");
+      await exited;
+    });
+    return child;
+  }
+  const old = worker(true);
+  const ownerId = randomUUID(), conversationId = randomUUID();
+  const member = await store.spawn({engine, ownerId, profile, requestId: randomUUID()});
+  await client.open({ ownerId, conversationId, memberId: member.memberId });
+  const turn = { ownerId, conversationId, requestId: randomUUID(), text: "remember obsolete" };
+  const result = assert.rejects(client.submit(turn));
+  await until(async () => (await optionalFile(marker)).includes("reserved"), "First worker reserved the turn");
+  await until(async () => /State:\s+T/.test(await optionalFile(`/proc/${old.pid}/status`)), "First worker suspended");
+  worker(false);
+  await result;
+  const { rows: [revoked] } = await pool.query(
+    "SELECT phase, attempt, token, workflow_run_id, activity_id FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",
+    [conversationId, turn.requestId]);
+  assert.equal(revoked.phase, "uncertain");
+  assert.equal(revoked.attempt, exhaust ? 1 : 2);
+  old.kill("SIGCONT");
+  await until(async () => (await optionalFile(marker)).includes("denied"), "Original supervisor refused the resumed worker request");
+  const supervisor = await startSupervisor(config, native);
+  try {
+    const launch = { ...turn, token: revoked.token,
+      execution: {workflowRunId: revoked.workflow_run_id, activityId: revoked.activity_id, attempt: 1} };
+    for (let i = 0; i < 2; i++) {
+      await assert.rejects(supervisor.start(launch, t.signal), /denied|uncertain/);
+    }
+  } finally { await supervisor.close(); }
+  const admitted = await pool.query("SELECT 1 FROM birbcrew_ts.native_launches WHERE token=$1", [revoked.token]);
+  assert.equal(admitted.rowCount, 0, "Neither supervisor forked a native runner");
+  assert.equal(await optionalFile(requests), "", "No SDK provider received the stale prompt");
+  if (engine === "claude") assert.deepEqual(await readdir(native), [".birbcrew-volume"]);
+}
+
+for (const engine of ["pi", "claude"] as const) {
+  test(`${engine} refuses a paused worker's stale native launch after actual Temporal takeover`,
+    { timeout: 100_000 }, (t) => prove(t, engine));
+}
+
+test("exhausted Temporal retries revoke the original claim before workflow closure",
+  { timeout: 100_000 }, (t) => prove(t, "pi", true));
+
+test("supervisors deduplicate concurrent launches and confirm remote stops", { timeout: 30_000 }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "birb-idempotent-launch-"));
+  const profile = "launch-" + randomUUID();
+  const config = join(dir, "config.mjs");
+  const log = join(dir, "requests.jsonl");
+  const fixture = new URL("../proof/fixture-profiles.mts", import.meta.url).href;
+  await writeFile(config, `process.env.BIRBCREW_PROOF_ENGINE = "pi";
+    process.env.BIRBCREW_PROOF_REQUESTS = ${JSON.stringify(log)};
+    const original = await import(${JSON.stringify(fixture)});
+    export const profiles = new Map([[${JSON.stringify(profile)},original.profiles.get("fixture.v1")]]);
+    export const close = original.close;`);
+  const pool = new Pool({ connectionString: process.env.BIRBCREW_TEST_DATABASE_URL });
+  const store = new MemberStore(pool);
+  const a = await startSupervisor(config, dir), b = await startSupervisor(config, dir);
+  t.after(async () => { await Promise.all([a.close(), b.close()]); await pool.end(); await rm(dir, { recursive: true, force: true }); });
+  const ownerId = randomUUID(), conversationId = randomUUID();
+  const member = await store.spawn({ engine: "pi", ownerId, profile, requestId: randomUUID() });
+  await store.openConversation({ ownerId, memberId: member.memberId, conversationId });
+  const workflowRunId = randomUUID();
+  async function reserve(text: string) {
+    const input = { ownerId, conversationId, requestId: randomUUID(), text };
+    const execution = { workflowRunId, activityId: input.requestId, attempt: 1 };
+    const turn = await store.beginTurn(input, execution);
+    assert.equal(turn.kind, "start");
+    return { ...input, token: turn.token, execution };
+  }
+  const first = await reserve("remember once");
+  const expected = { kind: "complete", text: "stored once" };
+  assert.deepEqual(await Promise.all([a.start(first, t.signal), b.start(first, t.signal)]), [expected, expected]);
+  assert.deepEqual(await a.start(first, t.signal), expected);
+  assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 1);
+
+  const waiting = await reserve("wait");
+  const rejected = assert.rejects(a.start(waiting, t.signal));
+  await until(async () => (await readFile(log, "utf8")).includes('"wait"'), "Pi provider began streaming");
+  await b.stop(waiting);
+  await rejected;
+  await b.stop(waiting);
+  await assert.rejects(a.start(waiting, t.signal));
+  assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 2);
+  const { rows: [status] } = await pool.query("SELECT stopped FROM birbcrew_ts.native_launches WHERE token=$1", [waiting.token]);
+  assert.equal(status.stopped, true);
+});
+
+test("a replacement recovers Claude's stopped native deferral without a second generation", { timeout: 100_000 }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "birb-stopped-proposal-"));
+  const requests = join(dir, "requests.jsonl"), marker = join(dir, "lost"), config = join(dir, "profile.mjs");
+  const profile = "recover-" + randomUUID();
+  const fixture = new URL("../proof/fixture-profiles.mts", import.meta.url).href;
+  await writeFile(config, `import {profiles as p,close} from ${JSON.stringify(fixture)};
+    export {close}; export const profiles = new Map([[${JSON.stringify(profile)}, p.get("fixture.approval.v1")]]);`);
+  const pool = new Pool({ connectionString: process.env.BIRBCREW_TEST_DATABASE_URL });
+  const connection = await Connection.connect({address: process.env.BIRBCREW_TEMPORAL_ADDRESS});
+  const store = new MemberStore(pool);
+  const client = new MemberClient(store, new Client({ connection }));
+  t.after(async () => { await connection.close(); await pool.end(); await rm(dir, { recursive: true, force: true }); });
+  function worker(drop: boolean) {
+    const child = spawn(process.execPath, ["src/service/cli.ts", "worker", config], {
+      env: { ...process.env, BIRBCREW_DATABASE_URL: process.env.BIRBCREW_TEST_DATABASE_URL,
+        BIRBCREW_STATE_DIR: join(dir, "native"), BIRBCREW_PROOF_REQUESTS: requests, BIRBCREW_PROOF_ENGINE: "claude",
+        ...(drop && { NODE_OPTIONS: "--import " + new URL("./supervisor-drop-proposal.ts", import.meta.url).href,
+          BIRBCREW_LOST_PROPOSAL: marker }) }, stdio: "ignore",
+    });
+    const ended = once(child, "close");
+    t.after(async () => { if (child.exitCode === null && !child.signalCode) child.kill("SIGKILL"); await ended; });
+    return ended;
+  }
+  const old = worker(true);
+  const key = { ownerId: randomUUID(), conversationId: randomUUID() };
+  const member = await store.spawn({ ownerId: key.ownerId, engine: "claude", profile, requestId: randomUUID() });
+  await client.open({ ...key, memberId: member.memberId });
+  const requestId = randomUUID(), text = "record " + requestId;
+  const submitted = client.submit({ ...key, requestId, text });
+  submitted.catch(() => {});
+  await until(async () => Boolean(await optionalFile(marker)), "First worker observed the native Claude deferral");
+  assert.equal((await old)[1], "SIGKILL");
+  assert.deepEqual(await client.pending(key), []);
+  worker(false);
+  await until(async () => (await client.pending(key)).length === 1, "Replacement published the stopped Claude proposal");
+  assert.equal((await readFile(requests, "utf8")).trim().split("\n").length, 1);
+  const [approval] = await client.pending(key);
+  const { summary, toolName, policyVersion, ...decision } = approval;
+  await client.decide({ ...decision, choice: "approve" });
+  const reply = await submitted;
+  const { rows } = await pool.query("SELECT receipt_id FROM birbcrew_ts.work_items WHERE approval_id=$1", [approval.approvalId]);
+  assert.equal(rows.length, 1);
+  assert.equal(reply, "recorded " + rows[0].receipt_id);
+  const generations = await pool.query("SELECT stopped FROM birbcrew_ts.native_launches WHERE conversation_id=$1", [key.conversationId]);
+  assert.equal(generations.rowCount, 2);
+  assert.equal((await readFile(requests, "utf8")).trim().split("\n").length, 2);
+});
+
+test("concurrent and revoked receipt submissions reach each native engine at most once", { timeout: 60_000 }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "birb-receipt-launch-"));
+  const config = join(dir, "profile.mjs"), log = join(dir, "requests.jsonl");
+  const profile = "receipt-" + randomUUID();
+  const fixture = new URL("../proof/fixture-profiles.mts", import.meta.url).href;
+  await writeFile(config, `process.env.BIRBCREW_PROOF_REQUESTS = ${JSON.stringify(log)};
+    const original = await import(${JSON.stringify(fixture)});
+    export const profiles = new Map([[${JSON.stringify(profile)},original.profiles.get("fixture.approval.v1")]]);
+    export const close = original.close;`);
+  const pool = new Pool({ connectionString: process.env.BIRBCREW_TEST_DATABASE_URL });
+  const store = new MemberStore(pool), ledger = new ApprovalStore(pool);
+  const a = await startSupervisor(config, dir), b = await startSupervisor(config, dir);
+  t.after(async () => { await Promise.all([a.close(), b.close()]); await pool.end(); await rm(dir, { recursive: true, force: true }); });
+  for (const engine of ["pi", "claude"] as const) {
+    const ownerId = randomUUID();
+    const member = await store.spawn({ engine, ownerId, profile, requestId: randomUUID() });
+    for (const revoke of [true, false]) {
+      const conversationId = randomUUID(), requestId = randomUUID();
+      await store.openConversation({ ownerId, memberId: member.memberId, conversationId });
+      const request = { ownerId, conversationId, requestId, text: "record " + requestId };
+      const execution = { workflowRunId: randomUUID(), activityId: "initial", attempt: 1 };
+      const claim = await store.beginTurn(request, execution);
+      assert.equal(claim.kind, "start");
+      const initial = { ...request, token: claim.token, execution };
+      const first = await a.start(initial, t.signal);
+      assert.equal(first.kind, "pending");
+      const { approval } = first;
+      const { summary, toolName, policyVersion, ...decision } = approval;
+      await ledger.decide({ ...decision, choice: "approve" });
+      const receipt = await ledger.settleConfirmed(approval);
+      assert.equal(receipt.kind, "recorded");
+      const next = { ...execution, activityId: "resume" };
+      const resume = await store.beginResume(request, approval, next);
+      assert.equal(resume.kind, "start");
+      assert.notEqual(resume.token, claim.token);
+      const launch = { ...request, token: resume.token, execution: next };
+      await a.stop(initial);
+      await b.stop(initial);
+      const callsBefore = (await readFile(log, "utf8")).trim().split("\n").length;
+      if (revoke) {
+        await b.stop(launch);
+        await assert.rejects(a.start(launch, t.signal));
+      } else {
+        const [one, two] = await Promise.all([a.start(launch, t.signal), b.start(launch, t.signal)]);
+        assert.deepEqual(one, two);
+        assert.equal(one.kind, "complete");
+        assert.ok(one.text.includes(receipt.receipt.receiptId));
+      }
+      assert.equal((await readFile(log, "utf8")).trim().split("\n").length - callsBefore, revoke ? 0 : 1);
+      const delivered = await pool.query("SELECT receipt_digest FROM birbcrew_ts.native_launches WHERE approval_id=$1", [approval.approvalId]);
+      assert.equal(delivered.rowCount, revoke ? 0 : 1);
+      if (!revoke) assert.deepEqual(delivered.rows[0].receipt_digest, createHash("sha256").update(JSON.stringify(receipt)).digest());
+      const saved = await pool.query("SELECT receipt_id FROM birbcrew_ts.work_items WHERE approval_id=$1", [approval.approvalId]);
+      assert.deepEqual(saved.rows, [{ receipt_id: receipt.receipt.receiptId }]);
+    }
+  }
+});
