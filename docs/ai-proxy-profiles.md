@@ -211,5 +211,27 @@ The independent broader consumer suite had one Claude timeout (nine passes, one
 cancelled); no baseline cause was established. Subsequent [Linux CI](https://github.com/mattsp1290/birbcrew/actions/runs/43085082834)
 on `5eb15dc` passed the complete consumer suite (10/10, including Claude) and all
 32 proxy qualification tests. This establishes that run's success, not a diagnosed
-cause for the earlier timeout. A maintained full-service restart scenario remains
-follow-up acceptance.
+cause for the earlier timeout. The maintained scenario below supersedes that portability gap without expanding
+its acceptance scope.
+
+## Maintained service-restart fixture
+
+Run `npm run test:proxy:restart` after `npm ci` and `npm run build` on Linux with
+Landlock ABI4+, Node22.23.3, Docker and Temporal CLI **1.10.0** on PATH (or set
+`TEMPORAL_CLI` to its absolute path). The `proxy-service-restart` CI job installs
+and checksum-verifies that CLI and runs the same command with disposable services.
+
+This committed scenario uses actual service CLI commands, the worker/supervisor,
+PostgreSQL, Temporal development-server persistence and all three native engines
+through `createProxyProfile`. It completes a remember turn, kills the worker and
+Temporal process groups, restarts PostgreSQL while retaining data, rediscovers its
+port, and restarts Temporal/workers with the same persistence/native state. It
+then verifies duplicate readback with zero new upstream requests and a recall
+with one fresh credential identity. Synthetic credentials are hashed for in-memory
+comparison, not printed. Finally blocks stop owned processes and remove the test
+container/private state on both success and failure.
+
+The committed test turns the independent between-turn host probe into repeatable
+qualification. It still does **not** claim application worker-container replacement,
+in-flight/tool-decision recovery, observer reconnect, production Temporal
+persistence, forced compaction or live proxy/model acceptance.

@@ -8,6 +8,7 @@ on:
       - 'tests/service/**'
       - 'tests/proxy-relay.test.ts'
       - 'tests/fixtures/engines/**'
+      - 'tests/proof/**'
       - 'package*.json'
       - 'vendor/**'
       - 'packages/**'
@@ -29,3 +30,25 @@ jobs:
       - run: npm run build
       - run: npm run test:proxy
       - run: npm test
+  proxy-service-restart:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.3'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Install pinned Temporal CLI
+        run: |
+          mkdir -p .proof/bin
+          archive=temporal_cli_1.10.0_linux_amd64.tar.gz
+          curl -fsSL "https://github.com/temporalio/cli/releases/download/v1.10.0/$archive" -o ".proof/bin/$archive"
+          curl -fsSL https://github.com/temporalio/cli/releases/download/v1.10.0/checksums.txt -o .proof/bin/checksums.txt
+          (cd .proof/bin && grep " $archive$" checksums.txt | sha256sum -c -)
+          tar -xzf ".proof/bin/$archive" -C .proof/bin temporal
+      - run: npm run test:proxy:restart
+        env:
+          TEMPORAL_CLI: ${{ github.workspace }}/.proof/bin/temporal
