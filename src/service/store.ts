@@ -1,3 +1,4 @@
+import { matchesNativeReply, type ItemReceipt } from "./codex-items.ts";
 import { interruptLiveLocked } from "./codex-calls.ts";
 import { captureProjectNotes } from "./project-notes.ts";
 import { requestNativeStop } from "./native-admission.ts";
@@ -70,7 +71,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"]] as const;
+      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -382,7 +383,7 @@ export class MemberStore {
     });
   }
 
-  async appendCodexItem(claim: Claim, index: number, text: string) {
+  async appendCodexItem(claim: Claim, index: number, text: string, receipt: ItemReceipt) {
     await this.transaction(async db => {
       const member = await conversationFor(db, claim, true);
       if (member.engine !== "codex") throw new MemberStoreError("conflict");
@@ -390,8 +391,13 @@ export class MemberStore {
         "AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests WHERE conversation_id=$1 AND request_id=$2 AND token=$3)",
         [claim.conversationId, claim.requestId, claim.token]);
       if (!current.rowCount) throw new MemberStoreError("stale");
-      const project = await textProjection(db,claim.conversationId);
-      await publishObservation(db,claim.conversationId,{kind:"nativeItem",requestId:claim.requestId,index,text:project(text,true)});
+      const saved = await db.query(`INSERT INTO birbcrew_ts.codex_item_receipts AS r
+        (conversation_id,request_id,ordinal,bytes,digest) VALUES ($1,$2,$3,$4,$5)
+        ON CONFLICT (conversation_id,request_id,ordinal) DO UPDATE SET digest=r.digest
+          WHERE r.bytes=EXCLUDED.bytes AND r.digest=EXCLUDED.digest`,
+        [claim.conversationId,claim.requestId,index,receipt.bytes,receipt.digest]);
+      if (!saved.rowCount) throw new MemberStoreError("conflict");
+      await publishObservation(db,claim.conversationId,{kind:"nativeItem",requestId:claim.requestId,index,text});
     });
   }
 
@@ -406,10 +412,14 @@ export class MemberStore {
           WHERE conversation_id = $1 AND request_id = $2 AND token = $3 AND phase = 'started'`, args,
       );
       if (update.rowCount) {
-        const project = await textProjection(db, key.conversationId);
+        const receipts = conversation.engine === "codex" ? (await db.query<ItemReceipt & {ordinal:number}>(
+          "SELECT ordinal,bytes,digest FROM birbcrew_ts.codex_item_receipts WHERE conversation_id=$1 AND request_id=$2 ORDER BY ordinal",
+          [key.conversationId,key.requestId])).rows : [];
+        if (receipts.length && !matchesNativeReply(key.reply, receipts)) throw new MemberStoreError("conflict");
+        const content = receipts.length ? {itemCount:receipts.length} : {text:(await textProjection(db, key.conversationId))(key.reply,true)};
         const cancelled = await db.query("SELECT 1 FROM birbcrew_ts.tool_cancellations WHERE conversation_id=$1 AND request_id=$2",
           [key.conversationId,key.requestId]);
-        await publishObservation(db, key.conversationId, { kind: "reply", requestId: key.requestId, text: project(key.reply, true), cancelled:!!cancelled.rowCount });
+        await publishObservation(db, key.conversationId, { kind: "reply", requestId: key.requestId, ...content, cancelled:!!cancelled.rowCount });
         return key.reply;
       }
       const replay = await db.query<{ reply: string }>(

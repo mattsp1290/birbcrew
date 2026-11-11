@@ -16,7 +16,7 @@ function resultText(outcome: ToolOutcome) {
 
 export async function runLiveTool(
   pool: Pool, launch: Launch, member: Conversation, tool: DeferredTool, input: DriverInput,
-  run: (input:DriverInput) => Promise<DriverResult>,
+  run: (input:DriverInput) => Promise<DriverResult>, discloseCallId: (id: string) => Promise<void>,
 ) {
   const stopped = new AbortController();
   const signal = AbortSignal.any([input.signal,stopped.signal]);
@@ -30,6 +30,7 @@ export async function runLiveTool(
     try {
       const threadId = await Promise.race([nativeThread.promise,delay(5000,undefined,{signal:call.signal})]);
       if (threadId !== call.threadId) throw new Error("Unexpected native thread");
+      await discloseCallId(call.nativeCallId);
       const deadline = Date.now() + 45_000;
       const approval = await proposeLive(pool,launch,{...call,args:call.args,expiresAt:new Date(deadline).toISOString()});
       const connection = Connection.lazy({address:process.env.BIRBCREW_TEMPORAL_ADDRESS ?? "127.0.0.1:7233"});

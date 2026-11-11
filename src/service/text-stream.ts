@@ -1,11 +1,15 @@
 import type { Pool, PoolClient } from "pg";
 
 // Native correlation IDs can also appear in model-generated prose, including across delta boundaries.
-export async function textProjection(db: Pool | PoolClient, conversationId: string) {
+export async function nativeCallIds(db: Pool | PoolClient, conversationId: string) {
   const { rows } = await db.query<{ native_call_id: string }>(
     `SELECT native_call_id FROM birbcrew_ts.deferred_calls WHERE conversation_id=$1
      UNION SELECT native_call_id FROM birbcrew_ts.pi_children WHERE conversation_id=$1`, [conversationId]);
-  const literals = rows.map((row) => row.native_call_id).sort((a, b) => b.length - a.length);
+  return rows.map((row) => row.native_call_id).sort((a, b) => b.length - a.length);
+}
+
+export async function textProjection(db: Pool | PoolClient, conversationId: string) {
+  const literals = await nativeCallIds(db, conversationId);
   let held = "";
   return (delta: string, final = false) => {
     const text = held + delta;

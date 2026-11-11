@@ -1,3 +1,5 @@
+import { codexItemWriter } from "./codex-items.ts";
+import { nativeCallIds } from "./text-stream.ts";
 import { MemberStore } from "./store.ts";
 import { runLiveTool } from "./codex-live.ts";
 import { trustedProjectContext } from "./project-notes.ts";
@@ -43,23 +45,26 @@ process.once("message", async (command: AdmittedTurn) => {
       const profile = profiles.get(member.profile);
       const tool = profile?.protectedTool ?? profile?.humanTool;
       const store = new MemberStore(pool);
-      let nextItem = 0;
-      reply = await withNativeAdmission(pool,command.launch,AbortSignal.any([controller.signal,AbortSignal.timeout(170_000)]), signal => {
+      reply = await withNativeAdmission(pool,command.launch,AbortSignal.any([controller.signal,AbortSignal.timeout(170_000)]), async signal => {
+        const items = member.engine === "codex" ? codexItemWriter(await nativeCallIds(pool,member.conversationId), !!tool,
+          (index,text,receipt) => store.appendCodexItem(command.launch,index,text,receipt)) : undefined;
         const input: DriverInput = {
-        ...(projectContext && { projectContext }),
-        ...(command.childProfile && {childProfile: command.childProfile}),
-        ...(command.childResults && {childResults: command.childResults}),
-        threadId: command.threadId, runId: command.runId, text: command.text,
-        onToolArgs: (toolArgs, matchedOperation) => process.send?.({ toolArgs, matchedOperation }),
-        onText: member.engine === "codex"
-          ? text => store.appendCodexItem(command.launch, nextItem++, text)
-          : delta => { process.send?.({ delta }); },
-        checkpoint: command.checkpoint, continuation: command.continuation, signal,
+          ...(projectContext && { projectContext }),
+          ...(command.childProfile && {childProfile: command.childProfile}),
+          ...(command.childResults && {childResults: command.childResults}),
+          threadId: command.threadId, runId: command.runId, text: command.text,
+          onToolArgs: (toolArgs, matchedOperation) => process.send?.({ toolArgs, matchedOperation }),
+          onText: items?.append ?? (delta => { process.send?.({ delta }); }),
+          checkpoint: command.checkpoint, continuation: command.continuation, signal,
         };
         const scope = {...command.launch, engine:member.engine, workflowRunId:command.launch.execution.workflowRunId};
-        const invoke = () => traced("model.invoke",scope, () => member.engine === "codex" && tool
-          ? runLiveTool(pool, command.launch, member, tool, input, value => driver(value, member))
-          : driver(input, member));
+        const invoke = () => traced("model.invoke",scope, async () => {
+          const result = items && tool
+            ? await runLiveTool(pool, command.launch, member, tool, input, value => driver(value, member), items.disclose)
+            : await driver(input, member);
+          await items?.finish();
+          return result;
+        });
         return traced("workflow.segment",scope, () => command.checkpoint ? traced("native.restore",scope,invoke) : invoke());
       });
     } finally {

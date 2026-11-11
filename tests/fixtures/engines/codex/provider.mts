@@ -63,6 +63,10 @@ export async function startProvider(onFailure = () => {},
         await appendFile(process.env.BIRBCREW_PROOF_CODEX_REQUESTS,JSON.stringify({callId:output.call_id,ids,outcomes}) + "\n",{mode:0o600});
       }
       const gate = streamGate(prompt);
+      const echoCall = prompt?.startsWith("review ") === true;
+      const commentary = (text: string, phase: "commentary" | "final_answer") =>
+        send(response,"response.output_item.done",{item:{type:"message",id:"msg_" + randomUUID(),role:"assistant",
+          phase,content:[{type:"output_text",text}]}});
       if (gate) {
         for (const [index,text] of ["first"," second"].entries()) {
           const item = {type:"message",id:"msg_" + randomUUID(),role:"assistant",
@@ -72,9 +76,14 @@ export async function startProvider(onFailure = () => {},
           await waitForGate(gate + (index ? ".second" : ".first"));
           send(response,"response.output_item.done",{output_index:index,item});
         }
-      } else if ((prompt?.startsWith("record ") || prompt === "choose") && !output) {
+      } else if (echoCall && output) {
+        commentary("After private.", "commentary");
+        commentary(prompt!.slice(7) + " finished.", "final_answer");
+      } else if ((prompt?.startsWith("record ") || prompt === "choose" || echoCall) && !output) {
         const ordinary = prompt === "choose";
-        const operation = ordinary ? randomUUID() : prompt.slice(7);
+        const operation = ordinary ? randomUUID() : prompt!.slice(7);
+        const callId = (echoCall ? "private." : "call_") + operation;
+        if (echoCall) commentary("Before " + callId, "commentary");
         const catalog = input.filter(i => i.role === "developer" && i.type === "message").flatMap(i => {
           const parts = textParts.safeParse(i.content);
           return parts.success ? parts.data.map(p => p.text) : [];
@@ -83,7 +92,7 @@ export async function startProvider(onFailure = () => {},
           /^- (mcp__(?:birbcrew|fixture))\s*$/m.exec(catalog)?.[1];
         if (!namespace) throw new Error("Fixture MCP namespace missing");
         send(response, "response.output_item.done", { item: {
-          type:"function_call", call_id:"call_" + operation, namespace,
+          type:"function_call", call_id:callId, namespace,
           name:ordinary ? "choose_next_step" : "record_work_item", arguments:JSON.stringify(ordinary ? {} : {operation_id:operation, note:"private fixture note"})
         } });
       } else {

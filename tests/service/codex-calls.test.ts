@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {randomUUID} from "node:crypto";
+import {createHash,randomUUID} from "node:crypto";
 import {after,before,test} from "node:test";
 import {setTimeout as delay} from "node:timers/promises";
 import {Pool} from "pg";
@@ -220,3 +220,21 @@ for (const first of ["stop","effect"] as const) {
     assert.equal(after.kind,"interrupted");
   });
 }
+
+test("a projected native item commits only against its original UTF-8 bytes", async () => {
+  const {scope,launch,view} = await conversation(await member("record_work_item"));
+  const {ownerId,conversationId,requestId} = scope;
+  const claim = {ownerId,conversationId,requestId,token:launch.token};
+  const raw = "Résumé private", item = "Résumé [tool call]";
+  const receipt = {bytes:Buffer.byteLength(raw),digest:createHash("sha256").update(raw).digest()};
+  await store.appendCodexItem(claim,0,item,receipt);
+  await store.appendCodexItem(claim,0,item,receipt);
+  await assert.rejects(store.appendCodexItem(claim,0,item,{...receipt,digest:Buffer.alloc(32)}),{code:"conflict"});
+  const checkpoint = {version:1, engine:"codex", state:{}};
+  await assert.rejects(store.commitTurn({...claim,reply:"Résumé changed",checkpoint}),{code:"conflict"});
+  assert.equal((await view()).state.phase,"running");
+  assert.equal(await store.commitTurn({...claim,reply:raw,checkpoint}),raw);
+  const snapshot = await view();
+  assert.equal(snapshot.state.phase,"idle");
+  assert.equal(snapshot.messages.at(-1)?.content,item);
+});

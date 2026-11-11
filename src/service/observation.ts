@@ -35,7 +35,7 @@ type Projection = {
 type Change = ChildChange
   | { kind: "nativeItem"; requestId: string; index: number; text: string }
   | { kind: "input"; requestId: string; text: string }
-  | { kind: "reply"; requestId: string; text: string; cancelled?: boolean }
+  | ({ kind: "reply"; requestId: string; cancelled?: boolean } & ({ text: string } | { itemCount: number }))
   | { kind: "toolValue"; invocationId: string; publicId: string; requestId: string }
   | { kind: "toolPreview"; invocationId: string; publicId: string }
   | { kind: "call"; approval: Approval; expiresAt?: string }
@@ -293,8 +293,10 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
     case "reply": {
       if (Object.keys(snapshot.openTools).length) throw new MemberStoreError("conflict");
       const items = messages.filter(m => m.role === "assistant" && m.id.startsWith(change.requestId + "/item/"));
-      if (items.length) {
-        if (items.map(m => m.content).join("") !== change.text) throw new MemberStoreError("conflict");
+      if ("itemCount" in change || items.length) {
+        if ("itemCount" in change ? items.length !== change.itemCount : items.map(m => m.content).join("") !== change.text) {
+          throw new MemberStoreError("conflict");
+        }
         finishStep();
         state.phase = change.cancelled ? "cancelled" : messages.filter(m => m.role === "user").length >= 4 ? "complete" : "idle";
         break;

@@ -126,3 +126,32 @@ for (const action of ["kill","cancel","expiry"] as const) {
     }
   });
 }
+
+
+test("Codex redacts a future tool ID in preamble and a known ID split across completed items", {timeout:70_000}, async t => {
+  const host = await service(t);
+  const {requestId,conversationId,memberId,path} = await open(host,"fixture.approval.v1");
+  const first = host.attach(conversationId);
+  await until(async () => first.events.some(e => e.type === "STATE_SNAPSHOT") || undefined);
+  await host.post(path + "/inputs",{requestId,text:"review " + requestId});
+  const card = await until(async () => (await state(host,path)).state.pendingApprovals[0]);
+  const second = host.attach(conversationId);
+  await until(async () => second.agent.messages.some(m => m.content === "Before [tool call]") || undefined);
+  await host.post(path + "/human", {memberId,requestId,invocationId:card.invocationId,approvalId:card.approvalId,version:1,choice:"deny"});
+  const settled = await until(async () => {
+    const snapshot = await state(host,path);
+    return snapshot.state.phase === "idle" && [first,second].every(r => r.agent.messages.length === snapshot.messages.length)
+      ? snapshot : undefined;
+  });
+  const expected = ["Before [tool call]", "After [tool call]", "[tool call] finished."];
+  assert.deepEqual(settled.messages.filter((m: {id:string}) => m.id.startsWith(requestId + "/item/")).map((m: {content:string}) => m.content), expected);
+  for (const reader of [first,second]) {
+    assert.deepEqual(reader.agent.messages,settled.messages);
+    assert.ok(!JSON.stringify(reader.events).includes("private."));
+  }
+  for (const type of ["TEXT_MESSAGE_START","TEXT_MESSAGE_CONTENT","TEXT_MESSAGE_END"]) {
+    assert.equal(first.events.filter(e => e.type === type && String(e.messageId).startsWith(requestId + "/item/")).length,3);
+  }
+  const stored = await host.db.query("SELECT reply FROM birbcrew_ts.turns WHERE conversation_id=$1 AND phase='committed'", [conversationId]);
+  assert.equal(stored.rows[0].reply,"Before private." + requestId + "After private." + requestId + " finished.");
+});
