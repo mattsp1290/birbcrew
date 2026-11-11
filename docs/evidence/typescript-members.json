@@ -94,7 +94,8 @@
         "Official observers and selected gateway cases",
         "Fixture processes, PostgreSQL container and private state removed"
       ],
-      "hosted": "NOT VERIFIED"
+      "hosted": "VERIFIED",
+      "hostedEvidence": "typescript-claude-hosted.json"
     },
     "codex": {
       "fixture": "VERIFIED",
@@ -173,7 +174,7 @@
     "revision": "9fd67ce73ada5274e5e9560ad3aafe0c8e6d3e63",
     "scope": "Implementation, deterministic recovery, clean bootstrap, observer output and controlled account harness. Reviewers exercised the final resume admission fence for Claude and Pi and the mixed Pi child outcomes."
   },
-  "hostedAuthorization": "Pi passed with a current owner grant for OpenCode Go. Hosted acceptance for Claude and Codex, human permissions review and cutover remain pending.",
+  "hostedAuthorization": "Claude and Pi passed their hosted runs. Hosted Codex acceptance, human permissions review and cutover remain pending.",
   "sourceManifest": [
     {
       "path": ".gitattributes",
