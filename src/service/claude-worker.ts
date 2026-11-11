@@ -100,8 +100,8 @@ async function run(command: Command) {
   const options: Options = {
     cwd,
     spawnClaudeCodeProcess({ command, args, env, signal }) {
-      const launcher = fileURLToPath(new URL("./claude-launch.py", import.meta.url));
-      const cli = spawn("/usr/bin/python3", ["-I", launcher, String(process.pid), command, ...args], {
+      const launcher = fileURLToPath(new URL("../../.proof/bin/member-launch", import.meta.url));
+      const cli = spawn(launcher, [String(process.pid), command, ...args], {
         cwd, env, signal, stdio: ["pipe", "pipe", "ignore"],
       });
       exited = new Promise<void>((resolve) => cli.once("close", () => resolve()));

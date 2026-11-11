@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+mkdir -p .proof/bin
+binary=$(mktemp .proof/bin/member-launch.XXXXXX)
+trap 'rm -f "$binary"' EXIT
+cc -std=c11 -O2 -Wall -Wextra -Werror -Wl,-z,relro,-z,now native/member-launch.c -o "$binary"
+chmod 755 "$binary"
+mv -f "$binary" .proof/bin/member-launch

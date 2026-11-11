@@ -35,7 +35,9 @@ the same private state directory when a worker is replaced.
 
 Run `npm ci` and `npm run test:integration` on Linux with Node 22.23.3, Docker,
 Python 3, Beans (`bn`), Git, and Temporal CLI 1.10.0. Claude requires Linux
-Landlock ABI 3 or newer. Set `TEMPORAL_CLI` if the executable is outside PATH
+Landlock ABI 3 or newer. The native Codex driver requires ABI 4. Build the
+shared launcher with `scripts/build-native` using a C11 compiler and Linux
+development headers. Setup and integration verification build it automatically. Set `TEMPORAL_CLI` if the executable is outside PATH
 and `.proof/bin`. This command starts disposable services and uses
 local scripted model providers. To use an approved account, follow the
 [live profile guide](docs/member-profiles.md). The verifier replaces the worker, PostgreSQL

@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
+scripts/build-native
 uv sync --locked
 mkdir -p .proof/bin
 case "$(uname -m)" in

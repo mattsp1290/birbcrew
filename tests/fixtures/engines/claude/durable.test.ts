@@ -47,12 +47,12 @@ test("the native CLI cannot read a sibling owner's file", async (t) => {
   await mkdir(cwd);
   const sibling = join(root, "other-owner.txt");
   await writeFile(sibling, "private fixture sentinel");
-  const launcher = fileURLToPath(new URL("../../../../src/service/claude-launch.py", import.meta.url));
+  const launcher = fileURLToPath(new URL("../../../../.proof/bin/member-launch", import.meta.url));
   const cli = fileURLToPath(new URL(
     `../../../../node_modules/@anthropic-ai/claude-agent-sdk-linux-${process.arch}/claude`, import.meta.url,
   ));
-  await assert.rejects(promisify(execFile)("/usr/bin/python3", [
-    "-I", launcher, String(process.pid), cli, "--bare", "-p", "probe", "--system-prompt-file", sibling,
+  await assert.rejects(promisify(execFile)(launcher, [
+    String(process.pid), cli, "--bare", "-p", "probe", "--system-prompt-file", sibling,
   ], { cwd, timeout: 10_000, env: { HOME: cwd, CLAUDE_CONFIG_DIR: cwd, TMPDIR: cwd, ANTHROPIC_API_KEY: "synthetic" } }),
   (error: Error & { stderr?: string }) => {
     assert.ok(error.stderr?.includes("EACCES") && error.stderr.includes(sibling), error.stderr);
