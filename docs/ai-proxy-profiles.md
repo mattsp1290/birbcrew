@@ -9,9 +9,14 @@ attestation policy, use their auth files, or fall back to them.
 
 | Engine | `protocol` | Local SDK route | Upstream requirement |
 | --- | --- | --- | --- |
-| Claude | `anthropic-messages` | `/v1/messages` | Anthropic Messages JSON/SSE, including tool use/results |
+| Claude | `anthropic-messages` | `/v1/messages` or `/v1/messages?beta=true` | Anthropic Messages JSON/SSE, including tool use/results |
 | Codex | `openai-responses` | `/v1/responses` | OpenAI Responses SSE, including function calls/results |
 | Pi | `openai-chat-completions` | `/v1/chat/completions` | OpenAI Chat Completions SSE, including tool calls/results |
+
+Claude's pinned beta Messages SDK adds the exact `?beta=true` suffix. The relay
+accepts that suffix locally but still forwards to the exact configured upstream
+endpoint, with `anthropic-beta` headers preserved. Other query strings and the
+`count_tokens` route are not supported.
 
 There is no universal format translation. Configure the **full upstream POST
 endpoint**, including any proxy routing prefix. A proxy offering only Chat

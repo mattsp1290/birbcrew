@@ -169,3 +169,25 @@ test("timeout interrupts an authenticated client stalled while uploading", async
     assert.equal(resolutions, 0);
   } finally { await relay.close(); }
 });
+
+test("Claude beta Messages suffix preserves exact upstream endpoint and beta header", async () => {
+  let forwarded = 0;
+  const upstream = await fixture(async (request, response) => {
+    forwarded++;
+    assert.equal(request.url, "/upstream");
+    assert.equal(request.headers["anthropic-beta"], "fixture-beta");
+    for await (const _ of request) { /* consume request */ }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"ok":true}');
+  });
+  const relay = await startProxyRelay({ protocol: "anthropic-messages", endpoint: upstream.url, model: "allowed", allowHttpLoopback: true,
+    resolveCredential: async () => ({ headers: { "x-api-key": "synthetic" }, expiresAt: Date.now() + 1000 }) });
+  try {
+    for (const [suffix, expected] of [["?beta=true", 200], ["?beta=false", 400], ["?beta=true&other=1", 400], ["?other=1", 400], ["/count_tokens", 400]] as const) {
+      const response = await fetch(relay.baseUrl + "/v1/messages" + suffix, { method: "POST", headers: { "x-api-key": relay.apiKey, "anthropic-beta": "fixture-beta" }, body: '{"model":"allowed"}' });
+      assert.equal(response.status, expected);
+      await response.text();
+    }
+    assert.equal(forwarded, 1);
+  } finally { await relay.close(); await upstream.close(); }
+});

@@ -89,7 +89,11 @@ export async function startProxyRelay(config: ProxyRelayConfig) {
   server.headersTimeout = Math.min(timeout, 30_000);
   async function handle(request: IncomingMessage, response: ServerResponse) {
     if (closed) return failure(response, 503);
-    if (request.method !== "POST" || request.url !== route) return failure(response, 400);
+    // The pinned Anthropic beta Messages SDK adds this exact suffix. It does
+    // not select another upstream destination; beta capability is in headers.
+    const matchesRoute = request.url === route ||
+      (protocol === "anthropic-messages" && request.url === route + "?beta=true");
+    if (request.method !== "POST" || !matchesRoute) return failure(response, 400);
     const bearer = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7) : undefined;
     const key = request.headers["x-api-key"];
     if (!validToken(bearer, apiKey) && !validToken(typeof key === "string" ? key : undefined, apiKey)) return failure(response, 401);
