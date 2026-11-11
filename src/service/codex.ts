@@ -39,7 +39,7 @@ const loopback = (raw: string) => {
   }
   return url;
 };
-async function nativeHistory(home: string, scratch: string, nativeId: string, known?: string) {
+export async function nativeHistory(home: string, scratch: string, nativeId: string, known?: string) {
   // The CLI places rollout files in sessions/YYYY/MM/DD.
   const filePattern = /^sessions\/\d{4}\/\d{2}\/\d{2}\/rollout-[\dT-]+-([0-9a-f-]{36})\.jsonl$/;
   const index = join(home, "state_5.sqlite");

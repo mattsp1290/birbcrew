@@ -19,10 +19,13 @@ function send(response: ServerResponse, type: string, value: Record<string, unkn
 }
 
 export async function startProvider(onFailure = () => {},
-  onRequest?: (prompt:string, instructions:string, messages:string, continuation:boolean) => void) {
+  onRequest?: (prompt:string, instructions:string, messages:string, continuation:boolean) => void,
+  dynamicNamespace?: string) {
   const toolSurfaces: z.infer<typeof providerInput>["tools"][] = [];
   const requests: InputItem[][] = [];
+  let cancelled = 0;
   const server = createServer(async (request, response) => {
+    response.once("close", () => { if (!response.writableEnded) cancelled++; });
     try {
       if (request.method !== "POST" || request.url !== "/responses") {
         response.writeHead(404).end(); return;
@@ -88,8 +91,8 @@ export async function startProvider(onFailure = () => {},
           const parts = textParts.safeParse(i.content);
           return parts.success ? parts.data.map(p => p.text) : [];
         }).join("\n");
-        const namespace = [...tools,...additional].find(tool => tool.name === "mcp__birbcrew" || tool.name === "mcp__fixture")?.name ??
-          /^- (mcp__(?:birbcrew|fixture))\s*$/m.exec(catalog)?.[1];
+        const namespace = [...tools,...additional].find(tool => (dynamicNamespace !== undefined && tool.name === dynamicNamespace) || tool.name === "mcp__birbcrew" || tool.name === "mcp__fixture")?.name ??
+          (dynamicNamespace && catalog.includes("- "+dynamicNamespace) ? dynamicNamespace : /^- (mcp__(?:birbcrew|fixture))\s*$/m.exec(catalog)?.[1]);
         if (!namespace) throw new Error("Fixture MCP namespace missing");
         send(response, "response.output_item.done", { item: {
           type:"function_call", call_id:callId, namespace,
@@ -117,7 +120,7 @@ export async function startProvider(onFailure = () => {},
   await once(server, "listening");
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Local provider failed to bind");
-  return {url:"http://127.0.0.1:" + address.port, requests, toolSurfaces, async close() {
+  return {url:"http://127.0.0.1:" + address.port, requests, toolSurfaces, cancelled:()=>cancelled, async close() {
     const closed = once(server, "close");
     server.close(); server.closeAllConnections(); await closed;
   }};
