@@ -42,11 +42,17 @@ export interface PublicSnapshot {
   childText: Record<string, OpenText>;
 }
 
-type OpenTool = { subagentRunId?:string; invocationId: string; publicId: string; prefix: string };
+type OpenTool = { preamble?: Pick<OpenText,"id"|"prefix">; subagentRunId?:string; invocationId: string; publicId: string; prefix: string };
 
-export function toolBootstrap(tool: OpenTool): Event[] {
+export function toolBootstrap(tool: OpenTool, includePreamble = true): Event[] {
   const attr = tool.subagentRunId ? {subagentRunId:tool.subagentRunId} : {};
-  return [
+  const frames: Event[] = [];
+  if (includePreamble && tool.preamble) {
+    const {id:messageId,prefix} = tool.preamble;
+    frames.push({type:E.TEXT_MESSAGE_START,messageId,role:"assistant",...attr},
+      {type:E.TEXT_MESSAGE_CONTENT,messageId,delta:prefix,...attr},{type:E.TEXT_MESSAGE_END,messageId,...attr});
+  }
+  return [...frames,
     { ...attr, type: E.TOOL_CALL_START, toolCallId: tool.publicId, toolCallName: "record_work_item", parentMessageId: tool.publicId + "/assistant" },
     { ...attr, type: E.TOOL_CALL_ARGS, toolCallId: tool.publicId, delta: tool.prefix },
   ];
@@ -158,10 +164,10 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
     case "toolPreview": {
       if (!state.openStep || snapshot.openTools[change.invocationId]) throw new MemberStoreError("stale");
       const childId = state.children?.find(c => c.childId === change.invocationId && c.phase === "running")?.childId;
-      commitPreamble(childId);
-      const tool = { ...(childId && {subagentRunId:childId}), invocationId: change.invocationId, publicId: change.publicId, prefix: '{"operation_id":' };
+      const preamble = finishText(childId);
+      const tool = { ...(preamble && {preamble:{id:preamble.id,prefix:preamble.prefix}}), ...(childId && {subagentRunId:childId}), invocationId: change.invocationId, publicId: change.publicId, prefix: '{"operation_id":' };
       snapshot.openTools[tool.invocationId] = tool;
-      frames.push(...toolBootstrap(tool));
+      frames.push(...toolBootstrap(tool,false));
       return frames;
     }
     case "call": {
@@ -174,6 +180,8 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
       const attribution = invocationId === requestId ? {} : { subagentRunId: invocationId };
       const args = JSON.stringify({ operation_id: requestId });
       const messageId = approvalId + "/assistant";
+      const preamble = snapshot.openTools[invocationId]?.preamble;
+      if (preamble) messages.push({id:preamble.id,role:"assistant",content:preamble.prefix,...attribution});
       messages.push({
         id: messageId, role: "assistant", ...attribution, toolCalls: [
         { id: approvalId, type: "function", function: { name: toolName, arguments: args } },
