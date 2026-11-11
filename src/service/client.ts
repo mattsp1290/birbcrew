@@ -72,6 +72,21 @@ export class MemberClient {
     return handle.executeUpdate<void, [typeof key]>("cancelPending", { args: [key] });
   }
 
+  async accept(input: unknown) {
+    const request = submitSchema.parse(input);
+    const conversation = await this.store.getConversation({ ownerId: request.ownerId, conversationId: request.conversationId });
+    if (await this.store.committedReply(request) === undefined) {
+      const handle = await this.workflow(conversation);
+      try {
+        await handle.startUpdate("submitTurn", { args: [request], waitForStage: "ACCEPTED" });
+      } catch (error) {
+        if (!(error instanceof WorkflowNotFoundError)) throw error;
+        if (await this.store.committedReply(request) === undefined) throw new MemberStoreError("conflict");
+      }
+    }
+    return { requestId: request.requestId };
+  }
+
   async submit(input: unknown): Promise<string> {
     const request = submitSchema.parse(input);
     const conversation = await this.store.getConversation({ ownerId: request.ownerId, conversationId: request.conversationId });

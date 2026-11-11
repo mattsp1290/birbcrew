@@ -16,6 +16,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/fixtures/engines/artifacts.test.ts tests/fixtures/engines/consumer.test.mjs",
+    "gateway": "node src/service/gateway.ts",
     "members": "node src/service/cli.ts",
     "test:integration": "scripts/verify-members"
   },

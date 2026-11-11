@@ -46,7 +46,7 @@ export type BeginTurn =
   | { kind: "uncertain" };
 
 export class MemberStoreError extends Error {
-  readonly code: "not_found" | "conflict" | "busy" | "stale" | "input_limit";
+  readonly code: "not_found" | "conflict" | "busy" | "stale" | "input_limit" | "history_unavailable";
 
   constructor(code: MemberStoreError["code"]) {
     super(code);

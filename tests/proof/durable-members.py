@@ -140,7 +140,7 @@ def verify(directory, stack):
     print("Replaced the worker and Temporal server after four committed turns.", flush=True)
     run("docker", "restart", db, stdout=subprocess.DEVNULL)
     wait_until(db_ready, "PostgreSQL restart")
-    env["BIRBCREW_DATABASE_URL"] = database_url()
+    env["BIRBCREW_DATABASE_URL"] = env["BIRBCREW_TEST_DATABASE_URL"] = database_url()
     with ExitStack() as runtime:
         current = services(runtime)
         def resume(case):
@@ -182,6 +182,7 @@ def verify(directory, stack):
         interrupted = {cases[0][0]["conversationId"], cases[2][0]["conversationId"]}
         assert interrupted.issubset(uncertain.stdout.splitlines())
         print("Both interrupted native calls stayed uncertain after worker replacement; neither was resubmitted.")
+        run(node, "--test", "tests/service/observation.test.ts", env=env)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import { publishObservation } from "./observation.ts";
 import { savedProposal, type Approval } from "./approvals.ts";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -62,7 +63,7 @@ export class MemberStore {
       await db.query("SELECT pg_advisory_xact_lock(hashtextextended('birbcrew_ts.migration', 0))");
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
-      for (const [version, name] of [[1, "001-members.sql"], [2, "002-approvals.sql"]] as const) {
+      for (const [version, name] of [[1, "001-members.sql"], [2, "002-approvals.sql"], [4, "004-observation.sql"]] as const) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
         await db.query(await readFile(new URL("./sql/" + name, import.meta.url), "utf8"));
@@ -159,6 +160,7 @@ export class MemberStore {
                 WHERE conversation_id = $1 AND request_id = $2`,
               [key.conversationId, key.requestId, execution.attempt],
             );
+            await publishObservation(db, key.conversationId, { kind: "failed", requestId: key.requestId });
           }
         }
         return { kind: "uncertain" };
@@ -177,6 +179,7 @@ export class MemberStore {
         [key.conversationId, key.requestId, digest, (last?.position ?? 0) + 1,
           execution?.workflowRunId ?? null, execution?.activityId ?? null, execution?.attempt ?? 1],
       );
+      await publishObservation(db, key.conversationId, { kind: "input", requestId: key.requestId, text: key.text });
       return { kind: "start", conversation, token, checkpoint: last ? checkpointSchema.parse(last.checkpoint) : null };
     });
   }
@@ -202,6 +205,7 @@ export class MemberStore {
         if (turn.attempt < execution.attempt) {
           await db.query("UPDATE birbcrew_ts.turns SET phase='uncertain',attempt=$3 WHERE conversation_id=$1 AND request_id=$2",
             [key.conversationId, key.requestId, execution.attempt]);
+          await publishObservation(db, key.conversationId, { kind: "failed", requestId: key.requestId });
         }
         return { kind: "uncertain" as const };
       }
@@ -211,6 +215,7 @@ export class MemberStore {
         [key.conversationId, key.requestId, execution.activityId, execution.attempt]);
       await db.query("UPDATE birbcrew_ts.paused_segments SET resume_activity_id=$2 WHERE approval_id=$1",
         [approval.approvalId, execution.activityId]);
+      await publishObservation(db, key.conversationId, { kind: "resume", approvalId: approval.approvalId });
       return { kind: "start" as const, token, conversation, checkpoint: checkpointSchema.parse(turn.checkpoint) };
     });
   }
@@ -225,7 +230,10 @@ export class MemberStore {
         `UPDATE birbcrew_ts.turns SET phase = 'committed', reply = $4, checkpoint = $5
           WHERE conversation_id = $1 AND request_id = $2 AND token = $3 AND phase = 'started'`, args,
       );
-      if (update.rowCount) return key.reply;
+      if (update.rowCount) {
+        await publishObservation(db, key.conversationId, { kind: "reply", requestId: key.requestId, text: key.reply });
+        return key.reply;
+      }
       const replay = await db.query<{ reply: string }>(
         `SELECT reply FROM birbcrew_ts.turns
           WHERE conversation_id = $1 AND request_id = $2 AND token = $3 AND phase = 'committed'
@@ -246,6 +254,7 @@ export class MemberStore {
         [key.conversationId, key.requestId, key.token],
       );
       if (!result.rowCount) throw new MemberStoreError("stale");
+      await publishObservation(db, key.conversationId, { kind: "failed", requestId: key.requestId });
     });
   }
 }

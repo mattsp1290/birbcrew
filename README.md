@@ -67,3 +67,6 @@ the original request UUID and text to recover its recorded reply after a lost
 acknowledgement. Each conversation admits four distinct requests. If a worker
 disappears during native generation, a replacement records the uncertain outcome
 and closes that conversation to further turns.
+
+Use the [HTTP gateway guide](docs/member-gateway.md) to submit turns, decide
+protected tool requests and attach independent AG-UI observers to these members.

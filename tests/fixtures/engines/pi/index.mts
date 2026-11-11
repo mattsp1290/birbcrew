@@ -41,8 +41,7 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
   const last = context.messages.findLast((message) => message.role !== "system");
   if (latest?.startsWith("record ") && last?.role !== "toolResult") {
     const [, operation_id, ...words] = latest.split(" ");
-    const args: JsonObject = { operation_id };
-    if (words.length) args.note = words.join(" ");
+    const args: JsonObject = { operation_id, note: words.length ? words.join(" ") : "private fixture note" };
     const call = fauxToolCall("record_work_item", args, { id: "call_" + randomUUID() });
     const message = fauxAssistantMessage([call], { stopReason: "toolUse", responseId: randomUUID() });
     stream.push({ type: "start", partial: fauxAssistantMessage("") });

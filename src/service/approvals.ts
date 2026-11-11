@@ -1,3 +1,4 @@
+import { publishObservation } from "./observation.ts";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Pool, PoolClient } from "pg";
@@ -159,7 +160,9 @@ export class ApprovalStore {
         await db.query(`INSERT INTO birbcrew_ts.paused_segments (approval_id,conversation_id,request_id,checkpoint)
                         VALUES ($1,$2,$3,$4)`, [row.approvalId, key.conversationId, key.requestId, JSON.stringify(checkpoint)]);
       }
-      return publicApproval(key, row);
+      const approval = publicApproval(key, row);
+      await publishObservation(db, key.conversationId, { kind: "call", approval });
+      return approval;
     });
   }
 
@@ -202,6 +205,7 @@ export class ApprovalStore {
       if (call.decision || turn.phase !== "started" || await cancelled(db, key)) throw new MemberStoreError("conflict");
       await db.query("UPDATE birbcrew_ts.protected_calls SET decision = $2 WHERE approval_id = $1",
         [key.approvalId, key.choice]);
+      await publishObservation(db, key.conversationId, { kind: "answered", approvalId: key.approvalId });
       return key.choice;
     });
   }
@@ -222,6 +226,7 @@ export class ApprovalStore {
       if (turn.phase !== "started") throw new MemberStoreError("conflict");
       await db.query("INSERT INTO birbcrew_ts.tool_cancellations (conversation_id, request_id) VALUES ($1,$2)",
         [key.conversationId, key.requestId]);
+      await publishObservation(db, key.conversationId, { kind: "cancelled", requestId: key.requestId });
     });
   }
 
@@ -242,21 +247,25 @@ export class ApprovalStore {
       if (turn.token !== key.token) throw new MemberStoreError("stale");
       const call = await findCall(db, key);
       const nativeCallId = key.nativeCallId;
-      if (call.budget_exhausted) return { nativeCallId, kind: "budget_exhausted" };
-      if (call.decision === "deny") return { nativeCallId, kind: "denied" };
+      async function finish(outcome: ToolOutcome) {
+        await publishObservation(db, key.conversationId, { kind: "result", approvalId: key.approvalId, outcome });
+        return outcome;
+      }
+      if (call.budget_exhausted) return finish({ nativeCallId, kind: "budget_exhausted" });
+      if (call.decision === "deny") return finish({ nativeCallId, kind: "denied" });
       const existing = await db.query<{ approval_id: string; receipt_id: string }>(
         "SELECT approval_id, receipt_id FROM birbcrew_ts.work_items WHERE conversation_id = $1 AND request_id = $2",
         [key.conversationId, key.requestId],
       );
       if (existing.rows[0]?.approval_id === key.approvalId) {
-        return { nativeCallId, kind: "recorded", receipt: { receiptId: existing.rows[0].receipt_id, operationId: key.requestId } };
+        return finish({ nativeCallId, kind: "recorded", receipt: { receiptId: existing.rows[0].receipt_id, operationId: key.requestId } });
       }
-      if (await cancelled(db, key)) return { nativeCallId, kind: "cancelled" };
+      if (await cancelled(db, key)) return finish({ nativeCallId, kind: "cancelled" });
       if (call.decision !== "approve") throw new MemberStoreError("conflict");
       if (existing.rows.length) {
         await db.query("UPDATE birbcrew_ts.protected_calls SET budget_exhausted = true WHERE approval_id = $1",
           [key.approvalId]);
-        return { nativeCallId, kind: "budget_exhausted" };
+        return finish({ nativeCallId, kind: "budget_exhausted" });
       }
       if (turn.phase !== "started") throw new MemberStoreError("stale");
       const inserted = await db.query<{ receipt_id: string }>(
@@ -264,7 +273,7 @@ export class ApprovalStore {
          SELECT conversation_id, request_id, approval_id, arguments->>'note' FROM birbcrew_ts.protected_calls
          WHERE approval_id = $1 AND decision = 'approve' RETURNING receipt_id`, [key.approvalId],
       );
-      return { nativeCallId, kind: "recorded", receipt: { receiptId: inserted.rows[0].receipt_id, operationId: key.requestId } };
+      return finish({ nativeCallId, kind: "recorded", receipt: { receiptId: inserted.rows[0].receipt_id, operationId: key.requestId } });
     });
   }
 }
