@@ -90,24 +90,33 @@ async function verify(s: Services, engines: Engine[], pass: (name: string) => vo
   for (const { engine, request } of cases) {
     assert.equal((await requests()).filter((r) => r.engine === engine && r.prompt === request.text).length, 1);
   }
+  const requestOffset = (await requests()).length;
+  const observedHangs = async () => (await requests()).slice(requestOffset)
+    .filter((r) => r.prompt === "wait").map((r) => r.engine as string);
   const interrupted = cases.filter((_, i) => i % 2 === 0);
   const hanging = interrupted.map(({ key }) => command("turn", { ...key, requestId: randomUUID(), text: "wait" }, true));
   const all = Promise.all(hanging);
   void all.catch(() => {});
-  await until(async () => (await requests()).filter((r) => r.prompt === "wait").length === engines.length || undefined, "all native providers in flight");
+  await until(async () => {
+    const started = await observedHangs();
+    return engines.every(engine => started.includes(engine)) || undefined;
+  }, "all native providers in flight");
   await stop();
   stop = await s.worker();
   await all;
   for (const { key } of interrupted) assert.equal(await s.sql("SELECT phase FROM birbcrew_ts.turns WHERE conversation_id='" + key.conversationId +
     "' ORDER BY position DESC LIMIT 1"), "uncertain");
-  assert.equal((await requests()).filter((r) => r.prompt === "wait").length, engines.length);
+  assert.deepEqual((await observedHangs()).sort(), [...engines].sort());
 
   pass("Interrupted SDK invocations reconcile without automatic resubmission");
   await verifyObserverProcesses(s, engines);
   pass("Two independent clients/observe.mjs processes persisted the canonical SQL and gateway messages");
   if (selected !== "codex") await test(["tests/service/observation.test.ts"], env, selected && matrix[selected].observers);
   if (!selected) await execute(node, ["tests/proof/replay-traces.mts"], {
-    ...env, ...(process.env.BIRBCREW_REPLAY_EVIDENCE && { BIRBCREW_REPLAY_EVIDENCE: process.env.BIRBCREW_REPLAY_EVIDENCE }),
+    ...env,
+    BIRBCREW_REPLAY_EVIDENCE: process.env.BIRBCREW_REPLAY_EVIDENCE,
+    BIRBCREW_SOURCE_REVISION: process.env.BIRBCREW_SOURCE_REVISION,
+    BIRBCREW_SOURCE_SHA256: process.env.BIRBCREW_SOURCE_SHA256,
   });
   pass("Official observers and selected gateway cases");
   if (!selected) pass("Cross-engine offline replay and allowlisted traces");

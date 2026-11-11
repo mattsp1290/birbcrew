@@ -14,6 +14,7 @@ import { z } from "zod";
 import { type Approval } from "../../src/service/approvals.ts";
 import { MemberClient } from "../../src/service/client.ts";
 import { MemberStore } from "../../src/service/store.ts";
+import { attributable, sourceFingerprint } from "./member-report.mts";
 
 const directory = await mkdtemp(join(tmpdir(), "birb-replay-"));
 const traces = join(directory, "traces.jsonl"), requests = join(directory, "requests.jsonl");
@@ -61,6 +62,9 @@ const ids = { codex: randomUUID(), pi: randomUUID(), claude: randomUUID() };
 const ownerId = "private-owner-" + randomUUID();
 let stop: (() => Promise<void>) | undefined;
 try {
+  const evidence = process.env.BIRBCREW_REPLAY_EVIDENCE;
+  const initialSource = evidence ? await sourceFingerprint() : undefined;
+  if (initialSource && !attributable(initialSource)) throw new Error("Replay evidence requires attributable source");
   await store.migrate();
   const fixture = new URL("./fixture-profiles.mts", import.meta.url).href;
   await writeFile(config, `import {profiles as original, close} from ${JSON.stringify(fixture)};
@@ -163,8 +167,9 @@ try {
   assert.deepEqual(await ledger(), receiptsBefore);
   const summary = { replayed: { codex: 1, claude: 1, pi: 1, piChild: 1 }, replayProviderCalls: 0,
     replayToolCalls: 0, replayEffects: 0, correlatedSpans: rows.length, redaction: "VERIFIED" };
-  const evidence = process.env.BIRBCREW_REPLAY_EVIDENCE;
   if (evidence) {
+    const source = await sourceFingerprint();
+    assert.deepEqual(source, initialSource, "Source changed during replay verification");
     const lock = JSON.parse(await readFile("package-lock.json", "utf8"));
     const packages = ["@openai/codex-sdk","@openai/codex","@temporalio/worker", "@anthropic-ai/claude-agent-sdk", "@earendil-works/pi-coding-agent",
       "@ag-ui/claude-agent-sdk", "@ag-ui/pi", "@opentelemetry/sdk-trace-base"].map((name) => {
@@ -172,10 +177,9 @@ try {
         .parse(lock.packages["node_modules/" + name]);
       return { name, version, integrity };
     });
-    const sourceRevision = z.string().regex(/^[a-f0-9]{40}$/).parse((await run("git", ["rev-parse", "HEAD"])).stdout.trim());
     const path = evidence + "." + randomUUID() + ".tmp";
     try {
-      await writeFile(path, JSON.stringify({ ...summary, mode: "fixture", sourceRevision, packages,
+      await writeFile(path, JSON.stringify({ ...summary, mode: "fixture", sourceRevision: source.revision, source, packages,
         node: process.version, histories: exported, spans: rows }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
       await rename(path, evidence);
     } finally {

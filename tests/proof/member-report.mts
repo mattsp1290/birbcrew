@@ -29,7 +29,7 @@ async function archiveTreeMatches(expected: string) {
     return (await git("write-tree")).stdout.trim() === expected;
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
-async function source() {
+export async function sourceFingerprint() {
   const input: string[] = [...files];
   async function collect(directory: string) {
     for (const item of await readdir(directory, { withFileTypes: true })) {
@@ -71,8 +71,12 @@ async function source() {
   return { revision: external ?? null, state: attested ? "external-attestation" : "unattributed", sourceSha256, manifest };
 }
 
+export function attributable(source: Awaited<ReturnType<typeof sourceFingerprint>>) {
+  return source.revision !== null && !["modified", "unattributed"].includes(source.state);
+}
+
 export async function fixtureReport(engines: Engine[]) {
-  const initial = await source();
+  const initial = await sourceFingerprint();
   const lock = JSON.parse(await readFile("package-lock.json", "utf8"));
   const native = ["@temporalio/worker",
     ...(engines.includes("codex") ? ["@openai/codex-sdk", "@openai/codex", "@openai/codex-linux-" + process.arch] : []),
@@ -87,8 +91,8 @@ export async function fixtureReport(engines: Engine[]) {
   return {
     pass(name: string) { stages.push({ name, status: "VERIFIED" }); },
     async finish(passed: boolean) {
-      const final = await source();
-      const reproducible = JSON.stringify(final) === JSON.stringify(initial) && !["modified", "unattributed"].includes(final.state);
+      const final = await sourceFingerprint();
+      const reproducible = JSON.stringify(final) === JSON.stringify(initial) && attributable(final);
       const { manifest, ...sourceInfo } = final;
       const report = { mode: "fixture", engines, status: !passed ? "NOT VERIFIED" : reproducible ? "VERIFIED" : "INCONCLUSIVE",
         processExit: passed && (reproducible || !process.env.BIRBCREW_FIXTURE_EVIDENCE) ? 0 : 1, source: sourceInfo, stableDuringRun: initial.sourceSha256 === final.sourceSha256,
