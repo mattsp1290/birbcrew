@@ -155,6 +155,8 @@ test("rollover preserves ordered receipts, first-run audit and complete AG-UI hi
       checkpoint:{version:1,engine:"pi",state:{turns:i+1}}});
   }
   assert.equal(await store.workflowRunId(key),runs[0]);
+  assert.deepEqual(await store.requestStatus({...key,requestId:requests[0].requestId}),
+    {requestId:requests[0].requestId,phase:"committed",reply:"reply 1"});
   assert.deepEqual(await store.conversationProgress(key),{turns:12,limit:128,terminal:false});
   for(let i=0;i<12;i++) {
     assert.equal(await store.committedReply(requests[i]),`reply ${i+1}`);
