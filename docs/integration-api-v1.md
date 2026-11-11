@@ -109,7 +109,8 @@ or `delivered`), `nativeTermination` (`unconfirmed` or `confirmed`), and
 `effects: "not_assessed"`. Gateway background delivery retries intents after process
 restart; GET never triggers delivery. Each Temporal delivery RPC has a 10-second
 deadline; an ambiguous timeout leaves the intent pending and eligible for retry.
-The existing cancellation handler is idempotent. Multiple gateway replicas can
+Attempts are ordered by least-recent attempt so permanently unavailable requests
+do not starve later intents. The existing cancellation handler is idempotent. Multiple gateway replicas can
 attempt delivery, but one SQL intent is retained.
 
 `delivered` means the cancellation handler acknowledged, or the request was already
@@ -139,7 +140,7 @@ and never writes a cancellation intent.
 5. Treat explicit rejection/uncertainty as an application reconciliation case, not
    permission to repeat effects under a fresh identity.
 
-The maintained fixture commits both rows in its own schema, actually SIGKILLs the
+The maintained fixture commits both rows in its own disposable database, actually SIGKILLs the
 consumer before send, after acceptance, and after completion, then recreates the
 gateway/consumer and reconciles. Those focused tests use a real PostgreSQL store and
 an instrumented transport. The portable service proof additionally exercises the
@@ -159,7 +160,8 @@ request lookup above, not the event cursor.
 
 ## Validation
 
-Use Node 22.23.3 and a disposable PostgreSQL 17 database:
+Use Node 22.23.3 and a disposable PostgreSQL 17 database. The test role needs
+CREATEDB so the fixture can create and remove its separate consumer database:
 
 ```sh
 npm ci

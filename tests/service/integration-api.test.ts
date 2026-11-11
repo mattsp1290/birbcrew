@@ -237,3 +237,29 @@ test("ambiguous cancellation delivery retries the original durable intent", asyn
   assert.equal(settled.cancellation?.receiptId, receipt.cancellation?.receiptId);
   assert.equal(deliveries, 2);
 });
+
+test("failing older cancellation intents cannot starve a later healthy request", async () => {
+  const f = await fixture(); await f.stop();
+  const ids = Array.from({ length: 65 }, () => randomUUID());
+  const healthy = ids[64];
+  let delivered = false;
+  const api = new IntegrationApi(store, { accept: f.members.accept.bind(f.members), async cancelPending(input, deadline) {
+    assert.equal(typeof deadline, "number");
+    assert.ok(deadline! > Date.now() && deadline! <= Date.now() + 10_000, "delivery gets a bounded actual RPC deadline");
+    const { requestId } = input as { requestId: string };
+    if (requestId !== healthy) throw new Error("unavailable old workflow");
+    delivered = true;
+  } });
+  try {
+    for (const requestId of ids) {
+      await store.recordAcceptance({ ownerId: f.ownerId, conversationId: f.conversationId, requestId, text: "cancel fairness" });
+      await api.cancel({ ownerId: f.ownerId, conversationId: f.conversationId, requestId });
+    }
+    await api.flushCancellations();
+    assert.equal(delivered, false, "first bounded batch contains only older requests");
+    await api.flushCancellations();
+    assert.equal(delivered, true, "retry order must advance beyond permanently failing oldest batch");
+  } finally {
+    await pool.query("UPDATE birbcrew_ts.integration_cancellations SET delivered_at=clock_timestamp() WHERE conversation_id=$1", [f.conversationId]);
+  }
+});

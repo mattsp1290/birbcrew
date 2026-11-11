@@ -102,12 +102,14 @@ export class IntegrationApi {
     try {
       const { rows } = await this.store.pool.query<Key>(`SELECT c.owner_id AS "ownerId",x.conversation_id AS "conversationId",x.request_id AS "requestId"
         FROM birbcrew_ts.integration_cancellations x JOIN birbcrew_ts.conversations c USING(conversation_id)
-        WHERE x.delivered_at IS NULL ORDER BY x.requested_at LIMIT 64`);
+        WHERE x.delivered_at IS NULL ORDER BY x.last_attempt_at NULLS FIRST,x.requested_at LIMIT 64`);
       await Promise.all(rows.map(async key => {
         const id = `${key.conversationId}/${key.requestId}`;
         if (this.delivering.has(id)) return;
         this.delivering.add(id);
         try {
+          await this.store.pool.query(`UPDATE birbcrew_ts.integration_cancellations SET last_attempt_at=clock_timestamp()
+            WHERE conversation_id=$1 AND request_id=$2`, [key.conversationId,key.requestId]);
           const receipt = await this.status(key);
           if (!["completed", "failed", "cancelled"].includes(receipt.status)) await this.members.cancelPending(key, Date.now() + 10_000);
           await this.store.pool.query(`UPDATE birbcrew_ts.integration_cancellations SET delivered_at=COALESCE(delivered_at,clock_timestamp())
