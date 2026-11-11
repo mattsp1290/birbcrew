@@ -4,7 +4,21 @@ import { mkdir, realpath } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
 
-const binding = z.strictObject({ profile: z.string(), sessionId: z.uuid() });
+const call = z.strictObject({ id: z.string().min(1).max(256), name: z.string(), input: z.record(z.string(), z.json()) });
+const binding = z.strictObject({
+  profile: z.string(), sessionId: z.uuid(), pending: call.optional(),
+  unsupportedPendingTools: z.array(call.extend({ parentToolUseId: z.string().optional() })).optional(),
+  frontendTools: z.array(z.strictObject({
+    name: z.string(), description: z.string(), parameters: z.record(z.string(), z.json()),
+  })).optional(),
+});
+const nativeCallId = call.shape.id;
+const continuation = z.strictObject({
+  nativeCallId, result: z.discriminatedUnion("kind", [
+    z.strictObject({ nativeCallId, kind: z.literal("recorded"), receipt: z.strictObject({ receiptId: z.uuid(), operationId: z.uuid() }) }),
+    z.strictObject({ nativeCallId, kind: z.enum(["denied", "cancelled", "budget_exhausted"]) }),
+  ]),
+});
 
 export const claudeCheckpoint = z.strictObject({
   version: z.literal(1),
@@ -23,10 +37,15 @@ export const claudeCommand = z.strictObject({
   text: z.string().min(1).max(16_384),
   model: z.string().min(1),
   checkpoint: claudeCheckpoint.nullable(),
+  mode: z.enum(["chat", "protected", "recover"]),
+  continuation: continuation.optional(),
 });
 
-const success = z.strictObject({ text: z.string().min(1).max(65_536), checkpoint: claudeCheckpoint });
-const response = z.union([success, z.strictObject({ error: z.string() })]);
+const success = z.strictObject({ kind: z.literal("complete"), text: z.string().min(1).max(65_536), checkpoint: claudeCheckpoint });
+const pending = z.strictObject({ kind: z.literal("pending"), checkpoint: claudeCheckpoint,
+  proposal: z.strictObject({ nativeCallId, name: z.literal("record_work_item"), arguments: z.record(z.string(), z.json()) }),
+});
+const response = z.union([success, pending, z.strictObject({ error: z.string() })]);
 
 interface ClaudeProfile {
   stateDir: string;
@@ -38,23 +57,54 @@ interface ClaudeProfile {
   authorize?: () => Promise<void>;
 }
 
-export async function runClaudeTurn(
-  input: { threadId: string; runId: string; text: string; checkpoint: unknown; signal: AbortSignal },
+interface ClaudeInput {
+  threadId: string; runId: string; text: string; checkpoint: unknown; signal: AbortSignal;
+  continuation?: z.infer<typeof continuation>;
+}
+
+export async function runClaudeTurn(input: ClaudeInput, profile: ClaudeProfile) {
+  const result = await executeSegment(input, profile, "chat");
+  if (result.kind !== "complete") throw new Error("Unexpected tool proposal in Claude chat");
+  return { text: result.text, checkpoint: result.checkpoint };
+}
+
+export function runClaudeSegment(input: ClaudeInput, profile: ClaudeProfile) {
+  return executeSegment(input, profile, "protected");
+}
+
+export async function recoverClaudeProposal(input: ClaudeInput, profile: ClaudeProfile) {
+  const recovered = await executeSegment(input, profile, "recover");
+  if (recovered.kind !== "pending") throw new Error("No confirmed Claude proposal");
+  return recovered;
+}
+
+async function executeSegment(
+  input: ClaudeInput,
   profile: ClaudeProfile,
-): Promise<z.infer<typeof success>> {
+  mode: z.infer<typeof claudeCommand>["mode"],
+): Promise<z.infer<typeof success> | z.infer<typeof pending>> {
   const { signal, ...turn } = input;
   signal.throwIfAborted();
-  await profile.authorize?.();
+  if (mode !== "recover") await profile.authorize?.();
   signal.throwIfAborted();
-  const command = claudeCommand.parse({ ...turn, model: profile.model });
+  const command = claudeCommand.parse({ ...turn, model: profile.model, mode });
+  const savedCall = command.checkpoint?.state.binding.pending;
+  if (command.continuation || savedCall) {
+    const answer = command.continuation;
+    if (mode !== "protected" || !savedCall || !answer || savedCall.id !== answer.nativeCallId ||
+        savedCall.id !== answer.result.nativeCallId || savedCall.input.operation_id !== command.runId ||
+        (answer.result.kind === "recorded" && answer.result.receipt.operationId !== command.runId)) {
+      throw new Error("Claude continuation does not match its pending tool call");
+    }
+  }
   if (!isAbsolute(profile.stateDir)) throw new Error("Claude state directory must be absolute");
   const member = z.uuid().parse(profile.memberId);
   const owner = createHash("sha256").update(profile.ownerId).digest("hex");
-  if (!command.checkpoint) await mkdir(profile.stateDir, { recursive: true, mode: 0o700 });
+  if (mode !== "recover" && !command.checkpoint) await mkdir(profile.stateDir, { recursive: true, mode: 0o700 });
   const parent = join(await realpath(profile.stateDir), "claude", owner, member);
   const cwd = join(parent, command.threadId);
-  if (command.checkpoint) {
-    if (command.checkpoint.state.threadId !== command.threadId || command.checkpoint.state.model !== profile.model) {
+  if (mode === "recover" || command.checkpoint) {
+    if (command.checkpoint && (command.checkpoint.state.threadId !== command.threadId || command.checkpoint.state.model !== profile.model)) {
       throw new Error("Claude checkpoint does not match the conversation profile");
     }
     if (await realpath(cwd) !== cwd) throw new Error("Unexpected Claude session directory");
@@ -64,7 +114,7 @@ export async function runClaudeTurn(
     await mkdir(cwd, { mode: 0o700 });
   }
   const tmp = join(cwd, "tmp");
-  await mkdir(tmp, { recursive: true, mode: 0o700 });
+  if (mode !== "recover") await mkdir(tmp, { recursive: true, mode: 0o700 });
   const child = fork(new URL("./claude-worker.ts", import.meta.url), [], {
     cwd,
     execArgv: [],

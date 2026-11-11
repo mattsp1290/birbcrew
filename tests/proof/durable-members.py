@@ -14,6 +14,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from uuid import uuid4
 
+from approval_cases import verify_approvals
+
 
 ROOT = Path(__file__).resolve().parents[2]
 POSTGRES = "postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94"
@@ -72,11 +74,13 @@ def verify(directory, stack):
     }
     cli = [node, "src/service/cli.ts"]
     run(node, "--test", "tests/service/store.test.ts", "tests/service/providers.test.ts",
+        "tests/service/approvals.test.ts", "tests/fixtures/engines/pi/protected.test.ts",
+        "tests/fixtures/engines/claude/protected.test.ts",
         "tests/fixtures/engines/pi/durable.test.ts", "tests/fixtures/engines/claude/durable.test.ts", env=env)
 
     def command(op, payload, fail=False):
         result = subprocess.run([*cli, op], input=json.dumps(payload), capture_output=True, text=True,
-                                cwd=ROOT, env=env, timeout=90)
+                                cwd=ROOT, env=env, timeout=200)
         if fail:
             assert result.returncode != 0, f"{op} accepted invalid request"
             return
@@ -148,6 +152,10 @@ def verify(directory, stack):
             assert command("turn", turn(conv, "recall")) == {"text": "recalled " + nonce}
         with ThreadPoolExecutor(max_workers=4) as executor:
             list(executor.map(resume, cases))
+        def sql(statement):
+            return run("docker", "exec", db, "psql", "-U", "postgres", "-d", "birbcrew_ts", "-Atc", statement,
+                       capture_output=True).stdout.strip()
+        current = verify_approvals(runtime, current, worker, command, wait_until, sql)
         for override in [{"BIRBCREW_STATE_DIR": str(directory / "wrong-volume")},
                          {"BIRBCREW_PROOF_ACCOUNT": "another-account"}]:
             invalid = subprocess.run([*cli, "worker", "tests/proof/fixture-profiles.mts"],

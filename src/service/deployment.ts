@@ -34,11 +34,11 @@ export async function registerProfiles(pool: Pool, config: ReadonlyMap<string, M
       const digest = createHash("sha256").update(entry.accountId).digest();
       for (const engine of ["claude", "pi"] as const) {
         if (!entry[engine]) continue;
-        const key = [name, engine, digest, engine === "claude" ? volume : null];
-        await db.query(`INSERT INTO birbcrew_ts.profiles (name,engine,account_digest,volume)
-                        VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`, key);
+        const key = [name, engine, digest, engine === "claude" ? volume : null, entry.protectedTool ?? null];
+        await db.query(`INSERT INTO birbcrew_ts.profiles (name,engine,account_digest,volume,protected_tool)
+                        VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, key);
         const match = await db.query(`SELECT 1 FROM birbcrew_ts.profiles WHERE name=$1 AND engine=$2
-                         AND account_digest=$3 AND volume IS NOT DISTINCT FROM $4::uuid`, key);
+                         AND account_digest=$3 AND volume IS NOT DISTINCT FROM $4::uuid AND protected_tool IS NOT DISTINCT FROM $5::text`, key);
         if (!match.rowCount) throw new Error("Profile registered for another account or native state volume");
       }
     }

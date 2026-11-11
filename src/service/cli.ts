@@ -9,8 +9,8 @@ import { spawnSchema } from "./domain.ts";
 
 async function main() {
   const [operation, configPath] = process.argv.slice(2);
-  if (!["spawn", "open", "turn", "worker"].includes(operation)) {
-    throw new Error("Use spawn, open, turn, or worker <trusted-profile-module>");
+  if (!["spawn", "open", "turn", "pending", "decide", "cancel-pending", "worker"].includes(operation)) {
+    throw new Error("Use spawn, open, turn, pending, decide, cancel-pending, or worker <trusted-profile-module>");
   }
   const url = process.env.BIRBCREW_DATABASE_URL;
   if (!url) throw new Error("Set BIRBCREW_DATABASE_URL to the private TypeScript application database");
@@ -46,7 +46,17 @@ async function main() {
     const connection = await Connection.connect({ address });
     try {
       const members = new MemberClient(store, new Client({ connection }));
-      const result = operation === "open" ? await members.open(input) : { text: await members.submit(input) };
+      let result;
+      switch (operation) {
+        case "open": result = await members.open(input); break;
+        case "pending": result = await members.pending(input); break;
+        case "decide": result = { decision: await members.decide(input) }; break;
+        case "cancel-pending":
+          await members.cancelPending(input);
+          result = { cancelled: true };
+          break;
+        default: result = { text: await members.submit(input) };
+      }
       console.log(JSON.stringify(result));
     } finally {
       await connection.close();

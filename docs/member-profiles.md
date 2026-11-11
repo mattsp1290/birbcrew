@@ -46,3 +46,25 @@ With the project's Node version and dependencies installed, run
 unset. The suite uses temporary files, synthetic keys, and a loopback HTTP
 server. It checks credential selection and expiry, the model ID in both
 directions, redirect refusal, and Pi's session headers across checkpoint restore.
+
+## Approve a protected work item
+
+Profiles ending in `.approval.v1` add the host-owned `record_work_item` tool.
+For example, select `fixture.approval.v1` for a local test or
+`pi-go-glm-5.3-flash.approval.v1` for an approved Pi account. Each member
+retains the account, tools and native storage associated with its selected
+profile. A worker registering different settings for that name is rejected.
+
+For the fixture, submit `record <request UUID>` as the turn text. While the
+turn waits, use `npm run --silent members -- pending` in another terminal.
+Supply the owner ID and conversation ID as a JSON object on standard input.
+The returned approval includes the native call ID, a public summary, and a
+digest of the private arguments.
+
+To submit a decision, pass its ownerId, memberId, conversationId, requestId,
+invocationId, nativeCallId, approvalId, version and argumentDigest to
+`members -- decide` with `choice` set to `approve` or `deny`. To cancel while
+waiting, pass ownerId, conversationId and requestId to `members -- cancel-pending`.
+Each command reads a single JSON object on standard input. The original turn
+finishes after the same SDK receives its native tool result. A retry of the
+same decision returns the recorded choice.

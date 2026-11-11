@@ -1,5 +1,6 @@
+import { ApprovalStore, decisionSchema } from "./approvals.ts";
 import { Client, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from "@temporalio/client";
-import { MemberStoreError, openSchema, submitSchema, type Conversation } from "./domain.ts";
+import { MemberStoreError, openSchema, submitSchema, conversationKey, turnKey, type Conversation } from "./domain.ts";
 import type { MemberStore } from "./store.ts";
 import type { memberConversation } from "./workflow.ts";
 
@@ -36,6 +37,39 @@ export class MemberClient {
     const conversation = await this.store.openConversation(openSchema.parse(input));
     await this.workflow(conversation);
     return conversation;
+  }
+
+  async pending(input: unknown) {
+    const key = conversationKey.parse(input);
+    const { memberId } = await this.store.getConversation(key);
+    return new ApprovalStore(this.store.pool).pending({ ...key, memberId });
+  }
+
+  async decide(input: unknown) {
+    const value = decisionSchema.parse(input);
+    const key = { ownerId: value.ownerId, conversationId: value.conversationId };
+    const conversation = await this.store.getConversation(key);
+    if (conversation.memberId !== value.memberId) throw new MemberStoreError("not_found");
+    const ledger = new ApprovalStore(this.store.pool);
+    const prior = await ledger.previousDecision(value);
+    if (prior) return prior;
+    const handle = await this.workflow(conversation);
+    try {
+      return await handle.executeUpdate<string, [typeof value]>("decide", { args: [value] });
+    } catch (error) {
+      const recorded = await ledger.previousDecision(value);
+      if (recorded) return recorded;
+      throw error;
+    }
+  }
+
+  async cancelPending(input: unknown) {
+    const key = turnKey.parse(input);
+    const conversation = await this.store.getConversation({ ownerId: key.ownerId, conversationId: key.conversationId });
+    const ledger = new ApprovalStore(this.store.pool);
+    if (await ledger.isCancelled({ ...key, memberId: conversation.memberId })) return;
+    const handle = await this.workflow(conversation);
+    return handle.executeUpdate<void, [typeof key]>("cancelPending", { args: [key] });
   }
 
   async submit(input: unknown): Promise<string> {

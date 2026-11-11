@@ -18,4 +18,6 @@ export const profiles = new Map<string, MemberProfile>([["fixture.v1", {
   }),
   claude: process.env.BIRBCREW_PROOF_ENGINE === "pi" ? undefined : { model: "claude-sonnet-4-6", apiKey: "synthetic", baseUrl: provider.url },
 }]]);
+const chat = profiles.get("fixture.v1")!;
+profiles.set("fixture.approval.v1", { ...chat, protectedTool: "record_work_item" });
 export const close = provider.close;

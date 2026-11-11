@@ -18,11 +18,14 @@ const providerRequest = z.object({
   tools: z.array(z.object({ name: z.string() })).default([]),
   messages: z.array(z.object({
     role: z.enum(["assistant", "user"]),
-    content: z.union([z.string(), z.array(z.object({ type: z.string(), text: z.string().optional() }))]),
+    content: z.union([z.string(), z.array(z.object({ type: z.string(), text: z.string().optional(), tool_use_id: z.string().optional(),
+        content: z.unknown().optional(), is_error: z.boolean().optional() }))]),
   })),
 });
 
-type ObserveRequest = (request: { prompt?: string; tools: string[] }) => void;
+type ObserveRequest = (request: {
+  prompt?: string; tools: string[]; result?: { id?: string; error?: boolean; content: unknown };
+}) => void;
 
 async function respond(
   request: IncomingMessage, response: ServerResponse, onProviderFailure: () => void, observe?: ObserveRequest,
@@ -42,10 +45,23 @@ async function respond(
     typeof content === "string" ? [content] : content.flatMap((part) => part.type === "text" && part.text ? [part.text] : []),
   );
   const prompt = prompts.at(-1);
-  observe?.({ prompt, tools: tools.map((tool) => tool.name) });
+  const content = messages.at(-1)?.content;
+  const toolResult = Array.isArray(content) ? content.find((block) => block.type === "tool_result") : undefined;
+  observe?.({ prompt, tools: tools.map((tool) => tool.name),
+    ...(toolResult ? { result: { id: toolResult.tool_use_id, content: toolResult.content, error: toolResult.is_error } } : {}),
+  });
   const remembered = prompts.findLast((text) => text.startsWith("remember "))?.slice(9);
-  let reply;
-  if (prompt?.startsWith("remember ")) reply = `stored ${remembered}`;
+  let tool: { id: string; input: { operation_id: string; note: string } } | undefined;
+  let reply = "";
+  if (toolResult) {
+    const text = typeof toolResult.content === "string" ? toolResult.content :
+      z.array(z.object({ text: z.string() })).nonempty().parse(toolResult.content)[0].text;
+    const outcome = JSON.parse(text.split("\n")[0]);
+    if (outcome.nativeCallId !== toolResult.tool_use_id) throw new Error("Mismatched provider result");
+    reply = outcome.kind === "recorded" ? "recorded " + outcome.receipt.receiptId : outcome.kind;
+  } else if (prompt?.startsWith("record ") && tools.some((t) => t.name === "mcp__ag_ui__record_work_item")) {
+    tool = { id: "toolu_" + randomUUID(), input: { operation_id: prompt.slice(7), note: "private fixture note" } };
+  } else if (prompt?.startsWith("remember ")) reply = `stored ${remembered}`;
   else if (prompt === "recall") reply = `recalled ${remembered ?? "none"}`;
   else if (prompt === "wait") reply = "waiting";
   else {
@@ -65,11 +81,13 @@ async function respond(
       stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 },
     },
   });
-  send("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
-  send("content_block_delta", { index: 0, delta: { type: "text_delta", text: reply } });
+  send("content_block_start", { index: 0, content_block: tool ?
+    { type: "tool_use", id: tool.id, name: "mcp__ag_ui__record_work_item", input: {} } : { type: "text", text: "" } });
+  send("content_block_delta", { index: 0, delta: tool ?
+    { type: "input_json_delta", partial_json: JSON.stringify(tool.input) } : { type: "text_delta", text: reply } });
   if (prompt === "wait") return;
   send("content_block_stop", { index: 0 });
-  send("message_delta", { delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 10 } });
+  send("message_delta", { delta: { stop_reason: tool ? "tool_use" : "end_turn", stop_sequence: null }, usage: { output_tokens: 10 } });
   send("message_stop", {});
   response.end();
 }

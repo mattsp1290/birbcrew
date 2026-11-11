@@ -1,3 +1,4 @@
+import type { Approval } from "./approvals.ts";
 import { z } from "zod";
 
 export const engineSchema = z.enum(["pi", "claude"]);
@@ -40,6 +41,7 @@ export type Conversation = Member & { conversationId: string };
 export type Checkpoint = z.infer<typeof checkpointSchema>;
 export type BeginTurn =
   | { kind: "start"; conversation: Conversation; token: string; checkpoint: Checkpoint | null }
+  | { kind: "pending"; approval: Approval }
   | { kind: "replay"; reply: string }
   | { kind: "uncertain" };
 

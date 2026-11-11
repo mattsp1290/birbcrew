@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
+import type { RunAgentInput } from "@ag-ui/core";
+import { recordWorkItemArguments } from "./approvals.ts";
 import { createHash } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { ClaudeAgentAdapter, type SessionBinding } from "@ag-ui/claude-agent-sdk";
@@ -7,23 +10,82 @@ import { getSessionMessages, type Options } from "@anthropic-ai/claude-agent-sdk
 import { z } from "zod";
 import { claudeCheckpoint, claudeCommand } from "./claude.ts";
 
-const profile = "claude-chat-v1";
+const tools: RunAgentInput["tools"] = [{
+  name: "record_work_item", description: "Record one work item after the owner approves.",
+  parameters: {
+    type: "object", properties: { operation_id: { type: "string" }, note: { type: "string" } },
+    required: ["operation_id"], additionalProperties: false,
+  },
+}];
+type Command = z.infer<typeof claudeCommand>;
+type Binding = z.infer<typeof claudeCheckpoint>["state"]["binding"];
+const storedBinding = z.strictObject({
+  version: z.literal(1), threadId: z.uuid(), runId: z.uuid(), model: z.string(), promptDigest: z.string(),
+  priorTranscriptDigest: z.string().nullable(), binding: claudeCheckpoint.shape.state.shape.binding,
+});
+
 const cwd = process.cwd();
 const controller = new AbortController();
 class ClaudeTurnError extends Error {}
 
-async function digest(sessionId: string) {
+async function digest(sessionId: string, pending?: SessionBinding["pending"]) {
   const messages = await getSessionMessages(sessionId, { dir: cwd });
   if (messages.at(-1)?.type !== "assistant") throw new ClaudeTurnError("Claude recovery failed: original transcript is missing or incomplete");
+  if (pending) {
+    const blocks = z.object({ content: z.array(z.object({
+      type: z.string(), id: z.string().optional(), name: z.string().optional(),
+      input: z.unknown().optional(), tool_use_id: z.string().optional(),
+    })) });
+    const latest = blocks.parse(messages.at(-1)?.message).content.filter((block) => block.type === "tool_use");
+    if (latest.length !== 1 || latest[0].id !== pending.id || latest[0].name !== pending.name ||
+        !isDeepStrictEqual(latest[0].input, pending.input)) throw new ClaudeTurnError("Claude pending transcript mismatch");
+    const history = messages.flatMap((message) => blocks.safeParse(message.message).data?.content ?? []);
+    if (history.some((b) => b.type === "tool_result" && b.tool_use_id === pending.id) ||
+        history.filter((b) => b.type === "tool_use" && b.id === pending.id).length !== 1) {
+      throw new ClaudeTurnError("Claude pending call is consumed or ambiguous");
+    }
+  }
   return createHash("sha256").update(JSON.stringify(messages)).digest("hex");
 }
 
-async function run(command: z.infer<typeof claudeCommand>) {
-  let binding: SessionBinding | undefined = command.checkpoint?.state.binding;
+function provenance(command: Command) {
+  return { version: 1, threadId: command.threadId, runId: command.runId, model: command.model,
+    priorTranscriptDigest: command.checkpoint?.state.transcriptDigest ?? null,
+    promptDigest: createHash("sha256").update(command.text).digest("hex") };
+}
+
+async function checkpointFor(command: Command, binding: Binding) {
+  return claudeCheckpoint.parse({
+    version: 1, engine: "claude",
+    state: { threadId: command.threadId, model: command.model, binding, transcriptDigest: await digest(binding.sessionId, binding.pending) },
+  });
+}
+
+async function confirmedProposal(command: Command, binding: Binding) {
+  const call = binding.pending;
+  if (binding.unsupportedPendingTools?.length || call?.name !== "mcp__ag_ui__record_work_item" ||
+      !isDeepStrictEqual(binding.frontendTools, tools)) throw new ClaudeTurnError("Claude deferral was not confirmed");
+  const args = recordWorkItemArguments.parse(call.input);
+  if (args.operation_id !== command.runId) throw new ClaudeTurnError("Claude tool operation mismatch");
+  return { kind: "pending", proposal: { nativeCallId: call.id, name: "record_work_item", arguments: args },
+    checkpoint: await checkpointFor(command, binding) };
+}
+
+async function run(command: Command) {
+  const profile = command.mode === "chat" ? "claude-chat-v1" : "claude-record-v1";
+  let binding: Binding | undefined = command.checkpoint?.state.binding;
+  if (command.mode === "recover") {
+    const { binding: confirmed, ...intent } = storedBinding.parse(JSON.parse(await readFile("binding.json", "utf8")));
+    if (!isDeepStrictEqual(intent, provenance(command)) || confirmed.profile !== profile ||
+        (binding && confirmed.sessionId !== binding.sessionId)) throw new ClaudeTurnError("Claude pending intent mismatch");
+    return confirmedProposal(command, confirmed);
+  }
   if (binding) {
-    const saved = JSON.parse(await readFile("binding.json", "utf8"));
-    if (saved.sessionId !== binding.sessionId || saved.profile !== profile ||
-        binding.profile !== profile || await digest(binding.sessionId) !== command.checkpoint?.state.transcriptDigest) {
+    const raw = JSON.parse(await readFile("binding.json", "utf8"));
+    const saved = storedBinding.safeParse(raw);
+    // Completed chat checkpoints from the initial driver saved the binding directly.
+    if (!isDeepStrictEqual(saved.success ? saved.data.binding : raw, binding) ||
+        binding.profile !== profile || await digest(binding.sessionId, binding.pending) !== command.checkpoint?.state.transcriptDigest) {
       throw new ClaudeTurnError("Claude recovery failed: original transcript does not match its checkpoint");
     }
   }
@@ -47,7 +109,7 @@ async function run(command: z.infer<typeof claudeCommand>) {
     plugins: [],
     settingSources: [],
     permissionMode: "dontAsk",
-    maxTurns: 1,
+    maxTurns: command.mode === "protected" ? 3 : 1,
   };
   const adapter = new ClaudeAgentAdapter({
     abortController: controller,
@@ -61,7 +123,7 @@ async function run(command: z.infer<typeof claudeCommand>) {
           if (confirmed.profile !== profile || (binding && binding.sessionId !== confirmed.sessionId)) {
             throw new ClaudeTurnError("Claude session identity changed");
           }
-          await writeFile("binding.tmp", JSON.stringify(confirmed), { mode: 0o600, flush: true });
+          await writeFile("binding.tmp", JSON.stringify({ ...provenance(command), binding: confirmed }), { mode: 0o600, flush: true });
           await rename("binding.tmp", "binding.json");
           binding = confirmed;
         },
@@ -70,15 +132,22 @@ async function run(command: z.infer<typeof claudeCommand>) {
   });
   let text = "";
   let finished = false;
+  let pendingIds: string[] | undefined;
+  let resultCount = 0;
   const textEvent = z.object({ delta: z.string() });
   const terminal = z.object({ outcome: z.object({
     type: z.literal("success"),
-    pendingToolCallIds: z.array(z.string()).max(0).optional(),
+    pendingToolCallIds: z.array(z.string()).max(1).optional(),
   }).optional() });
   await adapter.run({
     threadId: command.threadId, runId: command.runId,
-    messages: [{ role: "user", id: command.runId, content: command.text }],
-    tools: [], context: [], state: null, forwardedProps: {},
+    messages: command.continuation ? [{
+      role: "tool", id: command.runId + ":result", toolCallId: command.continuation.nativeCallId,
+      content: JSON.stringify(command.continuation.result),
+      ...(command.continuation.result.kind === "recorded" ? {} : { error: command.continuation.result.kind }),
+    }] : [{ role: "user", id: command.runId, content: command.text }],
+    tools: command.mode === "protected" ? tools : [], state: null, forwardedProps: {},
+    context: command.mode === "protected" ? [{ description: "Work item operation_id for this input", value: command.runId }] : [],
   }).forEach((event) => {
     if (finished) throw new Error("Unexpected event after Claude terminal");
     if (event.type === "RUN_ERROR") throw new ClaudeTurnError("Claude SDK run failed");
@@ -86,18 +155,30 @@ async function run(command: z.infer<typeof claudeCommand>) {
       text += textEvent.parse(event).delta;
       if (Buffer.byteLength(text) > 65_536) throw new ClaudeTurnError("Claude response exceeded size limit");
     }
+    if (event.type === "TOOL_CALL_START") {
+      const { toolCallName } = z.object({ toolCallName: z.string() }).parse(event);
+      if (command.mode !== "protected" || toolCallName !== "record_work_item") throw new ClaudeTurnError("Undeclared Claude tool");
+    }
+    if (event.type === "TOOL_CALL_RESULT") {
+      if (!command.continuation || z.object({ toolCallId: z.string() }).parse(event).toolCallId !== command.continuation.nativeCallId)
+        throw new ClaudeTurnError("Unexpected Claude tool result");
+      resultCount++;
+    }
     if (event.type === "RUN_FINISHED") {
-      terminal.parse(event);
+      pendingIds = terminal.parse(event).outcome?.pendingToolCallIds;
       finished = true;
     }
   });
   await exited;
-  if (!finished || !binding || !text.length) throw new ClaudeTurnError("Claude turn did not settle");
-  const checkpoint = claudeCheckpoint.parse({
-    version: 1, engine: "claude",
-    state: { threadId: command.threadId, model: command.model, binding, transcriptDigest: await digest(binding.sessionId) },
-  });
-  return { text, checkpoint };
+  if (!finished || !binding || binding.unsupportedPendingTools?.length || resultCount !== Number(!!command.continuation)) throw new ClaudeTurnError("Claude turn did not settle");
+  if (binding.pending) {
+    if (command.mode !== "protected" || !isDeepStrictEqual(pendingIds, [binding.pending.id])) {
+      throw new ClaudeTurnError("Claude deferral was not confirmed");
+    }
+    return confirmedProposal(command, binding);
+  }
+  if (pendingIds?.length || !text.length) throw new ClaudeTurnError("Claude turn did not complete");
+  return { kind: "complete", text, checkpoint: await checkpointFor(command, binding) };
 }
 
 // The adapter owns a detached process group. Losing the host revokes that entire turn.

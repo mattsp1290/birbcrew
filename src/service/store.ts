@@ -1,3 +1,4 @@
+import { savedProposal, type Approval } from "./approvals.ts";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Pool, PoolClient } from "pg";
@@ -5,7 +6,7 @@ import type { z } from "zod";
 import {
   checkpointSchema, claimSchema, commitSchema, conversationKey, executionSchema, MemberStoreError,
   openSchema, spawnSchema, submitSchema,
-  type BeginTurn, type Conversation, type Member,
+  type BeginTurn, type Conversation, type Member, type TurnRequest,
 } from "./domain.ts";
 
 type ConversationKey = z.input<typeof conversationKey>;
@@ -57,19 +58,16 @@ export class MemberStore {
   }
 
   async migrate(): Promise<void> {
-    const schema = await readFile(new URL("./sql/001-members.sql", import.meta.url), "utf8");
     await this.transaction(async (db) => {
       await db.query("SELECT pg_advisory_xact_lock(hashtextextended('birbcrew_ts.migration', 0))");
-      const installed = await db.query<{ installed: boolean }>(
-        "SELECT to_regclass('birbcrew_ts.schema_versions') IS NOT NULL AS installed",
-      );
-      if (installed.rows[0].installed) {
-        const version = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version = 1");
-        if (version.rowCount) return;
-      }
-      await db.query(schema);
+      await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
-      await db.query("INSERT INTO birbcrew_ts.schema_versions VALUES (1)");
+      for (const [version, name] of [[1, "001-members.sql"], [2, "002-approvals.sql"]] as const) {
+        const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
+        if (applied.rowCount) continue;
+        await db.query(await readFile(new URL("./sql/" + name, import.meta.url), "utf8"));
+        await db.query("INSERT INTO birbcrew_ts.schema_versions VALUES ($1)", [version]);
+      }
     });
   }
 
@@ -148,6 +146,10 @@ export class MemberStore {
       if (turn) {
         if (!turn.prompt_digest.equals(digest)) throw new MemberStoreError("conflict");
         if (turn.reply !== null) return { kind: "replay", reply: turn.reply };
+        if (turn.phase === "started") {
+          const approval = await savedProposal(db, conversation, key.requestId);
+          if (approval) return { kind: "pending", approval };
+        }
         if (turn.phase === "started" && execution) {
           if (turn.workflow_run_id !== execution.workflowRunId || turn.activity_id !== execution.activityId
               || turn.attempt > execution.attempt) throw new MemberStoreError("stale");
@@ -176,6 +178,40 @@ export class MemberStore {
           execution?.workflowRunId ?? null, execution?.activityId ?? null, execution?.attempt ?? 1],
       );
       return { kind: "start", conversation, token, checkpoint: last ? checkpointSchema.parse(last.checkpoint) : null };
+    });
+  }
+
+  async beginResume(request: TurnRequest, approval: Approval, execution: Execution) {
+    const key = submitSchema.parse(request);
+    return this.transaction(async (db) => {
+      const conversation = await conversationFor(db, key, true);
+      const { rows: [turn] } = await db.query<TurnRow & {
+        token: string; checkpoint: unknown; resume_activity_id: string | null;
+      }>(`SELECT t.*, s.checkpoint, s.resume_activity_id FROM birbcrew_ts.turns t
+          JOIN birbcrew_ts.paused_segments s USING (conversation_id, request_id)
+          WHERE t.conversation_id=$1 AND t.request_id=$2 AND s.approval_id=$3`,
+        [key.conversationId, key.requestId, approval.approvalId]);
+      if (!turn || !turn.prompt_digest.equals(createHash("sha256").update(key.text).digest()) ||
+          turn.workflow_run_id !== execution.workflowRunId) throw new MemberStoreError("stale");
+      if (turn.phase === "committed" && turn.reply !== null) return { kind: "replay" as const, reply: turn.reply };
+      if (turn.phase === "uncertain") return { kind: "uncertain" as const };
+      if (turn.resume_activity_id !== null) {
+        if (turn.resume_activity_id !== execution.activityId || turn.attempt > execution.attempt) {
+          throw new MemberStoreError("stale");
+        }
+        if (turn.attempt < execution.attempt) {
+          await db.query("UPDATE birbcrew_ts.turns SET phase='uncertain',attempt=$3 WHERE conversation_id=$1 AND request_id=$2",
+            [key.conversationId, key.requestId, execution.attempt]);
+        }
+        return { kind: "uncertain" as const };
+      }
+      const { rows: [{ token }] } = await db.query<{token: string}>(
+        `UPDATE birbcrew_ts.turns SET token=gen_random_uuid(),activity_id=$3,attempt=$4
+         WHERE conversation_id=$1 AND request_id=$2 RETURNING token`,
+        [key.conversationId, key.requestId, execution.activityId, execution.attempt]);
+      await db.query("UPDATE birbcrew_ts.paused_segments SET resume_activity_id=$2 WHERE approval_id=$1",
+        [approval.approvalId, execution.activityId]);
+      return { kind: "start" as const, token, conversation, checkpoint: checkpointSchema.parse(turn.checkpoint) };
     });
   }
 

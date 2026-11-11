@@ -4,12 +4,14 @@ import { createTranslator, toAguiMessages } from "@ag-ui/pi";
 import { Agent } from "@earendil-works/pi-agent-core";
 import {
   type Context,
+  type JsonObject,
   contentText,
   createAssistantMessageEventStream,
   createProvider,
   InMemoryCredentialStore,
   type ProviderStreams,
   fauxAssistantMessage,
+  fauxToolCall,
   fauxProvider,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -36,8 +38,20 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
     fail("error");
     return stream;
   }
+  const last = context.messages.findLast((message) => message.role !== "system");
+  if (latest?.startsWith("record ") && last?.role !== "toolResult") {
+    const [, operation_id, ...words] = latest.split(" ");
+    const args: JsonObject = { operation_id };
+    if (words.length) args.note = words.join(" ");
+    const call = fauxToolCall("record_work_item", args, { id: "call_" + randomUUID() });
+    const message = fauxAssistantMessage([call], { stopReason: "toolUse", responseId: randomUUID() });
+    stream.push({ type: "start", partial: fauxAssistantMessage("") });
+    stream.push({ type: "done", reason: "toolUse", message });
+    return stream;
+  }
   let text: string;
-  if (latest === "recall") text = "recalled " + (remembered ?? "none");
+  if (latest?.startsWith("record ") && last?.role === "toolResult") text = "settled " + contentText(last.content);
+  else if (latest === "recall") text = "recalled " + (remembered ?? "none");
   else if (latest?.startsWith(prefix)) text = "stored " + latest.slice(prefix.length);
   else if (latest === "wait") text = "waiting";
   else throw new Error("Unexpected Pi fixture prompt");
