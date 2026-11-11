@@ -2,7 +2,11 @@
 
 ## TypeScript members
 
-Claude, Codex and Pi have passed controlled-provider chat, protected approval, denial, ordinary human input, and authenticated observer checks with their native SDKs. The Codex interruption checks cover zero effect, a committed receipt with unknown native delivery, and a confirmed delivery. The live subscription runs and permissions sign-off for the TypeScript implementation are pending.
+The [TypeScript fixture report](typescript-members.json) records the source fingerprint, package integrities and results for Claude, Codex and Pi. Each engine ran against a local provider using its pinned native SDK. The combined run used a clean Git archive on Linux arm64 with Python removed. Two independent AG-UI client processes per engine saved transcripts matching both the gateway and PostgreSQL. Offline replay covered the three member workflows and a Pi child.
+
+Independent implementation review covered `9fd67ce73ada5274e5e9560ad3aafe0c8e6d3e63`. Reviewers exercised the receipt and cancellation races, Pi child ordering, account-proof authorization, report provenance and cleanup. If Codex loses a pending native call, the observer shows the known effect and whether delivery was confirmed. A committed receipt survives worker loss or cancellation.
+
+Hosted-account acceptance is pending separately for Claude, Codex and Pi, including hosted Pi delegation. Human authentication and permissions sign-off and the production cutover are pending. The historical live evidence below belongs to the Python implementation.
 
 ## Historical Python milestone
 
