@@ -18,7 +18,7 @@ try {
  case 'hold-for-restore': if(args.length!==1) throw new Error('usage');receipt=await operator.recovery.holdForRestore(args[0],operator.hooks);break;
  case 'capture': if(args.length!==1) throw new Error('usage');receipt=await operator.recovery.capture(resolve(args[0]),operator.pins,operator.hooks);break;
  case 'verify': if(args.length!==1) throw new Error('usage');{const manifest=await readRecoveryManifest(resolve(args[0]));receipt={status:'verified',generation:manifest.generation};}break;
- case 'accept-restore': if(args.length!==2) throw new Error('usage');receipt=await operator.recovery.acceptRestore(resolve(args[0]),operator.pins,args[1]);break;
+ case 'accept-restore': if(args.length<2||args.length>3) throw new Error('usage');receipt=await operator.recovery.acceptRestore(resolve(args[0]),operator.pins,args[1],args[2]);break;
  case 'resume': if(args.length>1) throw new Error('usage');await operator.recovery.resume(operator.hooks,args[0]?await readRecoveryManifest(resolve(args[0])):null);receipt={status:'active'};break;
  case 'status': {
   const status=await operator.recovery.status();const maxAgeHours=Number(args[0]);

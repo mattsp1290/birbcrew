@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { lstat, readFile, writeFile } from 'node:fs/promises';
+import { lstat, open, readFile, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { Client, type Pool } from 'pg';
 import { z } from 'zod';
@@ -63,7 +63,7 @@ export class InstallationRecovery {
  async initializeFence() {return this.operation(()=>this.initializeFenceImpl());}
  async freeze(generation?:string) {return this.operation(()=>this.freezeImpl(generation));}
  async capture(directory:string,pins:RecoveryPins,hooks:RecoveryHooks) {return this.operation(()=>this.captureImpl(directory,pins,hooks));}
- async acceptRestore(directory:string,pins:RecoveryPins,targetInstance:string) {return this.operation(()=>this.acceptRestoreImpl(directory,pins,targetInstance));}
+ async acceptRestore(directory:string,pins:RecoveryPins,targetInstance:string,currentSourceInstance?:string) {return this.operation(()=>this.acceptRestoreImpl(directory,pins,targetInstance,currentSourceInstance));}
  async resume(hooks:Pick<RecoveryHooks,'reconcile'>,manifest:RecoveryManifest|null=null) {return this.operation(()=>this.resumeImpl(hooks,manifest));}
  private async quiesce(hooks:Pick<RecoveryHooks,'quiesce'>) {
   await hooks.quiesce();
@@ -128,6 +128,7 @@ export class InstallationRecovery {
    if(asset.file!==basename(asset.file)||asset.file==='manifest.json'||asset.file==='manifest.sha256') throw new Error('Invalid artifact name');
    const path=join(directory,asset.file);const stat=await lstat(path);
    if(!stat.isFile()||stat.isSymbolicLink()) throw new Error('Snapshot must be a regular file');
+   const file=await open(path,'r');try{await file.sync();}finally{await file.close();}
    artifacts.push({...asset,bytes:stat.size,sha256:await sha(path)});
   }
   const manifest=recoveryManifest.parse({format:'birbcrew-recovery-v1',generation,installation:c.installation,sourceInstance:c.instance,createdAt:new Date().toISOString(),...pins,schemaVersions,artifacts,inventory,pendingPolicy:'hold-until-reconciled'});
@@ -139,15 +140,22 @@ export class InstallationRecovery {
   await writeFile(join(directory,'manifest.json'),raw,{flag:'wx',mode:0o600,flush:true});
   await writeFile(join(directory,'manifest.sha256'),checksum+'\n',{flag:'wx',mode:0o600,flush:true});
   await readRecoveryManifest(directory);
+  // File flush alone does not persist newly created directory entries. Do not
+  // authorize transfer or record success until manifest and artifacts are durable.
+  const bundle=await open(directory,'r');try{await bundle.sync();}finally{await bundle.close();}
   await this.fence.seal(c.installation,c.instance,generation);
   await this.pool.query(`UPDATE birbcrew_ts.recovery_runs SET completed_at=now(),manifest_sha256=$2 WHERE generation=$1`,[generation,checksum]);
   return {generation,sha256:checksum};
  }
  /** Call ONLY after operator restores all verified artifacts into an isolated,
   * stopped target. No native path/index rewrite: same logical container mount. */
- private async acceptRestoreImpl(directory:string,pins:RecoveryPins,targetInstance:string) {
+ private async acceptRestoreImpl(directory:string,pins:RecoveryPins,targetInstance:string,currentSourceInstance?:string) {
   id.parse(targetInstance);
   const manifest=await readRecoveryManifest(directory);
+  // Artifact provenance is not necessarily the current live owner. A retained A
+  // backup may be restored after A→B only after B has been held for this generation.
+  const sourceInstance=id.parse(currentSourceInstance??manifest.sourceInstance);
+  if(sourceInstance===targetInstance) throw new Error("Restore needs a new instance identity");
   if(pins.applicationCommit!==manifest.applicationCommit||pins.lockfileSha256!==manifest.lockfileSha256||pins.logicalNativeRoot!==manifest.logicalNativeRoot||pins.temporal.mode!==manifest.temporal.mode||pins.temporal.serverVersion!==manifest.temporal.serverVersion||pins.temporal.persistenceFormat!==manifest.temporal.persistenceFormat) throw new Error('Recovery version/configuration mismatch');
   const {control:c}=await this.status();
   const schemas=(await this.pool.query<{version:number}>('SELECT version FROM birbcrew_ts.schema_versions ORDER BY version')).rows.map(x=>x.version);
@@ -156,7 +164,7 @@ export class InstallationRecovery {
   // preserve the manifest digest in the operator's independent backup catalog.
   const restoredInventory=await this.inventory();
   if(JSON.stringify(restoredInventory)!==JSON.stringify(manifest.inventory)) throw new Error("Restored inventory does not match generation");
-  await this.fence.transfer(c.installation,manifest.sourceInstance,targetInstance,manifest.generation);
+  await this.fence.transfer(c.installation,sourceInstance,targetInstance,manifest.generation);
   await this.pool.query(`UPDATE birbcrew_ts.recovery_control SET instance_id=$1,phase='restored' WHERE singleton`,[targetInstance]);
   return {generation:manifest.generation,instance:targetInstance,phase:'restored' as const};
  }

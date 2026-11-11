@@ -122,8 +122,8 @@ capture or explicit `hold-for-restore` seals that transfer permission.
    record; it is not silently marked successful or replayed. Consumer activity
    outside Birbcrew must be stopped by the consumer hook.
 5. Operator snapshots all state, including **stopped** Temporal persistence. The
-   manifest pins the schema and version. Capture verifies artifact checksums and
-   the fence before recording success. New domain tables without the barrier are
+   manifest pins the schema and version. Capture flushes artifacts and manifest files, fsyncs the bundle directory,
+   and verifies checksums/the fence before recording success. New domain tables without the barrier are
    rejected, so schema upgrades need recovery integration, not implicit coverage.
 6. Failed/interrupted maintenance stays held, with no success receipt. Fix the
    failing hook and retry in a new directory. Native teardown and backup hooks
@@ -173,6 +173,13 @@ moving state. Independent restored databases cannot discover arbitrary clones.
    ```
    npm run recovery -- accept-restore /absolute/target-operator.ts /private/generation <new-instance-uuid>
    ```
+
+   For a retained backup made on A after the installation moved A→B, first
+   quiesce B with `hold-for-restore <backup-generation>`, then pass B’s current
+   instance UUID as the optional final `accept-restore` argument. The manifest
+   remains unchanged: A identifies artifact provenance, while B is the owner that
+   must actually be fenced. An active B, stale A identity or second concurrent
+   target is rejected.
 
    This verifies artifacts/pins and the restored database generation, then
    atomically transfers authority to the new instance. Source resume and another

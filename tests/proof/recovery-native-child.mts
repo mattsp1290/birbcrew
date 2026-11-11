@@ -1,6 +1,7 @@
 // Disposable container child: stable logical /native mount, different host roots.
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {createProxyProfile} from '../../src/service/proxy-profiles.ts';
@@ -11,6 +12,13 @@ import type {Checkpoint} from '../../src/service/domain.ts';
 import {z} from 'zod';
 const mode=z.enum(['source','restored']).parse(process.argv[2]);
 const endpoints=z.object({claude:z.url(),codex:z.url(),pi:z.url()}).parse(JSON.parse(process.env.BIRBCREW_PROXY_FIXTURE_ENDPOINTS??'null'));
+// Surface loader/kernel failures before the SDK intentionally redacts its errors.
+// This runs the unchanged production Landlock/seccomp launcher, not a bypass.
+const probe=spawnSync('/app/.proof/bin/member-launch',[String(process.pid),process.execPath,'-e',"process.stdout.write('native-isolation-ready')"],{
+ cwd:'/native',env:{PATH:'/usr/local/bin:/usr/bin:/bin',HOME:'/native'},encoding:'utf8',timeout:10_000,
+});
+assert.equal(probe.status,0,`Native isolation prerequisite failed: status=${probe.status}, signal=${probe.signal}, stderr=${probe.stderr}`);
+assert.equal(probe.stdout,'native-isolation-ready');
 const checkpointFile='/native/checkpoints.json';
 const models={claude:'claude-sonnet-4-6',codex:'gpt-5.4',pi:'fixture-chat'} as const;
 const protocols={claude:'anthropic-messages',codex:'openai-responses',pi:'openai-chat-completions'} as const;

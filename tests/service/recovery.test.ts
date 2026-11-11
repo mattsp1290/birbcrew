@@ -182,3 +182,49 @@ test('external preparation before DB freeze cannot authorize restore overlap',as
   await t.fence.transfer(c.installation,c.instance,randomUUID(),generation);
  }finally{await t.cleanup();}
 });
+
+test('retained A backup restores to C after A→B, but only after current owner B is quiesced',async()=>{
+ const t=await setup();const nameC='recovery_'+randomUUID().replaceAll('-','');let poolC:Pool|undefined;
+ try {
+  const urlA=new URL(url!);urlA.pathname='/'+t.name;
+  await t.recovery.capture(t.bundle,pins,{...t.hooks,snapshot:async directory=>{
+   const artifacts=await t.hooks.snapshot(directory);
+   await writeFile(join(directory,'application-postgres.fixture'),await postgresTool('pg_dump',['--dbname',urlA.toString(),'--format=custom','--no-owner']));
+   return artifacts;
+  }});
+  const manifest=await readRecoveryManifest(t.bundle);const instanceB=randomUUID();const instanceC=randomUUID();
+  await t.recovery.acceptRestore(t.bundle,pins,instanceB);
+  await t.recovery.resume(t.hooks,manifest);
+  // Restore the retained A bytes, not a new B backup, into a third isolated DB.
+  await admin.query(`CREATE DATABASE ${nameC}`);const urlC=new URL(url!);urlC.pathname='/'+nameC;
+  await postgresTool('pg_restore',['--dbname',urlC.toString(),'--no-owner'],await readFile(join(t.bundle,'application-postgres.fixture')));
+  poolC=new Pool({connectionString:urlC.toString()});const c=new InstallationRecovery(poolC,t.fence);
+  await assert.rejects(c.acceptRestore(t.bundle,pins,instanceC,instanceB),/overlap/); // B is still active
+  await t.recovery.holdForRestore(manifest.generation,t.hooks);
+  await assert.rejects(c.acceptRestore(t.bundle,pins,instanceC),/overlap/); // provenance A isn't current B
+  await c.acceptRestore(t.bundle,pins,instanceC,instanceB);
+  await c.acceptRestore(t.bundle,pins,instanceC,instanceB); // transfer/update acknowledgement retry
+  await assert.rejects(t.recovery.resume(t.hooks),/fenced/);
+  await assert.rejects(t.fence.transfer(manifest.installation,instanceB,randomUUID(),manifest.generation),/overlap/);
+  await c.resume(t.hooks,manifest);assert.equal((await c.status()).control.phase,'active');
+ }finally{await poolC?.end();await admin.query(`DROP DATABASE IF EXISTS ${nameC} WITH(FORCE)`);await t.cleanup();}
+});
+
+test('bundle directory fsync failure cannot record a successful or transferable backup',async()=>{
+ const fs=(await import('node:fs/promises')).default;
+ const {syncBuiltinESMExports}=await import('node:module');
+ const t=await setup();const originalOpen=fs.open;let bundleSyncAttempted=false;
+ try {
+  fs.open=async(...args:Parameters<typeof originalOpen>)=>{
+   const handle=await originalOpen(...args);
+   if(args[0]===t.bundle) handle.sync=async()=>{bundleSyncAttempted=true;throw new Error('injected directory sync failure');};
+   return handle;
+  };
+  syncBuiltinESMExports();
+  await assert.rejects(t.recovery.capture(t.bundle,pins,t.hooks),/directory sync failure/);
+  assert.equal(bundleSyncAttempted,true);
+  assert.equal((await t.recovery.status()).latest,null);
+  const manifest=await readRecoveryManifest(t.bundle);
+  await assert.rejects(t.fence.transfer(manifest.installation,manifest.sourceInstance,randomUUID(),manifest.generation),/overlap/);
+ }finally{fs.open=originalOpen;syncBuiltinESMExports();await t.cleanup();}
+});
