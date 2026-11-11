@@ -14,6 +14,7 @@
     "x64"
   ],
   "scripts": {
+    "build": "scripts/build-native && npm run typecheck",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/fixtures/engines/artifacts.test.ts tests/fixtures/engines/consumer.test.mjs tests/fixtures/engines/codex/qualification.test.ts",
     "gateway": "node src/service/gateway.ts",

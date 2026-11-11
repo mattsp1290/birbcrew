@@ -26,6 +26,7 @@ export async function services(selected?: Engine) {
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH, HOME: directory, BIRBCREW_STATE_DIR: join(directory, "native"),
     BIRBCREW_PROOF_STREAM_DIR: directory, BIRBCREW_PROOF_REQUESTS: join(directory, "requests.jsonl"),
+    BIRBCREW_PROOF_CODEX_REQUESTS: join(directory, "codex-results.jsonl"),
     BIRBCREW_PROOF_NOTES: join(directory, "note-evidence.jsonl"),
     ...(selected && { BIRBCREW_PROOF_ENGINE: selected }),
   };
