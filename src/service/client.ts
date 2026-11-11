@@ -104,7 +104,8 @@ export class MemberClient {
     }
   }
 
-  async cancelPending(input: unknown) {
+  async cancelPending(input: unknown, deadline?: number): Promise<void> {
+    if (deadline !== undefined) return this.temporal.connection.withDeadline(deadline, () => this.cancelPending(input));
     const key = turnKey.parse(input);
     const conversation = await this.store.getConversation({ ownerId: key.ownerId, conversationId: key.conversationId });
     const ledger = new ApprovalStore(this.store.pool);
