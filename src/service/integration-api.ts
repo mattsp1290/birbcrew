@@ -60,10 +60,10 @@ export class IntegrationApi {
        (EXISTS(SELECT 1 FROM birbcrew_ts.tool_cancellations tc WHERE tc.conversation_id=a.conversation_id AND tc.request_id=a.request_id)
         AND EXISTS(SELECT 1 FROM birbcrew_ts.native_launches n WHERE n.conversation_id=a.conversation_id AND n.request_id=a.request_id)
         AND NOT EXISTS(SELECT 1 FROM birbcrew_ts.native_launches n WHERE n.conversation_id=a.conversation_id AND n.request_id=a.request_id AND NOT n.stopped)) AS stopped
-       FROM birbcrew_ts.request_admissions a JOIN birbcrew_ts.conversations c USING(conversation_id)
-       LEFT JOIN birbcrew_ts.turns t USING(conversation_id,request_id)
-       LEFT JOIN birbcrew_ts.integration_cancellations x USING(conversation_id,request_id)
-       WHERE c.owner_id=$1 AND a.conversation_id=$2 AND a.request_id=$3`,
+       FROM birbcrew_ts.request_admissions a FULL JOIN birbcrew_ts.turns t USING(conversation_id,request_id)
+       JOIN birbcrew_ts.conversations c ON c.conversation_id=COALESCE(a.conversation_id,t.conversation_id)
+       LEFT JOIN birbcrew_ts.integration_cancellations x ON x.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND x.request_id=COALESCE(a.request_id,t.request_id)
+       WHERE c.owner_id=$1 AND COALESCE(a.conversation_id,t.conversation_id)=$2 AND COALESCE(a.request_id,t.request_id)=$3`,
       [key.ownerId,key.conversationId,key.requestId]);
     if (!row) throw new MemberStoreError("not_found");
     // A cancellation intent never overwrites the committed winner or claims rollback.
@@ -86,6 +86,13 @@ export class IntegrationApi {
 
   async cancel(input: unknown): Promise<RequestReceipt> {
     const key = keySchema.parse(input);
+    // Backfill active legacy turns created after migration17, without inventing an
+    // admission for an unknown UUID or accepting a new payload.
+    await this.store.pool.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest)
+      SELECT t.conversation_id,t.request_id,t.prompt_digest FROM birbcrew_ts.turns t
+      JOIN birbcrew_ts.conversations c USING(conversation_id)
+      WHERE c.owner_id=$1 AND t.conversation_id=$2 AND t.request_id=$3
+      ON CONFLICT(conversation_id,request_id) DO NOTHING`, [key.ownerId,key.conversationId,key.requestId]);
     // Atomic ownership check and FK admission requirement. Repeated intent has one receipt.
     await this.store.pool.query(`INSERT INTO birbcrew_ts.integration_cancellations(conversation_id,request_id)
       SELECT a.conversation_id,a.request_id FROM birbcrew_ts.request_admissions a
