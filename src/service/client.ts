@@ -1,5 +1,5 @@
 import { ApprovalStore, decisionSchema } from "./approvals.ts";
-import { Client, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from "@temporalio/client";
+import { ApplicationFailure, Client, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError, WorkflowUpdateFailedError } from "@temporalio/client";
 import { MemberStoreError, openSchema, submitSchema, conversationKey, turnKey, type Conversation } from "./domain.ts";
 import type { MemberStore } from "./store.ts";
 import type { memberConversation } from "./workflow.ts";
@@ -18,18 +18,36 @@ export class MemberClient {
   private async workflow(conversation: Conversation) {
     const workflowId = `birbcrew-ts/member/${conversation.memberId}/conversation/${conversation.conversationId}`;
     const runId = await this.store.workflowRunId(conversation);
-    if (runId) return this.temporal.workflow.getHandle<typeof memberConversation>(workflowId, runId);
+    // A persisted first-turn run ID is evidence of a started logical conversation, not
+    // a routing target: Continue-As-New advances its active run.
+    if (runId) return this.temporal.workflow.getHandle<typeof memberConversation>(workflowId);
     try {
-      return await this.temporal.workflow.start<typeof memberConversation>("memberConversation", {
+      await this.temporal.workflow.start<typeof memberConversation>("memberConversation", {
         taskQueue: memberTaskQueue,
         workflowId,
         workflowIdConflictPolicy: "USE_EXISTING",
         workflowIdReusePolicy: "REJECT_DUPLICATE",
         args: [conversation],
       });
+      return this.temporal.workflow.getHandle<typeof memberConversation>(workflowId);
     } catch (error) {
       if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
       return this.temporal.workflow.getHandle<typeof memberConversation>(workflowId);
+    }
+  }
+
+  private async throughRollover<T>(conversation: Conversation, action: (handle: Awaited<ReturnType<MemberClient["workflow"]>>) => Promise<T>): Promise<T> {
+    // Rejected updates were not accepted and are safe to resubmit. Never retry arbitrary
+    // failures or an accepted update whose result is uncertain.
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      try { return await action(await this.workflow(conversation)); }
+      catch (error) {
+        if (!(error instanceof WorkflowUpdateFailedError) || !(error.cause instanceof ApplicationFailure) ||
+            error.cause.type !== "RolloverInProgress") throw error;
+        if (Date.now() >= deadline) throw new MemberStoreError("busy");
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
     }
   }
 
@@ -63,7 +81,8 @@ export class MemberClient {
     }
   }
 
-  async cancelPending(input: unknown) {
+  async cancelPending(input: unknown, deadline?: number): Promise<void> {
+    if (deadline !== undefined) return this.temporal.connection.withDeadline(deadline, () => this.cancelPending(input));
     const key = turnKey.parse(input);
     const conversation = await this.store.getConversation({ ownerId: key.ownerId, conversationId: key.conversationId });
     const ledger = new ApprovalStore(this.store.pool);
@@ -76,9 +95,8 @@ export class MemberClient {
     const request = submitSchema.parse(input);
     const conversation = await this.store.getConversation({ ownerId: request.ownerId, conversationId: request.conversationId });
     if (await this.store.committedReply(request) === undefined) {
-      const handle = await this.workflow(conversation);
       try {
-        await handle.startUpdate("submitTurn", { args: [request], waitForStage: "ACCEPTED" });
+        await this.throughRollover(conversation, handle => handle.executeUpdate<string, [typeof request]>("acceptTurn", { args: [request] }));
       } catch (error) {
         if (!(error instanceof WorkflowNotFoundError)) throw error;
         if (await this.store.committedReply(request) === undefined) throw new MemberStoreError("conflict");
@@ -92,9 +110,8 @@ export class MemberClient {
     const conversation = await this.store.getConversation({ ownerId: request.ownerId, conversationId: request.conversationId });
     const reply = await this.store.committedReply(request);
     if (reply !== undefined) return reply;
-    const handle = await this.workflow(conversation);
     try {
-      return await handle.executeUpdate<string, [typeof request]>("submitTurn", { args: [request] });
+      return await this.throughRollover(conversation, handle => handle.executeUpdate<string, [typeof request]>("submitTurn", { args: [request] }));
     } catch (error) {
       if (!(error instanceof WorkflowNotFoundError)) throw error;
       const settled = await this.store.committedReply(request);

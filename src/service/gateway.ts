@@ -16,6 +16,7 @@ import { MemberClient } from "./client.ts";
 import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from "./domain.ts";
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
 import { MemberStore } from "./store.ts";
+import { IntegrationApi, integrationCapabilities } from "./integration-api.ts";
 
 const credentials = z.record(z.string().regex(/^[0-9a-f]{64}$/), z.string().min(1));
 const encoder = new EventEncoder();
@@ -118,6 +119,7 @@ async function observe(
 }
 
 export function createGateway(store: MemberStore, members: MemberClient, owners: Record<string, string>) {
+  const integration = new IntegrationApi(store, members);
   const accounts = Object.entries(credentials.parse(owners)).map(([hash, actor]) => ({ digest: Buffer.from(hash, "hex"), actor }));
   async function route(request: IncomingMessage, response: ServerResponse) {
     const auth = request.headers.authorization;
@@ -126,7 +128,26 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
     const ownerId = accounts.find(({ digest }) => timingSafeEqual(digest, hash))?.actor;
     if (!ownerId) throw new HttpError(401, "authentication_required");
     const url = new URL(request.url ?? "/", "http://localhost");
-    const path = url.pathname;
+    const versioned = url.pathname.startsWith("/v1/");
+    const path = versioned ? url.pathname.slice(3) : url.pathname;
+    if (versioned && path === "/capabilities" && request.method === "GET") return json(response, 200, integrationCapabilities);
+    const requestRoute = versioned && /^\/conversations\/([^/]+)\/requests(?:\/([^/]+)(\/cancel)?)?$/.exec(path);
+    if (requestRoute) {
+      const conversationId = z.uuid().parse(requestRoute[1]);
+      if (!requestRoute[2] && request.method === "POST") {
+        const prompt = submitSchema.omit({ ownerId: true, conversationId: true }).parse(await body(request));
+        return json(response, 202, await integration.submit({ ownerId, conversationId, ...prompt }));
+      }
+      if (requestRoute[2]) {
+        const requestId = z.uuid().parse(requestRoute[2]);
+        if (!requestRoute[3] && request.method === "GET") return json(response, 200, await integration.status({ ownerId, conversationId, requestId }));
+        if (requestRoute[3] && request.method === "POST") {
+          z.strictObject({}).parse(await body(request));
+          return json(response, 202, await integration.cancel({ ownerId, conversationId, requestId }));
+        }
+      }
+      throw new HttpError(405, "method_not_allowed");
+    }
     if (path === "/members" && request.method === "POST") {
       const input = spawnSchema.omit({ ownerId: true }).parse(await body(request));
       const published = await store.pool.query("SELECT 1 FROM birbcrew_ts.profiles WHERE engine=$1 AND name=$2", [input.engine, input.profile]);
@@ -138,6 +159,10 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       await members.open({ ownerId, ...input });
       return json(response, 201, await readSnapshot(store.pool, ownerId, input.conversationId));
     }
+    const statusPath = /^\/conversations\/([^/]+)\/requests\/([^/]+)$/.exec(path);
+    if (statusPath && request.method === "GET") return json(response,200,await store.requestStatus({
+      ownerId,conversationId:z.uuid().parse(statusPath[1]),requestId:z.uuid().parse(statusPath[2]),
+    }));
     const parts = /^\/conversations\/([^/]+)(?:\/(events|inputs|human|cancel))?$/.exec(path);
     if (!parts) throw new HttpError(404, "not_found");
     const conversationId = z.uuid().parse(parts[1]);
@@ -177,7 +202,7 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       default: throw new HttpError(404, "not_found");
     }
   }
-  return createServer((request, response) => {
+  const server = createServer((request, response) => {
     void route(request, response).catch((error: unknown) => {
       if (response.destroyed || response.headersSent) return response.end();
       if (error instanceof HttpError) return json(response, error.status, { error: error.message });
@@ -187,6 +212,15 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       return json(response, 503, { error: "retry_same_request" });
     });
   });
+  let timer: ReturnType<typeof setInterval> | undefined;
+  server.once("listening", () => {
+    const flush = () => { void integration.flushCancellations().catch(() => {}); };
+    timer = setInterval(flush, 1000);
+    timer.unref();
+    flush();
+  });
+  server.once("close", () => { if (timer) clearInterval(timer); });
+  return server;
 }
 
 const configSchema = z.strictObject({ tokenHashes: credentials, port: z.number().int().min(0).max(65535) });
