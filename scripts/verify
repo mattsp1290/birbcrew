@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 if [ "$#" -eq 0 ]; then exec scripts/verify-legacy; fi
 for option do
   case "$option" in
-    --engine|--engine=*|fixture|--mode=fixture) exec scripts/verify-members "$@" ;;
+    --engine|--engine=*|fixture|live|--mode=fixture|--mode=live) exec scripts/verify-members "$@" ;;
   esac
 done
 exec scripts/verify-legacy "$@"

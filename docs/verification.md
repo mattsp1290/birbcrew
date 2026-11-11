@@ -11,7 +11,8 @@ are pinned. The JavaScript lockfile pins the AG-UI clients.
 
 For the historical Python journey, use `scripts/verify` or
 `scripts/verify-legacy --mode test`. Its report and private temporary files
-belong to that run.
+belong to that run. To reproduce the historical hosted proof, invoke
+`scripts/verify-legacy` explicitly with its approved attestation.
 
 ### TypeScript fixture verification
 
