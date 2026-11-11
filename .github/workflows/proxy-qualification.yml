@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - 'src/service/**'
+      - 'docs/ai-proxy-profiles.md'
       - 'native/**'
       - 'tests/service/**'
       - 'tests/proxy-relay.test.ts'

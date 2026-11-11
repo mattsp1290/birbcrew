@@ -204,6 +204,8 @@ absence and helper process cleanup. Native journey tests additionally check SDK
 callbacks/errors and retained native files for the injected diagnostic canary;
 these checks are not a universal guarantee about arbitrary successful model text.
 The independent broader consumer suite had one Claude timeout (nine passes, one
-cancelled); without baseline reproduction it is an unresolved validation limit,
-not evidence that this PR introduced a regression. A maintained full-service
-restart scenario and a complete consumer-suite pass remain follow-up acceptance.
+cancelled); no baseline cause was established. Subsequent [Linux CI](https://github.com/mattsp1290/birbcrew/actions/runs/43085082834)
+on `5eb15dc` passed the complete consumer suite (10/10, including Claude) and all
+32 proxy qualification tests. This establishes that run's success, not a diagnosed
+cause for the earlier timeout. A maintained full-service restart scenario remains
+follow-up acceptance.
