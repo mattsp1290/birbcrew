@@ -4,7 +4,8 @@ import { randomUUID } from "node:crypto";
 import { json } from "node:stream/consumers";
 import { z } from "zod";
 
-const providerInput = z.object({ tools: z.array(z.looseObject({type:z.string(),name:z.string().optional()})).default([]), input: z.array(z.looseObject({
+const nativeTools = z.array(z.looseObject({type:z.string(),name:z.string().optional()}));
+const providerInput = z.object({ tools: nativeTools.default([]), input: z.array(z.looseObject({
   role: z.string().optional(), type: z.string(), call_id: z.string().optional(), output: z.unknown().optional(),
   content: z.unknown().optional(),
 })) });
@@ -24,7 +25,8 @@ export async function startProvider(onFailure = () => {}) {
         response.writeHead(404).end(); return;
       }
       const {input,tools} = providerInput.parse(await json(request));
-      toolSurfaces.push(tools);
+      const additional = input.filter(i => i.type === "additional_tools").flatMap(i => nativeTools.parse(i.tools));
+      toolSurfaces.push([...tools, ...additional]);
       requests.push(input);
       const prompts = input.filter(i => i.role === "user").flatMap(i => {
         const parts = textParts.safeParse(i.content);
@@ -40,14 +42,22 @@ export async function startProvider(onFailure = () => {}) {
         send(response, "response.failed", { response: { id, error: { code: "invalid_request_error", message: "Fixture failure" } } });
         response.end(); return;
       }
-      const output = input.findLast(i => i.type === "function_call_output");
-      if (prompt?.startsWith("record ") && !output) {
-        const operation = prompt.slice(7);
-        const namespace = tools.find(tool => tool.name?.startsWith("mcp__"))?.name;
+      const lastUser = input.findLastIndex(i => i.role === "user");
+      const output = input.slice(lastUser + 1).findLast(i => i.type === "function_call_output") ??
+        (prompt === "continue" ? input.findLast(i => i.type === "function_call_output") : undefined);
+      if ((prompt?.startsWith("record ") || prompt === "choose") && !output) {
+        const ordinary = prompt === "choose";
+        const operation = ordinary ? randomUUID() : prompt.slice(7);
+        const catalog = input.filter(i => i.role === "developer" && i.type === "message").flatMap(i => {
+          const parts = textParts.safeParse(i.content);
+          return parts.success ? parts.data.map(p => p.text) : [];
+        }).join("\n");
+        const namespace = [...tools,...additional].find(tool => tool.name === "mcp__birbcrew" || tool.name === "mcp__fixture")?.name ??
+          /^- (mcp__(?:birbcrew|fixture))\s*$/m.exec(catalog)?.[1];
         if (!namespace) throw new Error("Fixture MCP namespace missing");
         send(response, "response.output_item.done", { item: {
           type:"function_call", call_id:"call_" + operation, namespace,
-          name:"record_work_item", arguments:JSON.stringify({operation_id:operation, note:"private fixture note"})
+          name:ordinary ? "choose_next_step" : "record_work_item", arguments:JSON.stringify(ordinary ? {} : {operation_id:operation, note:"private fixture note"})
         } });
       } else {
         let text: string;
