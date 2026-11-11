@@ -211,3 +211,36 @@ test("durable admissions preserve rejected queue outcomes without replay or iden
   const count=await pool.query("SELECT count(*)::int AS count FROM birbcrew_ts.turns WHERE conversation_id=$1",[key.conversationId]);
   assert.equal(count.rows[0].count,1);
 });
+
+test("progress activity projects only exact legacy DTOs without weakening the store schema", async () => {
+  const key=await newConversation("pi");
+  const conversation=await store.getConversation(key);
+  const {progressActivity}=await import("../../src/service/progress-activity.ts");
+  const activity=progressActivity(store);
+  await assert.rejects(store.conversationProgress(conversation),{name:"ZodError"});
+  assert.deepEqual(await activity(key),{turns:0,limit:128,terminal:false});
+  assert.deepEqual(await activity(conversation),await activity(key));
+  await assert.rejects(activity({...conversation,extra:true}),{name:"ZodError"});
+  await assert.rejects(activity({...conversation,memberId:randomUUID()}),{code:"conflict"});
+  await assert.rejects(activity({...conversation,engine:"claude"}),{code:"conflict"});
+  await assert.rejects(activity({...key,extra:true}),{name:"ZodError"});
+});
+
+test("unconfirmed admission rejection is digest-bound and cannot overwrite begun or committed work",async()=>{
+  const key=await newConversation("pi"),request={...key,requestId:randomUUID(),text:"original"};
+  await store.recordAcceptance(request);
+  await store.rejectUnstartedAdmission({...request,text:"changed"});
+  assert.equal((await store.requestAdmission(request))?.phase,"accepted");
+  await store.rejectUnstartedAdmission(request);
+  assert.deepEqual(await store.requestStatus({...key,requestId:request.requestId}),{requestId:request.requestId,phase:"rejected",reason:"admission_unconfirmed"});
+  await store.rejectUnstartedAdmission(request);
+  await assert.rejects(store.beginTurn(request),{code:"request_rejected"});
+  const active={...key,requestId:randomUUID(),text:"active"};await store.recordAcceptance(active);
+  const started=await store.beginTurn(active);assert.equal(started.kind,"start");
+  await store.rejectUnstartedAdmission(active);
+  assert.equal((await store.requestStatus({...key,requestId:active.requestId})).phase,"started");
+  if(started.kind!=="start")throw new Error("Expected start");
+  await store.commitTurn({...key,requestId:active.requestId,token:started.token,reply:"committed",checkpoint:{version:1,engine:"pi",state:{}}});
+  await store.rejectUnstartedAdmission(active);
+  assert.equal(await store.committedReply(active),"committed");
+});
