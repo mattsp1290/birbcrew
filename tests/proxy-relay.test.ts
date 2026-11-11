@@ -191,3 +191,110 @@ test("Claude beta Messages suffix preserves exact upstream endpoint and beta hea
     assert.equal(forwarded, 1);
   } finally { await relay.close(); await upstream.close(); }
 });
+
+for (const protocol of ["anthropic-messages", "openai-responses", "openai-chat-completions"] as const) {
+  for (const stream of [false, true]) {
+    test(`${protocol}: HTTP 200 ${stream ? "SSE" : "JSON"} protocol diagnostics are redacted before SDK boundary`, async () => {
+      const canary = "SYNTHETIC-UPSTREAM-DIAGNOSTIC";
+      const error = protocol === "anthropic-messages" ? { type: "error", error: { type: "overloaded_error", message: canary } } :
+        protocol === "openai-responses" ? { type: "response.failed", response: { status: "failed", error: { code: "server_error", message: canary } } } :
+          { error: { type: "invalid_request_error", message: canary } };
+      const body = JSON.stringify(error);
+      const upstream = await fixture((_req, res) => {
+        res.writeHead(200, { "content-type": stream ? "text/event-stream" : "application/json" });
+        // Prior safe content must remain streaming; split CRLF and error JSON across writes.
+        if (stream) res.write('data: {"text":"safe-content","tool_call_id":"safe-call"}\r\n\r\n');
+        const payload = stream ? `event: ${protocol === "openai-responses" ? "response.failed" : "message"}\r\ndata: ${body}\r\n\r\n` : body;
+        res.write(payload.slice(0, 15));
+        setTimeout(() => res.end(payload.slice(15)), 10);
+      });
+      const relay = await startProxyRelay({ protocol, endpoint: upstream.url, allowHttpLoopback: true, model: "allowed",
+        resolveCredential: async () => ({ headers: { authorization: canary }, expiresAt: Date.now() + 1000 }) });
+      try {
+        const result = await fetch(local(relay.baseUrl, protocol), { method: "POST", headers: { authorization: `Bearer ${relay.apiKey}` }, body: '{"model":"allowed"}' });
+        assert.equal(result.status, stream ? 200 : 502);
+        const text = await result.text();
+        assert.doesNotMatch(text, /SYNTHETIC-UPSTREAM-DIAGNOSTIC|overloaded_error|server_error|invalid_request_error/);
+        assert.match(text, /AI proxy request failed/);
+        if (stream) { assert.match(text, /safe-content/); assert.match(text, /safe-call/); }
+      } finally { await relay.close(); await upstream.close(); }
+    });
+  }
+}
+
+test("SSE named errors with non-JSON diagnostics and oversized/truncated frames fail generically", async () => {
+  for (const payload of [
+    'event: error\ndata: SYNTHETIC-DIAGNOSTIC\n\n',
+    'data: {"error":{"message":"' + 'SYNTHETIC-DIAGNOSTIC'.repeat(70_000) + '"}}\n\n',
+    'data: {"text":"unterminated SYNTHETIC-DIAGNOSTIC"}',
+    'data: {"type":"error","message":"SYNTHETIC-DIAGNOSTIC"}\n\n',
+  ]) {
+    const upstream = await fixture((_req, res) => { res.writeHead(200, { "content-type": "text/event-stream" }); res.end(payload); });
+    const relay = await startProxyRelay({ protocol: "openai-responses", endpoint: upstream.url, allowHttpLoopback: true, model: "allowed",
+      resolveCredential: async () => ({ headers: {}, expiresAt: Date.now() + 1000 }) });
+    try {
+      const result = await fetch(relay.baseUrl + "/responses", { method: "POST", headers: { authorization: `Bearer ${relay.apiKey}` }, body: '{"model":"allowed"}' });
+      const text = await result.text();
+      assert.doesNotMatch(text, /SYNTHETIC-DIAGNOSTIC/);
+      assert.match(text, /AI proxy request failed/);
+      assert.ok(text.length < 200);
+    } finally { await relay.close(); await upstream.close(); }
+  }
+});
+
+test("oversized JSON response is rejected before any upstream bytes escape", async () => {
+  const upstream = await fixture((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ text: "SYNTHETIC-DIAGNOSTIC".repeat(70_000) })); });
+  const relay = await startProxyRelay({ protocol: "openai-responses", endpoint: upstream.url, allowHttpLoopback: true, model: "allowed",
+    resolveCredential: async () => ({ headers: {}, expiresAt: Date.now() + 1000 }) });
+  try {
+    const result = await fetch(relay.baseUrl + "/responses", { method: "POST", headers: { authorization: `Bearer ${relay.apiKey}` }, body: '{"model":"allowed"}' });
+    assert.equal(result.status, 502);
+    assert.doesNotMatch(await result.text(), /SYNTHETIC-DIAGNOSTIC/);
+  } finally { await relay.close(); await upstream.close(); }
+});
+
+test("successful SSE remains incremental beyond the per-event limit", async () => {
+  const upstream = await fixture(async (_req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    for (let i = 0; i < 400; i++) {
+      res.write('data: ' + JSON.stringify({ text: "x".repeat(3000), sequence: i }) + '\r');
+      await new Promise(resolve => setImmediate(resolve));
+      res.write('\n\r\n');
+    }
+    res.end('data: [DONE]\n\n');
+  });
+  const relay = await startProxyRelay({ protocol: "openai-chat-completions", endpoint: upstream.url, allowHttpLoopback: true, model: "allowed",
+    resolveCredential: async () => ({ headers: {}, expiresAt: Date.now() + 1000 }) });
+  try {
+    const result = await fetch(relay.baseUrl + "/chat/completions", { method: "POST", headers: { authorization: `Bearer ${relay.apiKey}` }, body: '{"model":"allowed"}' });
+    const text = await result.text();
+    assert.ok(text.length > 1024 * 1024);
+    assert.equal(text.match(/"sequence":/g)?.length, 400);
+    assert.match(text, /data: \[DONE\]/);
+    assert.doesNotMatch(text, /proxy_error/);
+  } finally { await relay.close(); await upstream.close(); }
+});
+
+test("relay deadline interrupts downstream SSE backpressure", { timeout: 2000 }, async () => {
+  const { EventEmitter } = await import("node:events");
+  const { proxySse } = await import("../src/service/proxy-response.ts");
+  const downstream = Object.assign(new EventEmitter(), {
+    destroyed: false, writableEnded: false,
+    write() { return false; }, // a socket that never drains
+    destroy() { this.destroyed = true; },
+    end() { this.writableEnded = true; },
+  });
+  const reader = new ReadableStream<Uint8Array>({ start(controller) {
+    controller.enqueue(Buffer.from('data: {"text":"safe"}\n\n'));
+    controller.close();
+  } }).getReader();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 50);
+  try { await proxySse(reader, downstream as unknown as import("node:http").ServerResponse, "openai-responses", controller.signal); }
+  finally { clearTimeout(timer); }
+  assert.equal(downstream.destroyed, true);
+  assert.equal(downstream.listenerCount("drain"), 0);
+  assert.equal(downstream.listenerCount("close"), 0);
+  assert.equal(downstream.listenerCount("error"), 0);
+  await reader.cancel();
+});

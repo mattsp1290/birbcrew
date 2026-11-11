@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readdir, readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +24,7 @@ async function proxyFixture(engine: "claude" | "codex" | "pi", model: string) {
     engine === "codex" ? await startProvider() : undefined;
   const route = engine === "claude" ? "/v1/messages" : engine === "codex" ? "/responses" : "/chat/completions";
   const authorizations: string[] = [];
-  let results = 0, failed = false, cancelled = 0;
+  let results = 0, failed = false, cancelled = 0, protocolFailure = false;
   const server = createServer(async (req, res) => {
     try {
       assert.equal(req.method, "POST");
@@ -34,6 +34,14 @@ async function proxyFixture(engine: "claude" | "codex" | "pi", model: string) {
       authorizations.push(String(req.headers.authorization));
       const body = z.looseObject({ model: z.string(), messages: z.unknown().optional() }).parse(await json(req));
       assert.equal(body.model, model);
+      if (protocolFailure) {
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        const payload = engine === "claude" ? { type: "error", error: { type: "api_error", message: "SYNTHETIC-DIAGNOSTIC-CANARY" } } :
+          engine === "codex" ? { type: "error", code: "server_error", message: "SYNTHETIC-DIAGNOSTIC-CANARY" } :
+            { error: { type: "server_error", message: "SYNTHETIC-DIAGNOSTIC-CANARY" } };
+        res.end((engine === "pi" ? "" : "event: error\n") + "data: " + JSON.stringify(payload) + "\n\n");
+        return;
+      }
       // Each response outlives the credential used to submit it. A continuation
       // must obtain a new credential rather than reusing worker-start state.
       await new Promise(resolve => setTimeout(resolve, 650));
@@ -79,6 +87,7 @@ async function proxyFixture(engine: "claude" | "codex" | "pi", model: string) {
   assert.ok(address && typeof address !== "string");
   return { endpoint: `http://127.0.0.1:${address.port}${route}`, authorizations,
     stats: () => ({ results, failed, cancelled }),
+    setProtocolFailure(value: boolean) { protocolFailure = value; },
     async close() { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await native?.close(); } };
 }
 
@@ -148,10 +157,27 @@ for (const engine of ["claude", "codex", "pi"] as const) {
     assert.ok(credentials >= 4);
     assert.equal(new Set(fixture.authorizations).size, credentials);
     assert.ok(!JSON.stringify([first.checkpoint, second.checkpoint]).includes("synthetic-"));
+    fixture.setProtocolFailure(true);
+    const diagnostics: string[] = [];
+    await assert.rejects(textTurn({ ...input, threadId: randomUUID(), runId: randomUUID(), text: "fail" }, delta => diagnostics.push(delta)),
+      error => { assert.doesNotMatch(String(error), /SYNTHETIC-DIAGNOSTIC-CANARY/); return true; });
+    assert.doesNotMatch(JSON.stringify(diagnostics), /SYNTHETIC-DIAGNOSTIC-CANARY/);
+    async function inspectNativeFiles(path: string): Promise<void> {
+      for (const entry of await readdir(path, { withFileTypes: true })) {
+        const child = join(path, entry.name);
+        if (entry.isDirectory()) await inspectNativeFiles(child);
+        else if (entry.isFile()) assert.equal((await readFile(child)).includes(Buffer.from("SYNTHETIC-DIAGNOSTIC-CANARY")), false);
+      }
+    }
+    await inspectNativeFiles(stateDir);
+    fixture.setProtocolFailure(false);
     const stop = new AbortController();
     const waiting = textTurn({ ...input, threadId: randomUUID(), runId: randomUUID(), text: "wait", signal: stop.signal }, () => stop.abort());
-    await assert.rejects(waiting);
-    for (let i = 0; i < 100 && !fixture.stats().cancelled; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    await assert.rejects(waiting, error => {
+      assert.ok(stop.signal.aborted, `stream failed before cancellation: ${String(error)}`);
+      return true;
+    });
+    for (let i = 0; i < 500 && !fixture.stats().cancelled; i++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.ok(fixture.stats().cancelled > 0);
     assert.equal(fixture.stats().failed, false);
   });

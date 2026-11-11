@@ -1,3 +1,4 @@
+import { proxyJson, proxySse } from "./proxy-response.ts";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
@@ -132,23 +133,16 @@ export async function startProxyRelay(config: ProxyRelayConfig) {
       if (!upstream.ok || !upstream.body) { await upstream.body?.cancel(); return failure(response, 502); }
       const contentType = upstream.headers.get("content-type") ?? "";
       if (!/^(text\/event-stream|application\/json)(;|$)/i.test(contentType)) { await upstream.body.cancel(); return failure(response, 502); }
-      // Do not copy arbitrary upstream headers (including cookies or credential echoes).
-      response.writeHead(upstream.status, { "content-type": contentType.toLowerCase().startsWith("text/event-stream") ? "text/event-stream" : "application/json", "cache-control": "no-store" });
       const reader = upstream.body.getReader();
       try {
-        while (true) {
-          const chunk = await reader.read();
-          if (chunk.done) break;
-          if (!response.write(chunk.value)) await new Promise<void>((resolve, reject) => {
-            const cleanup = () => { response.off("drain", drained); response.off("close", disconnected); response.off("error", disconnected); };
-            const drained = () => { cleanup(); resolve(); };
-            const disconnected = () => { cleanup(); reject(new Error("Proxy cancelled")); };
-            response.once("drain", drained);
-            response.once("close", disconnected);
-            response.once("error", disconnected);
-          });
+        if (contentType.toLowerCase().startsWith("text/event-stream")) {
+          response.writeHead(upstream.status, { "content-type": "text/event-stream", "cache-control": "no-store" });
+          await proxySse(reader, response, protocol, controller.signal);
+        } else {
+          const json = await proxyJson(reader);
+          response.writeHead(upstream.status, { "content-type": "application/json", "cache-control": "no-store" });
+          response.end(json);
         }
-        response.end();
       } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
     } catch (error) { failure(response, error instanceof BodyLimitError ? 413 : controller.signal.aborted ? 504 : 502); }
     finally {

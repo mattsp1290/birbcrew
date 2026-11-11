@@ -86,7 +86,13 @@ an executable, args, endpoint, headers, model or credential from AG-UI input.
 Helpers run without a shell, with fixed copied arguments, a minimal explicit
 environment, a 10-second default deadline and 16 KiB output limit. Non-JSON output,
 extra JSON fields, nonzero exit, expiry and cancellation fail generically; stdout,
-stderr, arguments and exception details are not logged or propagated.
+stderr, arguments and exception details are not logged or propagated. Each helper
+runs in its own process group. Deadline, cancellation and output overflow send
+SIGTERM, escalate to SIGKILL after 100ms and wait for the direct child to be reaped.
+A further 100ms drain window closes inherited pipes; group-local descendants are
+terminated, with orphan reaping owned by the OS/subreaper. Trusted helpers must not
+daemonize or escape their group. This is bounded lifecycle management, not a
+sandbox for untrusted programs; no unrelated PIDs are scanned or signalled.
 
 ## Lifecycle and security boundary
 
@@ -107,7 +113,14 @@ and sends only configured headers plus necessary protocol headers. Upstream TLS
 is required except explicitly enabled HTTP **numeric loopback** fixtures/local
 proxies (`allowHttpLoopback: true`). Redirects are never followed. Responses
 outside successful JSON/SSE and upstream error bodies are replaced with generic
-errors; arbitrary upstream headers are not forwarded. Client disconnect and
+errors; arbitrary upstream headers are not forwarded. Successful HTTP status alone is
+not trusted: JSON bodies and incremental SSE events are inspected for recognized
+protocol error envelopes (`error`, `response.failed`, `response.incomplete` and
+nested response error/status). Their diagnostics are replaced with a generic
+failure, including an error arriving after earlier safe streamed content. Each
+JSON body/SSE event is limited to 1MiB, not the entire stream. Malformed, oversized
+or unterminated frames fail generically; valid text/tool events remain streamed.
+Only SSE event/data fields are forwarded, not comments or unknown fields. Client disconnect and
 shutdown abort upstream fetch. The default body limit is 16 MiB and request
 deadline is five minutes. There is no direct-provider or subscription bypass.
 
@@ -171,3 +184,28 @@ worker/container restart and deployment-specific credential issuance still need
 that operator-controlled acceptance. Pi's current driver disables compaction; the
 fixture does not claim to force Claude/Codex compaction, only to renew at the same
 HTTP boundary those requests must use.
+
+## Independent validation at the original proxy revision
+
+The [validation handoff](https://github.com/mattsp1290/hub/blob/23537fb1d88018c2c35b485a55176e4e317ffedd/projects/birbcrew/handoffs/birbcrew-sq4k-ai-proxy-pr29-validation-two-corrections-and-verified.md)
+records an independent Linux ARM64/Landlock ABI4 probe of `48910c2`: build and all
+17 then-current proxy tests passed. Actual between-turn worker/supervisor process
+replacement plus PostgreSQL and Temporal development-server restart passed for
+all three engines. Duplicate completed requests caused zero new inference; new
+recall requests used fresh credentials, exactly two requests per engine overall.
+This was a temporary host probe, not a maintained portable test or worker-container
+replacement test. It did not establish in-flight/tool-decision recovery, observer
+reconnect, production Temporal persistence, forced compaction or live acceptance.
+
+That probe also found two generic runtime defects: HTTP200 protocol error payloads
+crossed the relay boundary, and a helper ignoring SIGTERM survived its deadline.
+The current regression suite covers both corrections, including downstream canary
+absence and helper process cleanup. Native journey tests additionally check SDK
+callbacks/errors and retained native files for the injected diagnostic canary;
+these checks are not a universal guarantee about arbitrary successful model text.
+The independent broader consumer suite had one Claude timeout (nine passes, one
+cancelled); no baseline cause was established. Subsequent [Linux CI](https://github.com/mattsp1290/birbcrew/actions/runs/43085082834)
+on `5eb15dc` passed the complete consumer suite (10/10, including Claude) and all
+32 proxy qualification tests. This establishes that run's success, not a diagnosed
+cause for the earlier timeout. A maintained full-service restart scenario remains
+follow-up acceptance.
