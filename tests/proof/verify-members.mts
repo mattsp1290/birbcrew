@@ -5,6 +5,7 @@ import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { z } from "zod";
+import { verifyObserverProcesses } from "./member-observer-processes.mts";
 import { fixtureReport } from "./member-report.mts";
 import { verifyChildren } from "./member-children.mts";
 import { verifyDecisions } from "./member-decisions.mts";
@@ -102,6 +103,8 @@ async function verify(s: Services, engines: Engine[], pass: (name: string) => vo
   assert.equal((await requests()).filter((r) => r.prompt === "wait").length, engines.length);
 
   pass("Interrupted SDK invocations reconcile without automatic resubmission");
+  await verifyObserverProcesses(s, engines);
+  pass("Two independent clients/observe.mjs processes persisted the canonical SQL and gateway messages");
   if (selected !== "codex") await test(["tests/service/observation.test.ts"], env, selected && matrix[selected].observers);
   if (!selected) await execute(node, ["tests/proof/replay-traces.mts"], {
     ...env, ...(process.env.BIRBCREW_REPLAY_EVIDENCE && { BIRBCREW_REPLAY_EVIDENCE: process.env.BIRBCREW_REPLAY_EVIDENCE }),

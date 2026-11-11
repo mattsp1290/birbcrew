@@ -27,7 +27,11 @@ Run `scripts/verify --mode fixture` for the combined matrix, or add
 `scripts/verify-members` and `npm run test:integration` use the same Node
 entrypoint. Each run starts disposable PostgreSQL and Temporal on loopback,
 checks two distinct conversations per member before and after cold replacement,
-and cleans up its processes, containers, and native transcripts. Engine-specific
+and cleans up its processes, containers, and native transcripts. Two separate
+`clients/observe.mjs` processes use the client lockfile. One watches throughout
+the conversation and the other attaches to a pending call. The verifier compares
+both saved `.messages.json` files with the complete ordered PostgreSQL and HTTP
+snapshots after the owner approves the call. Engine-specific
 tests cover native calls, approvals, isolation, cancellation and observers.
 The combined run also exercises simultaneous cancellation and offline replay.
 
