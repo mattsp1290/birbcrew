@@ -10,16 +10,34 @@ type StopRequest = Pick<TurnRequest, "ownerId" | "requestId" | "conversationId">
 
 // Publish before retiring the generation so an admitted SDK can release its shared lock.
 export async function requestNativeStop(pool: Pool, request: StopRequest, stop: Stop) {
-  await pool.query(`INSERT INTO birbcrew_ts.native_stop_requests (conversation_id,request_id,token)
+  const { rows: [claim] } = await pool.query<{ token: string }>(`WITH generation AS (
     SELECT t.conversation_id,t.request_id,t.token FROM birbcrew_ts.turns t
     JOIN birbcrew_ts.conversations c USING (conversation_id)
     WHERE c.owner_id=$1 AND t.conversation_id=$2 AND t.request_id=$3 AND t.phase='started'
       AND ($4::text IS NULL OR t.workflow_run_id=$4) AND ($5::text IS NULL OR t.activity_id=$5)
       AND ($6::integer IS NULL OR t.attempt<$6) AND ($7::uuid IS NULL OR t.token=$7)
       AND ($8::bytea IS NULL OR t.prompt_digest=$8) AND ($9::int IS NULL OR t.attempt=$9)
-    ON CONFLICT DO NOTHING`, [request.ownerId, request.conversationId, request.requestId, stop.workflowRunId ?? null,
+  ), mark AS (
+    INSERT INTO birbcrew_ts.native_stop_requests (conversation_id,request_id,token)
+    SELECT conversation_id,request_id,token FROM generation ON CONFLICT DO NOTHING
+  ) SELECT token FROM generation`, [request.ownerId, request.conversationId, request.requestId, stop.workflowRunId ?? null,
     stop.activityId ?? null, stop.beforeAttempt ?? null, stop.token ?? null,
     request.text === undefined ? null : createHash("sha256").update(request.text).digest(), stop.attempt ?? null]);
+  if (!claim) return;
+  // Drain before the caller takes the conversation lock. A suspended SDK cannot block sibling publications.
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    await db.query("SET LOCAL lock_timeout='8s'");
+    await db.query(`SELECT 1 FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2 AND token=$3
+      FOR NO KEY UPDATE`, [request.conversationId, request.requestId, claim.token]);
+    await db.query("COMMIT");
+  } catch (error) {
+    await db.query("ROLLBACK");
+    throw error;
+  } finally {
+    db.release();
+  }
 }
 
 export async function withNativeAdmission<T>(

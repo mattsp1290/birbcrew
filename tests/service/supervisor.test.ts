@@ -390,3 +390,31 @@ test("a worker exits when its native supervisor dies", { timeout: 30_000 }, asyn
   process.kill(hostPid, "SIGKILL");
   assert.notEqual((await closed)[0], 0);
 });
+
+test("revoking an admitted turn leaves its conversation available while the SDK drains", async () => {
+  const pool = new Pool({ connectionString: process.env.BIRBCREW_TEST_DATABASE_URL });
+  const store = new MemberStore(pool);
+  const ownerId = randomUUID(), conversationId = randomUUID();
+  const { memberId } = await store.spawn({ ownerId, engine: "pi", profile: "fixture.v1", requestId: randomUUID() });
+  await store.openConversation({ ownerId, conversationId, memberId });
+  const request = { ownerId, conversationId, requestId: randomUUID(), text: "remember drain" };
+  const execution = { workflowRunId: randomUUID(), activityId: "drain", attempt: 1 };
+  const claim = await store.beginTurn(request, execution);
+  assert.equal(claim.kind, "start");
+  const gate = await pool.connect();
+  let reconciled;
+  try {
+    await gate.query("BEGIN");
+    await gate.query("SELECT 1 FROM birbcrew_ts.turns WHERE token=$1 FOR SHARE", [claim.token]);
+    reconciled = store.reconcileTurn(request, execution.workflowRunId, false, false);
+    await until(async () => Boolean((await pool.query(`SELECT 1 FROM pg_stat_activity
+      WHERE wait_event_type='Lock' AND cardinality(pg_blocking_pids(pid))>0
+        AND $1=ANY(pg_blocking_pids(pid))`, [(await gate.query("SELECT pg_backend_pid() AS pid")).rows[0].pid])).rowCount),
+      "Revocation waits for the admitted turn");
+    await pool.query("SELECT 1 FROM birbcrew_ts.conversations WHERE conversation_id=$1 FOR UPDATE NOWAIT", [conversationId]);
+  } finally {
+    await gate.query("ROLLBACK");
+    gate.release();
+    try { await reconciled; } finally { await pool.end(); }
+  }
+});
