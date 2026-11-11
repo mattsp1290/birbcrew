@@ -19,7 +19,8 @@
     "test": "node --test tests/fixtures/engines/artifacts.test.ts tests/fixtures/engines/consumer.test.mjs tests/fixtures/engines/codex/qualification.test.ts",
     "gateway": "node src/service/gateway.ts",
     "members": "node src/service/cli.ts",
-    "test:integration": "scripts/verify-members"
+    "test:integration": "scripts/verify-members",
+    "test:live": "node tests/proof/live-members.ts"
   },
   "dependencies": {
     "@ag-ui/claude-agent-sdk": "file:vendor/ag-ui/claude-agent-sdk-0.0.8.tgz",

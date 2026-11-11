@@ -1,6 +1,4 @@
-import { readFile, realpath } from "node:fs/promises";
-import { isAbsolute, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { claudeApproval, codexApproval, credential, goApproval, goEndpoint, goModel, readApproval, userAgent } from "./accounts.ts";
 import { createProvider, InMemoryCredentialStore, InMemoryModelsStore, type StreamOptions } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { OPENCODE_GO_MODELS } from "@earendil-works/pi-ai/providers/opencode-go.models";
@@ -9,42 +7,7 @@ import { ModelRuntime, type ExtensionFactory } from "@earendil-works/pi-coding-a
 import { z } from "zod";
 import type { MemberProfile } from "./profiles.ts";
 
-const goEndpoint = "https://opencode.ai/inference/go/openai/v1";
-const goModel = "glm-5.3-flash";
-const userAgent = "birbcrew-coding-proof/0.1.0";
-const account = z.object({
-  checked_at: z.iso.datetime({ offset: true }),
-  evidence: z.string().trim().min(1),
-  account_path: z.string().trim().min(1),
-});
-const goApproval = account.extend({
-  provider: z.literal("opencode-go"),
-  eligible_coding_use: z.literal(true),
-  extra_usage_disabled: z.literal(true),
-});
-const claudeApproval = account.extend({
-  provider: z.literal("anthropic-api"),
-  approved_sdk_use: z.literal(true),
-  model: z.string().regex(/^claude-[a-z0-9-]+$/).max(90),
-});
 const modelsResponse = z.object({ data: z.array(z.object({ id: z.string() })) });
-
-async function readApproval<T extends { checked_at: string }>(path: string, schema: z.ZodType<T>) {
-  if (!isAbsolute(path)) throw new Error("Use an absolute path to the private account attestation");
-  const file = await realpath(path);
-  const repo = fileURLToPath(new URL("../../", import.meta.url));
-  if (!relative(repo, file).startsWith("../")) throw new Error("Keep account attestations outside the checkout");
-  const parsed = schema.safeParse(JSON.parse(await readFile(file, "utf8")));
-  if (!parsed.success) throw new Error("Invalid account attestation");
-  const age = Date.now() - Date.parse(parsed.data.checked_at);
-  if (age < 0 || age > 12 * 60 * 60 * 1000) throw new Error("Account attestation must be from the past 12 hours");
-  return parsed.data;
-}
-
-function credential(value: string | undefined, variable: string) {
-  if (!value?.trim()) throw new Error(`Set ${variable} for the approved account`);
-  return value;
-}
 
 async function configureGo(key: string, path: string, accountPath: string, transport: typeof fetch) {
   const model = OPENCODE_GO_MODELS[goModel];
@@ -139,6 +102,16 @@ export async function loadLiveProfiles(env: NodeJS.ProcessEnv, transport: typeof
     const claude = { model, authorize, baseUrl: "https://api.anthropic.com",
       apiKey: credential(env.BIRBCREW_CLAUDE_API_KEY, "BIRBCREW_CLAUDE_API_KEY") };
     configured.set(`anthropic-${model}.v1`, { accountId: account_path, claude });
+  }
+  const codexPath = env.BIRBCREW_CODEX_ATTESTATION;
+  if (codexPath) {
+    const { model, account_path } = await readApproval(codexPath, codexApproval);
+    const authorize = async () => {
+      const current = await readApproval(codexPath, codexApproval);
+      if (current.account_path !== account_path || current.model !== model) throw new Error("Codex account or model changed");
+    };
+    configured.set(`openai-${model}.v1`, { accountId: account_path,
+      codex: { model, authorize, apiKey: credential(env.BIRBCREW_CODEX_API_KEY, "BIRBCREW_CODEX_API_KEY") } });
   }
   for (const [name, profile] of [...configured]) {
     if (profile.pi) configured.set(name.replace(/\.v1$/, ".crew.v1"), { ...profile, delegateTask: true, protectedTool: "record_work_item" });

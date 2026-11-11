@@ -1,7 +1,7 @@
 # Run a member with a live model
 
 The worker reads its provider configuration from a trusted module on the server.
-The built-in module supports Pi on OpenCode Go and Claude on the Anthropic API.
+The built-in module supports Pi on OpenCode Go, Claude on the Anthropic API, and Codex on the OpenAI API.
 The member's spawn request selects one of the configured profile names. Create a
 new member to select a different model or engine.
 
@@ -26,7 +26,11 @@ new member to select a different model or engine.
    model ID. Spawn with engine `claude` and profile `anthropic-<model>.v1`.
    For example, model `claude-sonnet-4-6` gives profile
    `anthropic-claude-sonnet-4-6.v1`.
-4. Start the worker with the service database, Temporal address, and absolute
+4. For Codex, set `BIRBCREW_CODEX_ATTESTATION` to its own attestation and
+   `BIRBCREW_CODEX_API_KEY` to its approved OpenAI API key. Use provider
+   `openai-api`, `approved_sdk_use` set to `true`, and the exact approved
+   GPT model. Spawn with engine `codex` and profile `openai-<model>.v1`.
+5. Start the worker with the service database, Temporal address, and absolute
    durable state directory configured. Supply only the attestations for the
    engines this worker will serve.
 
@@ -36,13 +40,13 @@ new member to select a different model or engine.
 
 Renew the operator evidence before its 12-hour window ends. Each live turn
 rereads the corresponding file. Restart the worker when rotating a provider key.
-Both engines require independent live-account acceptance using the intended
+All three engines require independent live-account acceptance using the intended
 account and model.
 
 ## Verify the profiles offline
 
 With the project's Node version and dependencies installed, run
-`node --test tests/service/providers.test.ts` with the two attestation variables
+`node --test tests/service/providers.test.ts` with the three attestation variables
 unset. The suite uses temporary files, synthetic keys, and a loopback HTTP
 server. It checks credential selection and expiry, the model ID in both
 directions, redirect refusal, and Pi's session headers across checkpoint restore.
@@ -102,3 +106,25 @@ Copy the pending call's identity fields and set `choice` to `inspect` or
 `test`. The SDK receives that word as the tool result. A repeated answer
 returns the recorded choice. A different answer conflicts. Cancellation
 while waiting returns a cancelled tool result. Neither path creates a work item.
+
+## Run the account acceptance proof
+
+After `scripts/setup`, run the following command on a supported Linux host with Docker and the pinned Node and Temporal binaries. Select one account per run. The ten-minute deadline covers service startup and the provider journey.
+
+```sh
+.proof/bin/node tests/proof/live-members.ts --engine pi --attestation /absolute/private/pi-proof.json
+```
+
+With the pinned Node on `PATH`, `npm run test:live -- --engine pi --attestation /absolute/private/pi-proof.json` runs the same entry. The runner uses `.proof/bin/temporal` unless `TEMPORAL_CLI` names the pinned executable elsewhere.
+
+Use a private file owned by the invoking user outside the checkout (`chmod 600`). The file must contain the current `checked_at`, `account_path`, and `evidence` fields described above. Also specify `approved_live_proof: true`, `max_requests` as an integer from 1 through 24, and the exact endpoint and model. The request limit covers provider model discovery, token counts and SDK retries as well as inference. The credential belongs in the selected environment variable only.
+
+| Engine | Provider and credential | Endpoint and model | Additional attestation fields |
+|---|---|---|---|
+| `pi` | `opencode-go` / `OPENCODE_GO_API_KEY` | `https://opencode.ai/inference/go/openai/v1` / `glm-5.3-flash` | `eligible_coding_use: true` and `extra_usage_disabled: true` |
+| `claude` | `anthropic-api` / `BIRBCREW_CLAUDE_API_KEY` | `https://api.anthropic.com` / exact approved Claude model ID | `approved_sdk_use: true` |
+| `codex` | `openai-api` / `BIRBCREW_CODEX_API_KEY` | `https://api.openai.com/v1` / exact approved GPT model ID | `approved_sdk_use: true` |
+
+The verifier creates a disposable database, Temporal server, authenticated gateway and worker. Two independent observation clients compare their histories with the gateway. The verifier approves one synthetic work item, checks the provider's returned receipt, replaces the worker container and asks the member to recall a random marker. Pi also delegates to a separate analyst. Codex checks the native rollout contains exactly the two submitted user messages on the same thread.
+
+A private loopback relay holds the selected key, rechecks the account file before each upstream request and enforces the model, official route and request limit. The worker receives only a temporary relay endpoint. Billing eligibility comes from the account owner's evidence. The command emits one redacted JSON result and removes its private transcripts and service state. A nonzero exit marks an incomplete gate. To rehearse the Pi journey with a synthetic account and controlled upstream, run `node --test tests/proof/live-controlled.test.ts`.

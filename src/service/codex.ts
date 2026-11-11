@@ -123,7 +123,7 @@ export async function runCodexTurn(input: CodexInput, profile: CodexProfile): Pr
       BIRBCREW_NATIVE_PROVIDER_PORT: provider?.port ?? "443",
       ...(input.mcp && endpoint && { BIRBCREW_NATIVE_MCP_PORT: endpoint.port, BIRBCREW_MCP_AUTH: input.mcp.token }),
     },
-    ...(!provider && { apiKey: profile.apiKey }),
+    ...(!provider && { apiKey: profile.apiKey, baseUrl: "https://api.openai.com/v1" }),
     config: {
       ...(provider && { model_provider: "fixture", model_providers: { fixture: { name: "BirbCrew local fixture",
         base_url: provider.href.replace(/\/$/, ""), wire_api: "responses", requires_openai_auth: false,
