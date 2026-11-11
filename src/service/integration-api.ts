@@ -56,10 +56,10 @@ export class IntegrationApi {
       admission: string; reason: string | null; phase: string | null; reply: string | null;
       receipt_id: string | null; delivered_at: Date | null; stopped: boolean; waiting: boolean;
     }>(`SELECT a.phase AS admission,a.reason,t.phase,t.reply,x.receipt_id,x.delivered_at,
-       EXISTS(SELECT 1 FROM birbcrew_ts.deferred_calls d WHERE d.conversation_id=a.conversation_id AND d.request_id=a.request_id AND d.decision IS NULL) AS waiting,
-       (EXISTS(SELECT 1 FROM birbcrew_ts.tool_cancellations tc WHERE tc.conversation_id=a.conversation_id AND tc.request_id=a.request_id)
-        AND EXISTS(SELECT 1 FROM birbcrew_ts.native_launches n WHERE n.conversation_id=a.conversation_id AND n.request_id=a.request_id)
-        AND NOT EXISTS(SELECT 1 FROM birbcrew_ts.native_launches n WHERE n.conversation_id=a.conversation_id AND n.request_id=a.request_id AND NOT n.stopped)) AS stopped
+       EXISTS(SELECT 1 FROM birbcrew_ts.deferred_calls d WHERE d.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND d.request_id=COALESCE(a.request_id,t.request_id) AND d.decision IS NULL) AS waiting,
+       (EXISTS(SELECT 1 FROM birbcrew_ts.tool_cancellations tc WHERE tc.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND tc.request_id=COALESCE(a.request_id,t.request_id))
+        AND EXISTS(SELECT 1 FROM birbcrew_ts.native_launches n WHERE n.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND n.request_id=COALESCE(a.request_id,t.request_id))
+        AND NOT EXISTS(SELECT 1 FROM birbcrew_ts.native_launches n WHERE n.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND n.request_id=COALESCE(a.request_id,t.request_id) AND NOT n.stopped)) AS stopped
        FROM birbcrew_ts.request_admissions a FULL JOIN birbcrew_ts.turns t USING(conversation_id,request_id)
        JOIN birbcrew_ts.conversations c ON c.conversation_id=COALESCE(a.conversation_id,t.conversation_id)
        LEFT JOIN birbcrew_ts.integration_cancellations x ON x.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND x.request_id=COALESCE(a.request_id,t.request_id)
