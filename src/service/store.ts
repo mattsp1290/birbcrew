@@ -1,3 +1,4 @@
+import { captureProjectNotes } from "./project-notes.ts";
 import { requestNativeStop } from "./native-admission.ts";
 import { textProjection } from "./text-stream.ts";
 import { publishObservation } from "./observation.ts";
@@ -68,7 +69,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"]] as const;
+      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -99,7 +100,7 @@ export class MemberStore {
   async openConversation(input: z.input<typeof openSchema>): Promise<Conversation> {
     const key = openSchema.parse(input);
     return this.transaction(async (db) => {
-      await db.query(
+      const inserted = await db.query(
         `INSERT INTO birbcrew_ts.conversations (owner_id, member_id, conversation_id)
          SELECT owner_id, member_id, $3 FROM birbcrew_ts.members WHERE owner_id = $1 AND member_id = $2
          ON CONFLICT (conversation_id) DO NOTHING`,
@@ -107,6 +108,11 @@ export class MemberStore {
       );
       const conversation = await conversationFor(db, key, false);
       if (conversation.memberId !== key.memberId) throw new MemberStoreError("conflict");
+      if (inserted.rowCount) {
+        const capture = await captureProjectNotes(key.ownerId);
+        if (capture) await db.query("INSERT INTO birbcrew_ts.conversation_notes (conversation_id,capture) VALUES ($1,$2)",
+          [key.conversationId, JSON.stringify(capture)]);
+      }
       return conversation;
     });
   }

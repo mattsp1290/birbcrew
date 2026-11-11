@@ -34,8 +34,9 @@ conversation's native checkpoint, and its committed replies. Claude also needs
 the same private state directory when a worker is replaced.
 
 Run `npm ci` and `npm run test:integration` on Linux with Node 22.23.3, Docker,
-Python 3, and Temporal CLI 1.10.0. Claude requires Linux Landlock ABI 3 or newer. Set `TEMPORAL_CLI` if the executable is
-outside PATH and `.proof/bin`. This command starts disposable services and uses
+Python 3, Beans (`bn`), Git, and Temporal CLI 1.10.0. Claude requires Linux
+Landlock ABI 3 or newer. Set `TEMPORAL_CLI` if the executable is outside PATH
+and `.proof/bin`. This command starts disposable services and uses
 local scripted model providers. To use an approved account, follow the
 [live profile guide](docs/member-profiles.md). The verifier replaces the worker, PostgreSQL
 process, and Temporal server before asking both SDKs to recall earlier turns.
@@ -67,6 +68,15 @@ the original request UUID and text to recover its recorded reply after a lost
 acknowledgement. Each conversation admits four distinct requests. If a worker
 disappears during native generation, a replacement records the uncertain outcome
 and closes that conversation to further turns.
+
+To give conversations project notes, set `BIRBCREW_NOTE_INSTALLATIONS` on the
+process that opens conversations. It names an operator-managed JSON file
+mapping owner IDs to a source, for example
+`{"local":{"root":"/tmp/birbcrew-local","project":"release","actor":"coworker"}}`.
+Use a temporary installation containing a clean `hub` Git checkout on `main`
+with no remotes. BirbCrew captures up to two Beans memories when the conversation
+opens. Both engines use that private snapshot on later turns and tool resumes,
+even if the original hub is removed.
 
 Use the [HTTP gateway guide](docs/member-gateway.md) to submit turns, decide
 protected tool requests and attach independent AG-UI observers to these members.

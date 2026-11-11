@@ -37,6 +37,7 @@ export const claudeCommand = z.strictObject({
   text: z.string().min(1).max(16_384),
   model: z.string().min(1),
   checkpoint: claudeCheckpoint.nullable(),
+  projectContext: z.string().max(262_144).optional(),
   mode: z.enum(["chat", "protected", "recover"]),
   continuation: continuation.optional(),
 });
@@ -59,6 +60,7 @@ interface ClaudeProfile {
 }
 
 interface ClaudeInput {
+  projectContext?: string;
   threadId: string; runId: string; text: string; checkpoint: unknown; signal: AbortSignal;
   continuation?: z.infer<typeof continuation>;
   onToolArgs?: (nativeCallId: string, matchedOperation: boolean) => void;

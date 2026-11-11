@@ -1,5 +1,5 @@
 import { appendFileSync } from "node:fs";
-import { contentText } from "@earendil-works/pi-ai";
+import { contentText, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import { startClaudeFixtureProvider } from "../fixtures/engines/claude/index.mts";
 import { createPiFixtureOptions } from "../fixtures/engines/pi/index.mts";
 import type { MemberProfile } from "../../src/service/profiles.ts";
@@ -9,10 +9,20 @@ function observed(engine: string, prompt?: string) {
   if (path) appendFileSync(path, JSON.stringify({ engine, prompt }) + "\n");
 }
 
-const provider = await startClaudeFixtureProvider(undefined, ({ prompt }) => observed("claude", prompt));
+function noteEvidence(engine: string, system: string, messages: string, continuation: boolean) {
+  const path = process.env.BIRBCREW_PROOF_NOTES;
+  if (!path) return;
+  const markers = (value: string) => [...new Set(value.match(/BIRBNOTE_[A-Z0-9_]+/g) ?? [])].sort();
+  appendFileSync(path, JSON.stringify({ engine, system: markers(system), messages: markers(messages), continuation }) + "\n");
+}
+
+const provider = await startClaudeFixtureProvider(undefined, ({ prompt }) => observed("claude", prompt),
+  (system, messages, continuation) => noteEvidence("claude", system, messages, continuation));
 export const profiles = new Map<string, MemberProfile>([["fixture.v1", {
   accountId: process.env.BIRBCREW_PROOF_ACCOUNT ?? "local-fixture",
   pi: process.env.BIRBCREW_PROOF_ENGINE === "claude" ? undefined : await createPiFixtureOptions((context) => {
+    const messages = context.messages.filter((message) => message.role !== "system");
+    noteEvidence("pi", getCurrentSystemPrompt(context.messages), JSON.stringify(messages), messages.at(-1)?.role === "toolResult");
     const last = context.messages.findLast((message) => message.role === "user");
     if (last?.role === "user") observed("pi", contentText(last.content));
   }),

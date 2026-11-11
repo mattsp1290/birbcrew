@@ -16,6 +16,7 @@ export interface DriverInput {
   text: string;
   checkpoint: Checkpoint | null;
   signal: AbortSignal;
+  projectContext?: string;
   onToolArgs?: (nativeCallId: string, matchedOperation: boolean) => void;
   onText?: (delta: string) => void;
   childProfile?: Delegation["profile"];

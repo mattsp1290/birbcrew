@@ -147,7 +147,7 @@ async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" |
     const resourceLoader = new DefaultResourceLoader({
       cwd, agentDir: cwd, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true,
       noContextFiles: true, noThemes: true, systemPrompt: profile.instructions ?? "You are a BirbCrew coworker.",
-      appendSystemPrompt: [], extensionFactories: factories,
+      appendSystemPrompt: input.projectContext ? [input.projectContext] : [], extensionFactories: factories,
     });
     await resourceLoader.reload();
     const extensions = resourceLoader.getExtensions();

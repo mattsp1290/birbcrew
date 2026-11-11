@@ -103,6 +103,7 @@ async function run(command: Command) {
       return cli;
     },
     model: command.model,
+    ...(command.projectContext && { systemPrompt: "You are a BirbCrew coworker.\n" + command.projectContext }),
     env: process.env,
     tools: [],
     allowedTools: [],

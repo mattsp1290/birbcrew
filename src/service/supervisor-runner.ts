@@ -1,3 +1,4 @@
+import { trustedProjectContext } from "./project-notes.ts";
 import { withNativeAdmission } from "./native-admission.ts";
 import type { Launch } from "./supervisor.ts";
 import { pathToFileURL } from "node:url";
@@ -35,7 +36,9 @@ process.once("message", async (command: AdmittedTurn) => {
       const member = command.conversation;
       const driver = memberProfiles(profiles, stateDir, process.pid).get(member.profile)?.[member.engine];
       if (!driver) throw new Error("Unsupported member profile");
+      const projectContext = command.childProfile ? undefined : await trustedProjectContext(pool, member);
       reply = await withNativeAdmission(pool,command.launch,AbortSignal.any([controller.signal,AbortSignal.timeout(170_000)]), signal => driver({
+        ...(projectContext && { projectContext }),
         ...(command.childProfile && {childProfile: command.childProfile}),
         ...(command.childResults && {childResults: command.childResults}),
         threadId: command.threadId, runId: command.runId, text: command.text,

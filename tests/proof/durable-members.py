@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from approval_cases import verify_approvals
 from child_cases import verify_children
+from note_cases import verify_notes
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -72,6 +73,7 @@ def verify(directory, stack):
         "BIRBCREW_TEST_DATABASE_URL": url, "BIRBCREW_TEMPORAL_ADDRESS": address,
         "BIRBCREW_STATE_DIR": str(directory / "native"),
         "BIRBCREW_PROOF_STREAM_DIR": str(directory),
+        "BIRBCREW_PROOF_NOTES": str(directory / "note-evidence.jsonl"),
         "BIRBCREW_PROOF_REQUESTS": str(directory / "requests.jsonl"),
     }
     cli = [node, "src/service/cli.ts"]
@@ -159,6 +161,7 @@ def verify(directory, stack):
                        capture_output=True).stdout.strip()
         current = verify_approvals(runtime, current, worker, command, wait_until, sql)
         current = verify_children(runtime, current, worker, command, wait_until, sql)
+        current = verify_notes(runtime, current, worker, command, wait_until, sql, directory, env)
         for override in [{"BIRBCREW_STATE_DIR": str(directory / "wrong-volume")},
                          {"BIRBCREW_PROOF_ACCOUNT": "another-account"}]:
             invalid = subprocess.run([*cli, "worker", "tests/proof/fixture-profiles.mts"],

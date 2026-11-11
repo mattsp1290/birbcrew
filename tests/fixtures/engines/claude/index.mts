@@ -16,6 +16,7 @@ import { defer, finalize } from "rxjs";
 const model = "claude-sonnet-4-6";
 
 const providerRequest = z.object({
+  system: z.union([z.string(), z.array(z.object({ text: z.string() }))]).optional(),
   tools: z.array(z.object({ name: z.string() })).default([]),
   messages: z.array(z.object({
     role: z.enum(["assistant", "user"]),
@@ -28,8 +29,10 @@ type ObserveRequest = (request: {
   prompt?: string; tools: string[]; result?: { id?: string; error?: boolean; content: unknown };
 }) => void;
 
+type InspectSystem = (system: string, messages: string, continuation: boolean) => void;
+
 async function respond(
-  request: IncomingMessage, response: ServerResponse, onProviderFailure: () => void, observe?: ObserveRequest,
+  request: IncomingMessage, response: ServerResponse, onProviderFailure: () => void, observe?: ObserveRequest, inspect?: InspectSystem,
 ) {
   const path = new URL(request.url ?? "/", "http://localhost").pathname;
   if (path === "/v1/messages/count_tokens") {
@@ -41,13 +44,15 @@ async function respond(
     return;
   }
 
-  const { messages, tools } = providerRequest.parse(await json(request));
+  const { messages, tools, system } = providerRequest.parse(await json(request));
   const prompts = messages.filter((message) => message.role === "user").flatMap(({ content }) =>
     typeof content === "string" ? [content] : content.flatMap((part) => part.type === "text" && part.text ? [part.text] : []),
   );
   const prompt = prompts.at(-1);
   const content = messages.at(-1)?.content;
   const toolResult = Array.isArray(content) ? content.find((block) => block.type === "tool_result") : undefined;
+  inspect?.(typeof system === "string" ? system : (system ?? []).map((part) => part.text).join("\n"),
+    JSON.stringify(messages), !!toolResult);
   observe?.({ prompt, tools: tools.map((tool) => tool.name),
     ...(toolResult ? { result: { id: toolResult.tool_use_id, content: toolResult.content, error: toolResult.is_error } } : {}),
   });
@@ -110,9 +115,9 @@ async function respond(
   response.end();
 }
 
-export async function startClaudeFixtureProvider(onProviderFailure = () => {}, observe?: ObserveRequest) {
+export async function startClaudeFixtureProvider(onProviderFailure = () => {}, observe?: ObserveRequest, inspect?: InspectSystem) {
   const server = createServer((req, res) => {
-    respond(req, res, onProviderFailure, observe).catch(() => res.destroy());
+    respond(req, res, onProviderFailure, observe, inspect).catch(() => res.destroy());
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
