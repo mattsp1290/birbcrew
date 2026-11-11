@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -36,6 +37,18 @@ test("live preflight requires a current private decision for exactly one provide
   await gate.write();
   await chmod(gate.path, 0o644);
   await assert.rejects(authorizeLive(gate.args, gate.env));
+});
+
+test("the command redacts the account path, evidence and credentials on a declined opt-in", async (t) => {
+  const gate = await attestation(t);
+  await gate.write({ approved_live_proof: false, evidence: "private evidence marker" });
+  const result = spawnSync(process.execPath, ["tests/proof/live-members.ts", ...gate.args], {
+    env: { PATH: process.env.PATH, OPENCODE_GO_API_KEY: "private selected key", OPENAI_API_KEY: "private foreign key" },
+    encoding: "utf8", timeout: 5_000,
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.deepEqual(JSON.parse(result.stderr), { status: "NOT VERIFIED", stage: "account preflight", verifiedGates: [] });
 });
 
 test("the relay counts before upstream submission and fails closed on revocation", async (t) => {

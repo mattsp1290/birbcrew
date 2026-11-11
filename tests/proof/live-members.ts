@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { isDeepStrictEqual, promisify } from "node:util";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { authorizeLive, type LiveAccount } from "./live-account.ts";
 import { proofInfrastructure, root, until } from "./live-infrastructure.ts";
 import { openRelay } from "./live-relay.ts";
+import { attributable, lockedPackages, sourceFingerprint } from "./member-report.mts";
 
 type Services = Awaited<ReturnType<typeof proofInfrastructure>>;
 const sha = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
@@ -81,12 +81,24 @@ async function journey(account: LiveAccount, services: Services, signal: AbortSi
   if (account.engine === "codex") {
     const { rows } = await pool.query("SELECT checkpoint->'state' AS state FROM birbcrew_ts.turns WHERE conversation_id=$1 ORDER BY position", [cid]);
     assert.equal(rows.length, 2);
-    const [a, b] = rows.map(row => z.object({ nativeId: z.uuid(), rollout: z.string().regex(/^sessions\/\d{4}\/\d{2}\/\d{2}\/rollout-[\dT-]+-[a-f0-9-]{36}\.jsonl$/), ownerDigest: z.hash("sha256") }).parse(row.state));
-    assert.deepEqual(a, b);
+    const checkpoints = rows.map(row => z.object({ nativeId: z.uuid(), rollout: z.string().regex(/^sessions\/\d{4}\/\d{2}\/\d{2}\/rollout-[\dT-]+-[a-f0-9-]{36}\.jsonl$/),
+      ownerDigest: z.hash("sha256"), bytes: z.int().positive(), sha256: z.hash("sha256") }).parse(row.state));
+    const [a,b] = checkpoints;
+    assert.equal(a.nativeId, b.nativeId);
+    assert.equal(a.rollout, b.rollout);
+    assert.equal(a.ownerDigest, b.ownerDigest);
     const file = join(services.native, "codex", a.ownerDigest, memberId, cid, "home", a.rollout);
-    const messages = (await readFile(file, "utf8")).trim().split("\n").map(line => JSON.parse(line))
-      .filter(entry => entry.type === "event_msg" && entry.payload?.type === "user_message").map(entry => entry.payload.message);
-    assert.deepEqual(messages, [first, followup]);
+    const rollout = await readFile(file);
+    assert.equal(rollout.length, b.bytes);
+    assert.ok(a.bytes < b.bytes);
+    for (const checkpoint of checkpoints) assert.equal(sha(rollout.subarray(0, checkpoint.bytes)), checkpoint.sha256);
+    const input = (data: Buffer) => data.toString("utf8").trim().split("\n").map(line => JSON.parse(line))
+      .filter(({ type, payload }) => type === "response_item" && payload.type === "message" && ["user", "developer"].includes(payload.role));
+    const initial = input(rollout.subarray(0, a.bytes));
+    const newInput = input(rollout.subarray(a.bytes));
+    assert.deepEqual(initial.filter(item => JSON.stringify(item.payload.content).includes(nonce)).map(item => item.payload.content),
+      [[{ type: "input_text", text: first }]]);
+    assert.deepEqual(newInput.map(item => [item.payload.role, item.payload.content]), [["user", [{ type: "input_text", text: followup }]]]);
     verified("same real Codex native ID and exactly the two expected native user messages");
   }
   if (account.engine === "pi") {
@@ -111,6 +123,10 @@ async function journey(account: LiveAccount, services: Services, signal: AbortSi
 
 export async function verifyLive(account: LiveAccount, signal: AbortSignal, controlledTransport?: typeof fetch, verified: (gate: string) => void = () => {}) {
   const cleanup: (() => Promise<unknown>)[] = [];
+  const source = await sourceFingerprint();
+  if (!controlledTransport && !attributable(source)) throw new Error("An approved provider run requires attributable source");
+  const packages = await lockedPackages([account.engine]);
+  if (!controlledTransport) verified("attributable source and locked engine packages");
   let result;
   try {
     const relay = await openRelay(account, controlledTransport);
@@ -121,15 +137,9 @@ export async function verifyLive(account: LiveAccount, signal: AbortSignal, cont
     const stats = relay.stats();
     assert.ok(stats.requests > 0 && stats.requests <= account.budget && !stats.rejected);
     const lock = await readFile(join(root, "package-lock.json"));
-    const manifest = JSON.parse(lock.toString("utf8")).packages;
-    const pkg = { pi: "@earendil-works/pi-coding-agent", claude: "@anthropic-ai/claude-agent-sdk", codex: "@openai/codex-sdk" }[account.engine];
-    const tracked = (await promisify(execFile)("git", ["-C", root, "ls-files", "--", "src/service", "native", "clients",
-      "tests/proof/live-*.ts", "scripts/build-native", "package-lock.json", "package.json"], { env: { PATH: process.env.PATH } })).stdout.trim().split("\n");
-    const source = Object.fromEntries(await Promise.all(tracked.map(async path => [path, sha(await readFile(join(root, path)))])));
     result = { status: "VERIFIED", scope: controlledTransport ? "controlled rehearsal" : "approved API journey", liveProviderVerified: !controlledTransport, engine: account.engine, model: account.model,
       auth: account.auth, origin: account.origin, requests: stats.requests, maxRequests: account.budget,
-      node: process.version, sdkVersion: manifest["node_modules/" + pkg].version, lockSha256: sha(lock), source,
-      revision: (await promisify(execFile)("git", ["-C", root, "rev-parse", "HEAD"], { env: { PATH: process.env.PATH } })).stdout.trim(),
+      node: process.version, architecture: process.arch, packages, lockSha256: sha(lock),
       workerContainerReplaced: true, ...outcome };
   } finally {
     let failed = false;
@@ -137,10 +147,14 @@ export async function verifyLive(account: LiveAccount, signal: AbortSignal, cont
     if (failed) throw new Error("Disposable resource cleanup failed");
   }
   verified("disposable services, private client outputs and native volume cleaned up");
-  return { ...result, cleanup: "verified", billing: "owner-attested" };
+  const final = await sourceFingerprint();
+  if (!isDeepStrictEqual(source, final)) throw new Error("Source changed during the provider proof");
+  const { revision, state, sourceSha256 } = final;
+  return { ...result, source: { revision, state, sourceSha256 }, cleanup: "verified", billing: "owner-attested" };
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  process.chdir(root);
   const controller = new AbortController();
   process.once("SIGINT", () => controller.abort());
   process.once("SIGTERM", () => controller.abort());

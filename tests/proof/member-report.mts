@@ -70,10 +70,12 @@ export async function sourceFingerprint() {
     manifest.push({ path, sha256: hash(normalized) });
   }
   const sourceSha256 = hash(JSON.stringify(manifest));
+  const git = (...args: string[]) => run("git", args, { env: { PATH: process.env.PATH,
+    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
   let gitRevision: string | undefined;
   try {
-    if ((await run("git", ["rev-parse", "--show-toplevel"])).stdout.trim() === process.cwd()) {
-      gitRevision = revision.parse((await run("git", ["rev-parse", "HEAD"])).stdout.trim());
+    if ((await git("rev-parse", "--show-toplevel")).stdout.trim() === process.cwd()) {
+      gitRevision = revision.parse((await git("rev-parse", "HEAD")).stdout.trim());
     }
   }
   catch { /* A source archive can be run without a Git checkout. */ }
@@ -81,7 +83,7 @@ export async function sourceFingerprint() {
   if (external) revision.parse(external);
   const archive = /^([0-9a-f]{40}):([0-9a-f]{40})$/.exec(archiveStamp);
   if (gitRevision) {
-    const status = (await run("git", ["status", "--porcelain", "--untracked-files=all", "--", ...roots, ...files])).stdout.trim();
+    const status = (await git("status", "--porcelain", "--untracked-files=all", "--", ...roots, ...files)).stdout.trim();
     if (external && external !== gitRevision) throw new Error("Supplied source revision differs from the checkout");
     return { revision: gitRevision, state: status ? "modified" : "clean", sourceSha256, manifest };
   }
@@ -97,18 +99,21 @@ export function attributable(source: Awaited<ReturnType<typeof sourceFingerprint
   return source.revision !== null && !["modified", "unattributed"].includes(source.state);
 }
 
-export async function fixtureReport(engines: Engine[], path?: string) {
-  const initial = await sourceFingerprint();
+export async function lockedPackages(engines: Engine[]) {
   const lock = JSON.parse(await readFile("package-lock.json", "utf8"));
-  const native = ["@temporalio/worker",
+  const native = ["@temporalio/worker", "@ag-ui/core", "@ag-ui/client", "@ag-ui/encoder",
     ...(engines.includes("codex") ? ["@openai/codex-sdk", "@openai/codex", "@openai/codex-linux-" + process.arch] : []),
     ...(engines.includes("claude") ? ["@ag-ui/claude-agent-sdk", "@anthropic-ai/claude-agent-sdk", "@anthropic-ai/claude-agent-sdk-linux-" + process.arch] : []),
     ...(engines.includes("pi") ? ["@ag-ui/pi", "@earendil-works/pi-coding-agent", "@birbcrew/pi-subagents"] : [])];
-  const packages = native.map((name) => {
+  return native.map((name) => {
     const { version, integrity } = z.object({ version: z.string(), integrity: z.string().startsWith("sha512-") })
       .parse(lock.packages["node_modules/" + name]);
     return { name, version, integrity };
   });
+}
+export async function fixtureReport(engines: Engine[], path?: string) {
+  const initial = await sourceFingerprint();
+  const packages = await lockedPackages(engines);
   const stages: { name: string; status: "VERIFIED" }[] = [];
   return {
     pass(name: string) { stages.push({ name, status: "VERIFIED" }); },
