@@ -249,3 +249,132 @@ test("concurrent and revoked receipt submissions reach each native engine at mos
     }
   }
 });
+
+test("a frozen supervisor cannot deliver a revoked command from a runner that was still configuring its SDK", { timeout: 100_000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), "birb-runner-gate-"));
+  const config = join(dir, "config.mjs"), gate = join(dir, "hold"), atGate = join(dir, "at-gate"), log = join(dir, "requests.jsonl");
+  const profile = "before-driver-" + randomUUID();
+  const fixture = new URL("../proof/fixture-profiles.mts", import.meta.url).href;
+  await writeFile(config, `import { existsSync,writeFileSync } from 'node:fs';
+    import {setTimeout as delay} from 'node:timers/promises';
+    process.env.BIRBCREW_PROOF_REQUESTS = ${JSON.stringify(log)};
+    const original = await import(${JSON.stringify(fixture)});
+    if (existsSync(${JSON.stringify(gate)})) {
+      writeFileSync(${JSON.stringify(atGate)}, JSON.stringify([process.ppid,process.pid]));
+      while (existsSync(${JSON.stringify(gate)})) await delay(10);
+    }
+    export const profiles = new Map([[${JSON.stringify(profile)}, original.profiles.get("fixture.approval.v1")]]);
+    export const close = original.close;`);
+  const pool = new Pool({ connectionString: process.env.BIRBCREW_TEST_DATABASE_URL });
+  const store = new MemberStore(pool), ledger = new ApprovalStore(pool);
+  const host = await startSupervisor(config, dir);
+  t.after(async () => { await host.close(); await pool.end(); await rm(dir, { recursive: true, force: true }); });
+  for (const engine of ["claude", "pi"] as const) {
+    const ownerId = randomUUID();
+    const { memberId } = await store.spawn({ engine, ownerId, profile, requestId: randomUUID() });
+    for (const resume of [false, true]) {
+      const conversationId = randomUUID(), requestId = randomUUID();
+      await store.openConversation({ ownerId, conversationId, memberId });
+      const request = { ownerId, conversationId, requestId, text: "record " + requestId };
+      const execution = { workflowRunId: randomUUID(), activityId: "initial", attempt: 1 };
+      const claim = await store.beginTurn(request, execution);
+      assert.equal(claim.kind, "start");
+      let launch = { ...request, token: claim.token, execution };
+      if (resume) {
+        const proposal = await host.start(launch, t.signal);
+        assert.equal(proposal.kind, "pending");
+        const { approval } = proposal;
+        const { toolName, policyVersion, summary, ...decision } = approval;
+        await ledger.decide({ ...decision, choice: "approve" });
+        const receipt = await ledger.settleConfirmed(approval);
+        assert.equal(receipt.kind, "recorded");
+        const continuation = { ...execution, activityId: "continue" };
+        const next = await store.beginResume(request, approval, continuation);
+        assert.equal(next.kind, "start");
+        launch = { ...request, token: next.token, execution: continuation };
+      }
+      const before = await optionalFile(log);
+      await writeFile(gate, "hold");
+      const rejected = assert.rejects(host.start(launch, t.signal));
+      await until(async () => Boolean(await optionalFile(atGate)), "Runner is preparing the selected SDK");
+      const [supervisorPid, runnerPid] = JSON.parse(await readFile(atGate, "utf8")) as [number, number];
+      process.kill(supervisorPid, "SIGSTOP");
+      try {
+        await store.reconcileTurn(request, execution.workflowRunId, resume, false);
+        await rm(gate);
+        await until(async () => (await readFile("/proc/" + runnerPid + "/stat", "utf8").catch(() => "")).match(/^$|\) Z /) !== null,
+          "Runner exited without entering the revoked SDK");
+        assert.equal(await optionalFile(log), before);
+      } finally {
+        process.kill(supervisorPid, "SIGCONT");
+        await rm(gate, { force: true });
+      }
+      await rejected;
+      await rm(atGate);
+      const { rows: [stopped] } = await pool.query("SELECT stopped FROM birbcrew_ts.native_launches WHERE token=$1", [launch.token]);
+      assert.equal(stopped.stopped, true);
+    }
+  }
+});
+
+test("forced termination confirms a reaped invocation for both native engines", { timeout: 60_000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), "birb-reap-"));
+  const config = join(dir, "config.mjs"), marker = join(dir, "runner"), log = join(dir, "calls");
+  const profile = "force-" + randomUUID();
+  const fixture = new URL("../proof/fixture-profiles.mts", import.meta.url).href;
+  await writeFile(config, `import {writeFileSync} from "node:fs"; writeFileSync(${JSON.stringify(marker)}, String(process.pid));
+    process.env.BIRBCREW_PROOF_REQUESTS = ${JSON.stringify(log)};
+    const original = await import(${JSON.stringify(fixture)}); export const close=original.close;
+    export const profiles=new Map([[${JSON.stringify(profile)}, original.profiles.get("fixture.v1")]]);`);
+  const pool = new Pool({ connectionString: process.env.BIRBCREW_TEST_DATABASE_URL }), store = new MemberStore(pool);
+  const host = await startSupervisor(config, dir), replacement = await startSupervisor(config, dir);
+  t.after(async () => { await Promise.all([host.close(), replacement.close()]); await pool.end(); await rm(dir, { recursive: true, force: true }); });
+  for (const engine of ["pi", "claude"] as const) {
+    const ownerId = randomUUID(), conversationId = randomUUID();
+    const { memberId } = await store.spawn({ ownerId, engine, profile, requestId: randomUUID() });
+    await store.openConversation({ memberId, ownerId, conversationId });
+    const execution = { workflowRunId: randomUUID(), activityId: "blocked", attempt: 1 };
+    const request = { ownerId, conversationId, requestId: randomUUID(), text: "wait" };
+    const claim = await store.beginTurn(request, execution);
+    assert.equal(claim.kind, "start");
+    const launch = { ...request, execution, token: claim.token };
+    const ended = assert.rejects(host.start(launch, t.signal));
+    await until(async () => (await optionalFile(log)).includes(JSON.stringify({ engine, prompt: "wait" })), engine + " provider started");
+    const pid = Number(await readFile(marker, "utf8"));
+    process.kill(-pid, "SIGSTOP");
+    try {
+      await replacement.stop(launch);
+      await ended;
+      await replacement.stop(launch);
+      assert.throws(() => process.kill(-pid, 0), { code: "ESRCH" });
+      const { rows: [row] } = await pool.query("SELECT stopped FROM birbcrew_ts.native_launches WHERE token=$1", [claim.token]);
+      assert.equal(row.stopped, true);
+    } finally {
+      try { process.kill(-pid, "SIGKILL"); } catch { }
+    }
+  }
+});
+
+test("a worker exits when its native supervisor dies", { timeout: 30_000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), "birb-supervisor-loss-"));
+  const fixture = new URL("../proof/fixture-profiles.mts", import.meta.url).href;
+  const config = join(dir, "config.mjs");
+  await writeFile(config, `import { profiles as p, close } from ${JSON.stringify(fixture)};
+    export {close}; export const profiles = new Map([[${JSON.stringify(randomUUID())}, p.get("fixture.v1")]]);`);
+  const worker = spawn(process.execPath, ["src/service/cli.ts", "worker", config], {
+    stdio: "ignore",
+    env: { ...process.env, BIRBCREW_STATE_DIR: dir, BIRBCREW_PROOF_ENGINE: "pi", BIRBCREW_DATABASE_URL: process.env.BIRBCREW_TEST_DATABASE_URL }
+  });
+  const closed = once(worker, "close");
+  t.after(async () => { if (worker.exitCode === null && !worker.signalCode) worker.kill("SIGKILL"); await closed; await rm(dir, { recursive: true, force: true }); });
+  let hostPid: number | undefined;
+  await until(async () => {
+    const children = await optionalFile(`/proc/${worker.pid}/task/${worker.pid}/children`);
+    for (const id of children.trim().split(/\s+/)) {
+      if (id && (await optionalFile(`/proc/${id}/cmdline`)).includes("/supervisor-host.ts")) hostPid = Number(id);
+    }
+    return hostPid !== undefined;
+  }, "Worker opened a native supervisor");
+  process.kill(hostPid!, "SIGKILL");
+  assert.notEqual((await closed)[0], 0);
+});

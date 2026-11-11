@@ -60,6 +60,7 @@ export async function startSupervisor(configPath: string, stateDir: string) {
     });
   }
   return {
+    exited,
     async start(launch: Launch, signal: AbortSignal) {
       const stop = () => { void request("stop", launch).catch(() => {}); };
       if (signal.aborted) {

@@ -182,7 +182,9 @@ async function run(command: Command) {
 }
 
 // The adapter owns a detached process group. Losing the host revokes that entire turn.
-const hostLost = () => process.kill(-process.pid, "SIGKILL");
+const invocationGroup = Number(process.env.BIRBCREW_INVOCATION_GROUP ?? process.pid);
+delete process.env.BIRBCREW_INVOCATION_GROUP;
+const hostLost = () => process.kill(-invocationGroup, "SIGKILL");
 process.once("disconnect", hostLost);
 process.once("message", async (payload) => {
   let reply;

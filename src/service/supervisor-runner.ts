@@ -1,3 +1,5 @@
+import { withNativeAdmission } from "./native-admission.ts";
+import type { Launch } from "./supervisor.ts";
 import { pathToFileURL } from "node:url";
 import { Pool } from "pg";
 import { registerProfiles } from "./deployment.ts";
@@ -6,6 +8,7 @@ import type { DriverInput } from "./activities.ts";
 import type { Conversation, Checkpoint } from "./domain.ts";
 
 interface AdmittedTurn {
+  launch: Launch;
   conversation: Conversation;
   runId: string;
   text: string;
@@ -27,12 +30,12 @@ process.once("message", async (command: AdmittedTurn) => {
     try {
       await registerProfiles(pool, profiles, stateDir);
       const member = command.conversation;
-      const driver = memberProfiles(profiles, stateDir).get(member.profile)?.[member.engine];
+      const driver = memberProfiles(profiles, stateDir, process.pid).get(member.profile)?.[member.engine];
       if (!driver) throw new Error("Unsupported member profile");
-      reply = await driver({
+      reply = await withNativeAdmission(pool, command.launch, AbortSignal.any([controller.signal, AbortSignal.timeout(170_000)]), signal => driver({
         threadId: member.conversationId, runId: command.runId, text: command.text,
-        checkpoint: command.checkpoint, continuation: command.continuation, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(170_000)]),
-      }, member);
+        checkpoint: command.checkpoint, continuation: command.continuation, signal,
+      }, member));
     } finally {
       await close?.();
     }

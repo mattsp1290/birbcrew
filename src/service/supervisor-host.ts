@@ -1,3 +1,4 @@
+import { requestNativeStop } from "./native-admission.ts";
 import { fork, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -17,11 +18,29 @@ const starts = new Map<string, { launch: Launch; result: Promise<PublicSegment> 
 let closing = false;
 const stopping = new WeakSet<ChildProcess>();
 
+function killNativeGroup(child: ChildProcess) {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  try { process.kill(-child.pid, "SIGKILL"); }
+  catch (error) { if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error; }
+}
+
+async function groupStopped(pid: number) {
+  for (let i = 0; i < 20; i++) {
+    try { process.kill(-pid, 0); }
+    catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ESRCH") return true;
+      throw error;
+    }
+    await delay(50);
+  }
+  return false;
+}
+
 function stopRunner(child: ChildProcess | undefined) {
-  if (!child || !child.connected || stopping.has(child)) return;
+  if (!child || stopping.has(child) || child.exitCode !== null || child.signalCode !== null) return;
   stopping.add(child);
-  child.send("stop", () => {});
-  const timeout = setTimeout(() => child.kill("SIGKILL"), 3000);
+  if (child.connected) child.send("stop", () => { });
+  const timeout = setTimeout(() => killNativeGroup(child), 3000);
   timeout.unref();
   child.once("close", () => clearTimeout(timeout));
 }
@@ -103,6 +122,7 @@ async function start(launch: Launch): Promise<PublicSegment> {
   let reply: unknown;
   let exited: Promise<boolean> | undefined;
   let confirmed = false;
+  let reaped = false;
   try {
     const { continuation } = admission;
     // Recheck under the takeover lock after reservation. Both the fork and its command happen before releasing it.
@@ -110,7 +130,7 @@ async function start(launch: Launch): Promise<PublicSegment> {
       const { phase, checkpoint, reply: previousReply, paused, resuming, ...conversation } = await lockedTurn(db, launch);
       if (closing || phase !== "started" || previousReply !== null || (paused && !resuming)) throw new Error("Native admission revoked");
       const child = fork(new URL("./supervisor-runner.ts", import.meta.url), process.argv.slice(2), {
-        stdio: ["ignore", "ignore", "ignore", "ipc"], execArgv: [],
+        stdio: ["ignore", "ignore", "ignore", "ipc"], execArgv: [], detached: true,
       });
       active.set(launch.token, child);
       child.once("message", (value) => { reply = value; });
@@ -118,13 +138,15 @@ async function start(launch: Launch): Promise<PublicSegment> {
         child.once("error", () => resolve(false));
         child.once("close", (code) => resolve(code === 0));
       });
-      child.send({ conversation, checkpoint, continuation, runId: launch.requestId, text: launch.text }, (error) => {
-        if (error) child.kill("SIGKILL");
+      child.send({ launch, conversation, checkpoint, continuation, runId: launch.requestId, text: launch.text }, (error) => {
+        if (error) killNativeGroup(child);
       });
       return conversation;
     });
     confirmed = Boolean(await exited && reply !== undefined);
-    if (!confirmed) throw new Error("SDK process stopped");
+    const pid = active.get(launch.token)?.pid;
+    reaped = pid !== undefined && await groupStopped(pid);
+    if (!confirmed || !reaped) throw new Error("SDK process stopped without a confirmed result");
     const result = z.discriminatedUnion("kind", [
       z.strictObject({ kind: z.literal("complete"), text: commitSchema.shape.reply, checkpoint: commitSchema.shape.checkpoint }),
       z.strictObject({ kind: z.literal("pending"), checkpoint: commitSchema.shape.checkpoint,
@@ -143,9 +165,9 @@ async function start(launch: Launch): Promise<PublicSegment> {
     return { kind: "complete", text };
   } finally {
     const runner = active.get(launch.token);
-    if (runner && !confirmed) runner.kill("SIGKILL");
+    if (runner && !confirmed) killNativeGroup(runner);
     active.delete(launch.token);
-    if (!runner || confirmed) {
+    if (!runner || reaped || (runner.pid && await groupStopped(runner.pid))) {
       await pool.query("UPDATE birbcrew_ts.native_launches SET stopped=true WHERE conversation_id=$1 AND request_id=$2 AND token=$3", args);
     }
   }
@@ -153,6 +175,10 @@ async function start(launch: Launch): Promise<PublicSegment> {
 
 async function handle(launch: Launch, action: "start" | "stop") {
   if (action === "stop") {
+    await requestNativeStop(pool, launch, {
+      workflowRunId: launch.execution.workflowRunId, activityId: launch.execution.activityId,
+      token: launch.token, attempt: launch.execution.attempt
+    });
     await transaction(async (db) => {
       const retired = await db.query(`SELECT 1 FROM birbcrew_ts.native_launches n
         JOIN birbcrew_ts.turns t USING (conversation_id,request_id)
@@ -197,7 +223,8 @@ const timer = setInterval(async () => {
   const tokens = [...active.keys()];
   try {
     const { rows } = await pool.query<{token: string}>(
-      "SELECT token FROM birbcrew_ts.turns WHERE token = ANY($1::uuid[]) AND phase <> 'started'", [tokens]);
+      `SELECT t.token FROM birbcrew_ts.turns t LEFT JOIN birbcrew_ts.native_stop_requests s USING (conversation_id,request_id,token)
+       WHERE t.token=ANY($1::uuid[]) AND (t.phase<>'started' OR s.token IS NOT NULL)`, [tokens]);
     for (const {token} of rows) stopRunner(active.get(token));
   } catch {
     for (const token of tokens) stopRunner(active.get(token));

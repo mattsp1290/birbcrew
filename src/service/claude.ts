@@ -48,6 +48,7 @@ const pending = z.strictObject({ kind: z.literal("pending"), checkpoint: claudeC
 const response = z.union([success, pending, z.strictObject({ error: z.string() })]);
 
 interface ClaudeProfile {
+  invocationGroup?: number;
   stateDir: string;
   memberId: string;
   ownerId: string;
@@ -118,10 +119,11 @@ async function executeSegment(
   const child = fork(new URL("./claude-worker.ts", import.meta.url), [], {
     cwd,
     execArgv: [],
-    detached: true,
+    detached: !profile.invocationGroup,
     stdio: ["ignore", "ignore", "ignore", "ipc"],
     env: {
       PATH: [dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter),
+      ...(profile.invocationGroup && { BIRBCREW_INVOCATION_GROUP: String(profile.invocationGroup) }),
       HOME: cwd,
       TMPDIR: tmp,
       CLAUDE_CONFIG_DIR: join(cwd, "config"),
@@ -135,7 +137,7 @@ async function executeSegment(
     let result: unknown;
     const stop = () => {
       if (child.pid && child.exitCode === null && child.signalCode === null) {
-        try { process.kill(-child.pid, "SIGKILL"); } catch (error) {
+        try { process.kill(profile.invocationGroup ? child.pid : -child.pid, "SIGKILL"); } catch (error) {
           if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) reject(error);
         }
       }

@@ -1,3 +1,4 @@
+import { requestNativeStop } from "./native-admission.ts";
 import { publishObservation } from "./observation.ts";
 import { savedProposal, type Approval } from "./approvals.ts";
 import { createHash } from "node:crypto";
@@ -64,7 +65,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-        [4, "004-observation.sql"]] as const;
+      [4, "004-observation.sql"], [7, "007-native-stops.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -138,6 +139,7 @@ export class MemberStore {
   async reconcileTurn(input: z.input<typeof submitSchema>, workflowRunId: string, resuming: boolean, allowRecovery = true) {
     const key = submitSchema.parse(input);
     const digest = createHash("sha256").update(key.text).digest();
+    await requestNativeStop(this.pool, key, { workflowRunId });
     return this.transaction(async (db) => {
       const conversation = await conversationFor(db, key, true);
       const { rows: [turn] } = await db.query<TurnRow>(
@@ -204,6 +206,10 @@ export class MemberStore {
     const key = submitSchema.parse(input);
     const execution = executionSchema.optional().parse(identity);
     const digest = createHash("sha256").update(key.text, "utf8").digest();
+    if (execution && execution.attempt > 1) await requestNativeStop(this.pool, key, {
+      workflowRunId: execution.workflowRunId,
+      activityId: execution.activityId, beforeAttempt: execution.attempt
+    });
     return this.transaction(async (db) => {
       const conversation = await conversationFor(db, key, true);
       const { rows: [turn] } = await db.query<TurnRow>(
@@ -252,6 +258,10 @@ export class MemberStore {
 
   async beginResume(request: TurnRequest, approval: Approval, execution: Execution) {
     const key = submitSchema.parse(request);
+    if (execution && execution.attempt > 1) await requestNativeStop(this.pool, key, {
+      workflowRunId: execution.workflowRunId,
+      activityId: execution.activityId, beforeAttempt: execution.attempt
+    });
     return this.transaction(async (db) => {
       const conversation = await conversationFor(db, key, true);
       const { rows: [turn] } = await db.query<TurnRow & {
@@ -311,6 +321,7 @@ export class MemberStore {
 
   async markUncertain(input: Claim): Promise<void> {
     const key = claimSchema.parse(input);
+    await requestNativeStop(this.pool, key, { token: key.token });
     await this.transaction(async (db) => {
       await conversationFor(db, key, true);
       const result = await db.query(

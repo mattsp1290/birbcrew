@@ -28,7 +28,7 @@ export async function runMemberWorker(store: MemberStore, address: string, profi
     if (workers.length === 1) throw new Error("No member engines configured");
     const running = workers.map((worker) => worker.run());
     try {
-      await Promise.all(running);
+      await Promise.race([Promise.all(running), supervisor.exited.then(() => { throw new Error("SDK supervisor stopped"); })]);
     } finally {
       for (const worker of workers) if (worker.getState() === "RUNNING") worker.shutdown();
       await Promise.allSettled(running);
