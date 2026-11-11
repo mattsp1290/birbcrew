@@ -191,8 +191,11 @@ moving state. Independent restored databases cannot discover arbitrary clones.
    npm run recovery -- resume /absolute/target-operator.ts /private/generation
    ```
 
-   Restart matching Temporal services/workers and consumer ingress only after
-   successful reconciliation and activation. A failed reconciliation keeps the
+   After successful reconciliation and activation, restart matching Temporal
+   services/workers **with consumer ingress still disabled**. Let recovery
+   reconcile lost native processes and verify the required held/interrupted/
+   uncertain outcomes before enabling consumer ingress or accepting old approval
+   cards. Activation alone does not reconstruct a process-bound native callback. A failed reconciliation keeps the
    target held. Activation retains its generation in the external authority, so
    interruption between authority activation and database activation is safely
    retryable. Reconciliation hooks must be idempotent. Do not resume a process-bound approval just because its durable
@@ -248,8 +251,12 @@ SDK follow-ups with fresh synthetic proxy credentials. It makes no live requests
 The coordinated proof additionally backs up and restores one actual generation
 across PostgreSQL, stopped Temporal development SQLite, and native archives into
 a second isolated service. It checks all three engines’ completed replay, native
-recall, committed observations and explicit cancellation of unapproved pending
-decisions without effects. This is not persistent production Temporal
+recall and committed observations. Claude/Pi durable paused decisions remain
+cancellable without effects. Codex live process-bound decisions are not resumed:
+the required safe outcome is an interrupted callback, uncertain turn, no pending
+actionable card, rejection of the stale approval and no effects. This follows the
+existing `reconcileTurn`/`interruptLiveLocked` contract, rather than claiming
+that a process-bound pending decision was recovered. This is not persistent production Temporal
 installation disaster-recovery certification. Qualify the deployment's real
 backup hooks, Temporal backend, consumer state and all engine pending-decision
 outcomes before declaring production acceptance. Keep the Beans request open

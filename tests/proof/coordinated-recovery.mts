@@ -11,9 +11,11 @@ import {Client,Connection} from '@temporalio/client';
 import {Pool} from 'pg';
 import {MemberStore} from '../../src/service/store.ts';
 import {MemberClient} from '../../src/service/client.ts';
+import {decisionSchema} from '../../src/service/approvals.ts';
+import {answerLive} from '../../src/service/codex-calls.ts';
 import {InstallationRecovery,readRecoveryManifest,type RecoveryPins} from '../../src/service/recovery.ts';
 import {FileRecoveryFence} from '../../src/service/recovery-fence.ts';
-import {commands,pendingSchema} from './member-commands.mts';
+import {commands,pendingSchema,decision} from './member-commands.mts';
 import {services,run,until,type Services,type Engine} from './member-services.mts';
 import {prepareRecoveryNativeRuntime} from './recovery-native-runtime.mts';
 
@@ -64,7 +66,7 @@ try {
   await sourceMembers.accept(pendingRequest);
   const card=await until(async()=>pendingSchema.parse(await sourceMembers.pending(pendingKey))[0],'source '+engine+' pending decision');
   assert.equal(card.requestId,pendingRequest.requestId);
-  pending.push({engine,key:pendingKey,request:pendingRequest,approvalId:card.approvalId});
+  pending.push({engine,key:pendingKey,request:pendingRequest,approvalId:card.approvalId,card});
  }
  await sourceConnection.close();sourceConnection=undefined;
  assert.equal(await source.sql('SELECT count(*) FROM birbcrew_ts.work_items'),'0');
@@ -115,6 +117,8 @@ try {
   assert.equal((await targetPool!.query('SELECT count(*)::int AS n FROM birbcrew_ts.work_items')).rows[0].n,0);
   assert.equal((await targetPool!.query('SELECT count(*)::int AS n FROM birbcrew_ts.deferred_calls WHERE decision IS NOT NULL')).rows[0].n,0);
  }},manifest);
+ // Consumer ingress stays disabled while restored workers recover their native
+ // process-bound state. The explicit test client is the only caller.
  stopTargetTemporal=await target.startTemporal();stopTargetWorker=await startWorker(target,targetNative);
  // Use a ready query on the actual server and wait for restored worker to poll.
  await until(async()=>{try{return await target!.sql("SELECT count(*) FROM birbcrew_ts.profiles WHERE name='fixture.approval.v1'")==='3'||undefined;}catch{return undefined;}},'restored worker profiles');
@@ -128,14 +132,41 @@ try {
   console.log(`${item.engine}: coordinated restored history replay=0 inference; engine-native recall after relocation passed`);
  }
  for(const item of pending) {
-  // No old approval is granted. Explicit cancellation uses the normal durable
-  // workflow path; live Codex callbacks must be interrupted, not resurrected.
+  // A live Codex callback belongs to the destroyed source process. Its safe
+  // restored outcome is interruption/uncertainty, not a resumable cancellation
+  // update. Verify that specific state and reject the original approval through
+  // the production authorization path rather than accepting any failed command.
+  if(item.engine==='codex') {
+   await until(async()=>{
+    const {rows:[state]}=await targetPool!.query<{live_phase:string;turn_phase:string}>(`SELECT l.phase AS live_phase,t.phase AS turn_phase
+      FROM birbcrew_ts.codex_live_calls l JOIN birbcrew_ts.turns t USING(conversation_id,request_id)
+      WHERE l.approval_id=$1`,[item.approvalId]);
+    return state?.live_phase==='interrupted'&&state.turn_phase==='uncertain'?state:undefined;
+   },'restored Codex callback interruption and uncertain turn',120_000);
+   const beforeRejectedApproval=await evidence();
+   const restoredConnection=await Connection.connect({address:target.env.BIRBCREW_TEMPORAL_ADDRESS});
+   try {
+    const restoredMembers:MemberClient=new MemberClient(new MemberStore(targetPool),new Client({connection:restoredConnection}));
+    assert.deepEqual(await restoredMembers.pending(item.key),[]);
+    await assert.rejects(restoredMembers.decide(decision(item.card,'approve')),{name:'MemberStoreError',code:'conflict'});
+   }finally{await restoredConnection.close();}
+   await assert.rejects(answerLive(targetPool,decisionSchema.parse(decision(item.card,'approve'))),{name:'MemberStoreError',code:'conflict'});
+   assert.equal(await evidence(),beforeRejectedApproval,'stale approval cannot invoke a provider');
+   const stateAfter:{live_phase:string;turn_phase:string;decision:string|null}=(await targetPool.query<{live_phase:string;turn_phase:string;decision:string|null}>(`SELECT l.phase AS live_phase,t.phase AS turn_phase,d.decision
+     FROM birbcrew_ts.codex_live_calls l JOIN birbcrew_ts.turns t USING(conversation_id,request_id)
+     JOIN birbcrew_ts.deferred_calls d USING(approval_id) WHERE l.approval_id=$1`,[item.approvalId])).rows[0];
+   assert.deepEqual(stateAfter,{live_phase:'interrupted',turn_phase:'uncertain',decision:null});
+   assert.equal(await target.sql(`SELECT count(*) FROM birbcrew_ts.work_items WHERE conversation_id='${item.key.conversationId}'`),'0');
+   console.log('codex: restored process-bound callback interrupted; turn uncertain; pending unavailable; stale approval rejected; effects=0');
+   continue;
+  }
+  // Claude/Pi have durable paused segments, so use their normal cancellation
+  // path. No old approval is ever granted or automatically replayed.
   assert.deepEqual(await targetCommands.command('cancel-pending',{...item.key,requestId:item.request.requestId}),{cancelled:true});
   assert.deepEqual(await targetCommands.command('cancel-pending',{...item.key,requestId:item.request.requestId}),{cancelled:true});
   await until(async()=>Number(await target!.sql(`SELECT count(*) FROM birbcrew_ts.tool_cancellations WHERE conversation_id='${item.key.conversationId}' AND request_id='${item.request.requestId}'`))===1||undefined,'restored pending cancellation');
   assert.equal(await target.sql(`SELECT count(*) FROM birbcrew_ts.work_items WHERE conversation_id='${item.key.conversationId}'`),'0');
-  if(item.engine==='codex') assert.equal(await target.sql(`SELECT phase FROM birbcrew_ts.codex_live_calls WHERE approval_id='${item.approvalId}'`),'interrupted');
-  console.log(`${item.engine}: restored unapproved decision explicitly cancelled; effects=0${item.engine==='codex'?'; process-bound callback interrupted':''}`);
+  console.log(`${item.engine}: restored unapproved decision explicitly cancelled; effects=0`);
  }
  assert.equal(await target.sql('SELECT count(*) FROM birbcrew_ts.work_items'),'0');
  console.log('Coordinated recovery passed: one-generation PostgreSQL dump, stopped Temporal development persistence and native archive restored into isolated target; source fenced, observations preserved. Production backing-store qualification remains separate.');
