@@ -15,7 +15,9 @@ The existing observer gateway continues to reject those inputs.
   eight registered tools per application. Tool schemas are explicit JSON object
   schemas with `additionalProperties: false`; argument/result limits and a
   deadline are mandatory. Unregistered tools and missing authorization deny.
-- Claude, Codex and Pi native SDK adapters expose only the registered catalog.
+- Claude and Pi SDK adapters and the pinned official Codex app-server expose only
+  the registered catalog. Codex uses app-server dynamic tools instead of exec/MCP:
+  the pinned MCP path adds resource helper tools that cannot be disabled.
   Native built-ins remain disabled. Claude/Codex retain their isolated launchers.
 - Native checkpoints bind engine, owner/conversation scope, version, generation,
   context and tool manifest. Rotation creates a fresh engine-native session;

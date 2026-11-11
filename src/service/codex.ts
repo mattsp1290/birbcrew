@@ -17,15 +17,13 @@ const checkpointSchema = z.strictObject({
   }),
 });
 export type CodexCheckpoint = z.infer<typeof checkpointSchema>;
-export interface CodexInput {
+interface CodexInput {
   threadId: string; runId: string; text: string; checkpoint: unknown; signal: AbortSignal;
   projectContext?: string;
-  /** Host-only application mode: no ambient/native tool capabilities. */
-  registeredToolsOnly?: true;
   onText?: (text: string) => void | Promise<void>;
   onThreadStarted?: (nativeId: string) => void | Promise<void>;
   onToolDelivered?: (text: string) => void | Promise<void>;
-  mcp?: { url: string; token: string; tool?: "record_work_item" | "choose_next_step"; registeredTools?: readonly string[] };
+  mcp?: { url: string; token: string; tool: "record_work_item" | "choose_next_step" };
 }
 export interface CodexProfile {
   ownerId: string; memberId: string; stateDir: string; model: string; apiKey?: string; baseUrl?: string;
@@ -40,7 +38,7 @@ const loopback = (raw: string) => {
   }
   return url;
 };
-async function nativeHistory(home: string, scratch: string, nativeId: string, known?: string) {
+export async function nativeHistory(home: string, scratch: string, nativeId: string, known?: string) {
   // The CLI places rollout files in sessions/YYYY/MM/DD.
   const filePattern = /^sessions\/\d{4}\/\d{2}\/\d{2}\/rollout-[\dT-]+-([0-9a-f-]{36})\.jsonl$/;
   const index = join(home, "state_5.sqlite");
@@ -69,7 +67,7 @@ async function nativeHistory(home: string, scratch: string, nativeId: string, kn
 }
 
 async function delivered(item: McpToolCallItem, input: CodexInput) {
-  if (!input.mcp || item.server !== "birbcrew" || !(input.mcp.registeredTools ?? [input.mcp.tool]).some(name => name === item.tool)) throw new Error("Unexpected native Codex tool");
+  if (!input.mcp || item.server !== "birbcrew" || item.tool !== input.mcp.tool) throw new Error("Unexpected native Codex tool");
   const content = item.result?.content;
   if (content?.length === 1 && content[0].type === "text") await input.onToolDelivered?.(content[0].text);
 }
@@ -86,10 +84,7 @@ export async function runCodexTurn(input: CodexInput, profile: CodexProfile): Pr
     throw new Error("Approved Codex account required");
   }
   const endpoint = input.mcp && loopback(input.mcp.url);
-  const tools = input.mcp?.registeredTools ?? (input.mcp?.tool ? [input.mcp.tool] : []);
-  if (input.mcp && (!input.mcp.token || tools.length < 1 || tools.length > 16 || new Set(tools).size !== tools.length ||
-      tools.some(name => !/^[a-z][a-z0-9_]{0,63}$/.test(name)) ||
-      (input.mcp.registeredTools && input.mcp.tool))) throw new Error("Invalid Codex tool binding");
+  if (input.mcp && (!input.mcp.token || !["record_work_item", "choose_next_step"].includes(input.mcp.tool))) throw new Error("Invalid Codex tool binding");
   const prior = input.checkpoint === null ? null : checkpointSchema.parse(input.checkpoint).state;
   if (prior && (prior.threadId !== threadId || prior.memberId !== memberId || prior.ownerDigest !== ownerDigest ||
       prior.model !== profile.model || prior.requestId === requestId)) throw new Error("Codex checkpoint identity mismatch");
@@ -144,12 +139,11 @@ export async function runCodexTurn(input: CodexInput, profile: CodexProfile): Pr
       ...(!approved && provider && { model_provider: "fixture", model_providers: { fixture: { name: "BirbCrew local fixture",
         base_url: provider.href.replace(/\/$/, ""), wire_api: "responses", requires_openai_auth: false,
         supports_websockets: false, request_max_retries: 0, stream_max_retries: 0 } } }),
-      ...(input.registeredToolsOnly && {tools: {experimental_request_user_input: {enabled:false},update_plan:{enabled:false}}}),
-      features: { ...(input.registeredToolsOnly && {view_image:false,default_mode_request_user_input:false,request_permissions_tool:false,sleep_tool:false,tool_suggest:false}), plugins: false, apps: false, shell_tool: false, unified_exec: false, shell_snapshot: false, multi_agent: false, multi_agent_v2: false, code_mode: false, goals: false, image_generation: false },
+      features: { plugins: false, apps: false, shell_tool: false, unified_exec: false, shell_snapshot: false, multi_agent: false, multi_agent_v2: false, code_mode: false, goals: false, image_generation: false },
       analytics: { enabled: false }, feedback: { enabled: false },
       developer_instructions: "You are a BirbCrew coworker." + (input.projectContext ? "\n" + input.projectContext : ""),
       ...(input.mcp && endpoint && { mcp_servers: { birbcrew: { url: endpoint.href,
-        bearer_token_env_var: "BIRBCREW_MCP_AUTH", enabled_tools: [...tools], required: true,
+        bearer_token_env_var: "BIRBCREW_MCP_AUTH", enabled_tools: [input.mcp.tool], required: true,
         startup_timeout_sec: 8, tool_timeout_sec: 150, default_tools_approval_mode: "approve" } } }),
     },
   });
