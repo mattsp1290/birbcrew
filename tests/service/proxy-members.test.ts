@@ -92,7 +92,7 @@ async function proxyFixture(engine: "claude" | "codex" | "pi", model: string) {
 }
 
 for (const engine of ["claude", "codex", "pi"] as const) {
-  test(`${engine}: proxy signs every native request, preserves tools and cold profiles, and cancels streaming`, { timeout: 120_000 }, async t => {
+  test(`${engine}: proxy signs every native request, preserves tools and cold profiles, and cancels streaming`, { timeout: 240_000 }, async t => {
     const model = engine === "claude" ? "claude-sonnet-4-6" : engine === "codex" ? "gpt-5.4" : "fixture-chat";
     const protocol = engine === "claude" ? "anthropic-messages" : engine === "codex" ? "openai-responses" : "openai-chat-completions";
     const fixture = await proxyFixture(engine, model);
@@ -123,6 +123,15 @@ for (const engine of ["claude", "codex", "pi"] as const) {
     const second = await textTurn({ ...input, runId: randomUUID(), text: "recall", checkpoint: first.checkpoint as Checkpoint });
     assert.equal(second.text, "recalled proxy-marker");
     assert.ok(streamed.join("").includes("proxy-marker"));
+    // A cold native restore on every turn, beyond the original four-turn proof.
+    // This qualifies checkpoint continuity, not model context compaction.
+    let checkpoint = second.checkpoint as Checkpoint;
+    for (let turn = 3; turn <= 12; turn++) {
+      const next = await textTurn({ ...input, runId: randomUUID(), text: "recall", checkpoint });
+      assert.equal(next.text, "recalled proxy-marker", `${engine} restore turn ${turn}`);
+      checkpoint = next.checkpoint as Checkpoint;
+    }
+
 
     const operation = randomUUID(), receipt = randomUUID();
     const toolInput = { ...input, threadId: randomUUID(), runId: operation, text: "record " + operation };
