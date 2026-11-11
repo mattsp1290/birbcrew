@@ -64,5 +64,21 @@ for(const engine of ["pi","claude","codex"] as const) {
     assert.equal(calls.length,2);assert.deepEqual(acks,calls);
     if(engine==="pi" && "catalogs" in provider)for(const names of provider.catalogs as string[][])assert.deepEqual([...names].sort(),tools.map(t=>t.name).sort());
     if(engine==="claude")for(const names of observed)assert.deepEqual([...names].sort(),tools.map(t=>"mcp__ag_ui__"+t.name).sort());
+    if(engine === "codex" && "toolSurfaces" in provider) {
+      const seen=new Set<string>();
+      const inspect=(entry:any)=>{
+        if(entry.type === "namespace") {
+          assert.equal(entry.name,"mcp__birbcrew","Unexpected native namespace");
+          assert.ok(Array.isArray(entry.tools));for(const nested of entry.tools)inspect(nested);
+        } else {
+          assert.equal(entry.type,"function","Unexpected native built-in tool type");
+          assert.ok(tools.some(t=>t.name === entry.name),"Unregistered native tool: "+entry.name);
+          seen.add(entry.name);
+        }
+      };
+      for(const catalog of provider.toolSurfaces as any[][])for(const entry of catalog)inspect(entry);
+      assert.deepEqual([...seen].sort(),tools.map(t=>t.name).sort());
+    }
+
   });
 }

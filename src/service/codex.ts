@@ -20,6 +20,8 @@ export type CodexCheckpoint = z.infer<typeof checkpointSchema>;
 export interface CodexInput {
   threadId: string; runId: string; text: string; checkpoint: unknown; signal: AbortSignal;
   projectContext?: string;
+  /** Host-only application mode: no ambient/native tool capabilities. */
+  registeredToolsOnly?: true;
   onText?: (text: string) => void | Promise<void>;
   onThreadStarted?: (nativeId: string) => void | Promise<void>;
   onToolDelivered?: (text: string) => void | Promise<void>;
@@ -142,7 +144,8 @@ export async function runCodexTurn(input: CodexInput, profile: CodexProfile): Pr
       ...(!approved && provider && { model_provider: "fixture", model_providers: { fixture: { name: "BirbCrew local fixture",
         base_url: provider.href.replace(/\/$/, ""), wire_api: "responses", requires_openai_auth: false,
         supports_websockets: false, request_max_retries: 0, stream_max_retries: 0 } } }),
-      features: { plugins: false, apps: false, shell_tool: false, unified_exec: false, shell_snapshot: false, multi_agent: false, multi_agent_v2: false, code_mode: false, goals: false, image_generation: false },
+      ...(input.registeredToolsOnly && {tools: {experimental_request_user_input: {enabled:false},update_plan:{enabled:false}}}),
+      features: { ...(input.registeredToolsOnly && {view_image:false,default_mode_request_user_input:false,request_permissions_tool:false,sleep_tool:false,tool_suggest:false}), plugins: false, apps: false, shell_tool: false, unified_exec: false, shell_snapshot: false, multi_agent: false, multi_agent_v2: false, code_mode: false, goals: false, image_generation: false },
       analytics: { enabled: false }, feedback: { enabled: false },
       developer_instructions: "You are a BirbCrew coworker." + (input.projectContext ? "\n" + input.projectContext : ""),
       ...(input.mcp && endpoint && { mcp_servers: { birbcrew: { url: endpoint.href,

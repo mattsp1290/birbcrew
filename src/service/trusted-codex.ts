@@ -53,7 +53,7 @@ export async function runTrustedCodex(input: TrustedNativeInput, profile: CodexP
   const address=server.address();if(!address||typeof address === "string")throw new Error("Native tool server failed");
   try {
     const result=await runCodexTurn({threadId:input.threadId,runId:input.runId,text:input.text,checkpoint:input.checkpoint,
-      signal,projectContext:input.context,onText:input.onText,onThreadStarted:id=>{nativeThread.resolve(id);},
+      signal,registeredToolsOnly:true,projectContext:input.context,onText:input.onText,onThreadStarted:id=>{nativeThread.resolve(id);},
       ...(input.tools.length ? {mcp:{url:`http://127.0.0.1:${address.port}/mcp`,token,registeredTools:input.tools.map(t=>t.name)}} : {}),
       async onToolDelivered(text) {
         const call=pending.get(text);if(!call)throw new Error("Native result did not match its dispatch");
