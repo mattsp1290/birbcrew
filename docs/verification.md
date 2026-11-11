@@ -36,7 +36,7 @@ tests cover native calls, approvals, isolation, cancellation and observers.
 The combined run also exercises simultaneous cancellation and offline replay.
 
 Set `BIRBCREW_FIXTURE_EVIDENCE` to an output file outside the checkout for the
-redacted JSON report. It records selected engines, passed stages, pinned package
+redacted JSON report. Use separate files for fixture and replay evidence. It records selected engines, passed stages, pinned package
 integrities, launcher checksum, source fingerprint, and result. Release evidence
 requires a clean checkout or a verified `git archive`. For an independently
 attested source copy set both `BIRBCREW_SOURCE_REVISION` and

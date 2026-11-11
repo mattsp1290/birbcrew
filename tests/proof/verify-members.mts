@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { z } from "zod";
 import { verifyObserverProcesses } from "./member-observer-processes.mts";
-import { fixtureReport } from "./member-report.mts";
+import { evidenceOutputs, fixtureReport } from "./member-report.mts";
 import { verifyChildren } from "./member-children.mts";
 import { verifyDecisions } from "./member-decisions.mts";
 import { verifyNotes } from "./member-notes.mts";
@@ -34,10 +34,11 @@ async function test(paths: string[], env: NodeJS.ProcessEnv, pattern?: string) {
   if (paths.length) await execute(process.execPath, ["--test", ...(pattern ? ["--test-name-pattern=" + pattern] : []), ...paths], env);
 }
 
-async function verify(s: Services, engines: Engine[], pass: (name: string) => void, selected?: Engine) {
+async function verify(s: Services, engines: Engine[], pass: (name: string) => void, selected?: Engine, replayEvidence?: string) {
   const { env } = s, { command, create } = commands(s);
   const node = process.execPath;
   await execute(node, ["node_modules/typescript/bin/tsc", "--noEmit"], env);
+  await test(["tests/proof/member-evidence.test.mts"], env);
   await test(["tests/fixtures/engines/artifacts.test.ts"], env, selected && matrix[selected].archive);
   await test(["tests/fixtures/engines/consumer.test.mjs"], env, selected && "^" + selected + " ");
   await test(engines.flatMap((e) => matrix[e].native.map((n) => "tests/fixtures/engines/" + n + ".test.ts")), env);
@@ -114,7 +115,7 @@ async function verify(s: Services, engines: Engine[], pass: (name: string) => vo
   if (selected !== "codex") await test(["tests/service/observation.test.ts"], env, selected && matrix[selected].observers);
   if (!selected) await execute(node, ["tests/proof/replay-traces.mts"], {
     ...env,
-    BIRBCREW_REPLAY_EVIDENCE: process.env.BIRBCREW_REPLAY_EVIDENCE,
+    BIRBCREW_REPLAY_EVIDENCE: replayEvidence,
     BIRBCREW_SOURCE_REVISION: process.env.BIRBCREW_SOURCE_REVISION,
     BIRBCREW_SOURCE_SHA256: process.env.BIRBCREW_SOURCE_SHA256,
   });
@@ -135,13 +136,14 @@ if (values.help) {
     await execute(process.execPath, ["tests/proof/live-members.ts", "--engine", engine, "--attestation", values.attestation], process.env);
   } else {
     if (values.mode !== "fixture" || values.attestation) throw new Error("Expected fixture mode with no account attestation");
+    const outputs = await evidenceOutputs();
     await run("scripts/build-native", []);
     const engines: Engine[] = engine ? [engine] : ["pi", "claude", "codex"];
-    const report = await fixtureReport(engines);
+    const report = await fixtureReport(engines, outputs.fixture);
     let passed = false;
     try {
       const s = await services(engine);
-      try { await verify(s, engines, report.pass, engine); }
+      try { await verify(s, engines, report.pass, engine, outputs.replay); }
       finally { await s.close(); }
       report.pass("Fixture processes, PostgreSQL container and private state removed");
       passed = true;

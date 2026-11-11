@@ -1,9 +1,31 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { run, type Engine } from "./member-services.mts";
+
+export async function evidenceOutputs(env: NodeJS.ProcessEnv = process.env) {
+  const source = await realpath(process.cwd());
+  async function outside(value: string | undefined) {
+    if (value === undefined) return;
+    const path = resolve(value);
+    const output = join(await realpath(dirname(path)), basename(path));
+    const fromSource = relative(source, output);
+    if (!(fromSource === ".." || fromSource.startsWith(".." + sep) || isAbsolute(fromSource))) {
+      throw new Error("Choose an evidence file outside the checkout");
+    }
+    const existing = await lstat(output).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    if (existing && !existing.isFile()) throw new Error("Choose a regular evidence file");
+    return output;
+  }
+  const fixture = await outside(env.BIRBCREW_FIXTURE_EVIDENCE);
+  const replay = await outside(env.BIRBCREW_REPLAY_EVIDENCE);
+  if (fixture && fixture === replay) throw new Error("Use distinct fixture and replay evidence files");
+  return { fixture, replay };
+}
 
 const roots = ["src/service", "native", "scripts", "tests/service", "tests/proof", "tests/fixtures/engines",
   "packages", "vendor/ag-ui", "clients"];
@@ -75,7 +97,7 @@ export function attributable(source: Awaited<ReturnType<typeof sourceFingerprint
   return source.revision !== null && !["modified", "unattributed"].includes(source.state);
 }
 
-export async function fixtureReport(engines: Engine[]) {
+export async function fixtureReport(engines: Engine[], path?: string) {
   const initial = await sourceFingerprint();
   const lock = JSON.parse(await readFile("package-lock.json", "utf8"));
   const native = ["@temporalio/worker",
@@ -95,10 +117,9 @@ export async function fixtureReport(engines: Engine[]) {
       const reproducible = JSON.stringify(final) === JSON.stringify(initial) && attributable(final);
       const { manifest, ...sourceInfo } = final;
       const report = { mode: "fixture", engines, status: !passed ? "NOT VERIFIED" : reproducible ? "VERIFIED" : "INCONCLUSIVE",
-        processExit: passed && (reproducible || !process.env.BIRBCREW_FIXTURE_EVIDENCE) ? 0 : 1, source: sourceInfo, stableDuringRun: initial.sourceSha256 === final.sourceSha256,
+        processExit: passed && (reproducible || !path) ? 0 : 1, source: sourceInfo, stableDuringRun: initial.sourceSha256 === final.sourceSha256,
         node: process.version, architecture: process.arch, temporalCli: "1.10.0", packages,
         nativeLauncherSha256: hash(await readFile(".proof/bin/member-launch")), stages };
-      const path = process.env.BIRBCREW_FIXTURE_EVIDENCE;
       if (path) {
         const tmp = path + "." + randomUUID() + ".tmp";
         try {

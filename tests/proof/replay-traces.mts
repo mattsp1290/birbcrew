@@ -14,8 +14,9 @@ import { z } from "zod";
 import { type Approval } from "../../src/service/approvals.ts";
 import { MemberClient } from "../../src/service/client.ts";
 import { MemberStore } from "../../src/service/store.ts";
-import { attributable, sourceFingerprint } from "./member-report.mts";
+import { attributable, evidenceOutputs, sourceFingerprint } from "./member-report.mts";
 
+const { replay: evidence } = await evidenceOutputs();
 const directory = await mkdtemp(join(tmpdir(), "birb-replay-"));
 const traces = join(directory, "traces.jsonl"), requests = join(directory, "requests.jsonl");
 const credential = "fixture-token-" + randomUUID(), secretNote = "private-note-" + randomUUID();
@@ -62,7 +63,6 @@ const ids = { codex: randomUUID(), pi: randomUUID(), claude: randomUUID() };
 const ownerId = "private-owner-" + randomUUID();
 let stop: (() => Promise<void>) | undefined;
 try {
-  const evidence = process.env.BIRBCREW_REPLAY_EVIDENCE;
   const initialSource = evidence ? await sourceFingerprint() : undefined;
   if (initialSource && !attributable(initialSource)) throw new Error("Replay evidence requires attributable source");
   await store.migrate();
@@ -179,8 +179,10 @@ try {
     });
     const path = evidence + "." + randomUUID() + ".tmp";
     try {
-      await writeFile(path, JSON.stringify({ ...summary, mode: "fixture", sourceRevision: source.revision, source, packages,
-        node: process.version, histories: exported, spans: rows }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+      const publicReport = JSON.stringify({ ...summary, mode: "fixture", sourceRevision: source.revision, source, packages,
+        node: process.version, histories: exported, spans: rows }, null, 2) + "\n";
+      for (const privateValue of [credential, secretNote, ownerId]) assert.ok(!publicReport.includes(privateValue), "Private data in replay evidence");
+      await writeFile(path, publicReport, { flag: "wx", mode: 0o600 });
       await rename(path, evidence);
     } finally {
       await rm(path, { force: true });
