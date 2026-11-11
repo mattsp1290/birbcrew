@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -18,4 +19,9 @@ export async function waitForGate(path: string) {
     await delay(25);
   }
   throw new Error("Provider stream gate was never released");
+}
+
+export function holdResumedReceipt(prompt: string | undefined) {
+  const path = streamGate(prompt?.replace(/^record /, "stream "));
+  return !!path && existsSync(path + ".hold-receipt");
 }

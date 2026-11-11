@@ -154,7 +154,11 @@ export class MemberStore {
       const {rows:[turn]} = await db.query<{token:string;phase:string}>(
         "SELECT token,phase FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",args);
       if (!turn || turn.phase !== "started") throw new MemberStoreError("conflict");
-      if (await savedProposal(db,member,key.requestId) || (await childrenFor(db,member,key.requestId)).length) return false;
+      const waiting = await db.query(`SELECT 1 FROM birbcrew_ts.paused_segments
+        WHERE conversation_id=$1 AND request_id=$2 AND resume_activity_id IS NULL
+        UNION ALL SELECT 1 FROM birbcrew_ts.delegations
+        WHERE conversation_id=$1 AND request_id=$2 AND resume_activity_id IS NULL`, args);
+      if (waiting.rowCount) return false;
       // Stop publication cannot wait for the SDK's shared grant on the turn row.
       await db.query("INSERT INTO birbcrew_ts.native_stop_requests VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",[...args,turn.token]);
       await db.query("INSERT INTO birbcrew_ts.tool_cancellations VALUES ($1,$2) ON CONFLICT DO NOTHING",args);
@@ -190,7 +194,8 @@ export class MemberStore {
           const admitted = await db.query(`SELECT 1 FROM birbcrew_ts.native_launches n
             JOIN birbcrew_ts.turns t USING (conversation_id,request_id,token)
             JOIN birbcrew_ts.profiles p ON p.name=$3 AND p.engine='claude' AND (p.protected_tool='record_work_item' OR p.human_tool='choose_next_step')
-            WHERE n.conversation_id=$1 AND n.request_id=$2 AND NOT n.recovery_closed`, [key.conversationId, key.requestId, conversation.profile]);
+            WHERE n.conversation_id=$1 AND n.request_id=$2 AND NOT n.recovery_closed
+            AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.tool_cancellations WHERE conversation_id=$1 AND request_id=$2)`, [key.conversationId, key.requestId, conversation.profile]);
           if (admitted.rowCount) return { kind: "recover" } as const;
         }
       } else {

@@ -1,4 +1,4 @@
-import { streamGate, waitForGate } from "../stream-gate.mts";
+import { holdResumedReceipt, streamGate, waitForGate } from "../stream-gate.mts";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -59,6 +59,7 @@ async function respond(
   const remembered = prompts.findLast((text) => text.startsWith("remember "))?.slice(9);
   let tool: { id: string; name: string; input: { operation_id?: string; note?: string } } | undefined;
   let reply = "";
+  let holdReceipt = false;
   if (toolResult) {
     const text = typeof toolResult.content === "string" ? toolResult.content :
       z.array(z.object({ text: z.string() })).nonempty().parse(toolResult.content)[0].text;
@@ -71,6 +72,7 @@ async function respond(
     } else {
       const outcome = JSON.parse(answer);
       if (outcome.nativeCallId !== toolResult.tool_use_id) throw new Error("Mismatched provider result");
+      if (outcome.kind === "recorded") holdReceipt = holdResumedReceipt("record " + outcome.receipt.operationId);
       reply = outcome.kind === "recorded" ? "recorded " + outcome.receipt.receiptId : outcome.kind;
     }
   } else if (prompt === "next step" && tools.some((t) => t.name === "mcp__ag_ui__choose_next_step")) {
@@ -113,7 +115,7 @@ async function respond(
         { type: "input_json_delta", partial_json: JSON.stringify(tool.input) } : { type: "text_delta", text: reply }
     });
   }
-  if (prompt === "wait") return;
+  if (prompt === "wait" || holdReceipt) return;
   const gate = streamGate(prompt);
   if (gate) {
     await waitForGate(gate);

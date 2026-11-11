@@ -291,10 +291,18 @@ export class ApprovalStore {
       if (turn.engine === "codex") throw new MemberStoreError("stale");
       if (await cancelled(db, key)) return;
       if (turn.phase !== "started") throw new MemberStoreError("conflict");
-      const answered = await db.query(`SELECT 1 FROM birbcrew_ts.deferred_calls
-        WHERE conversation_id=$1 AND request_id=$2 AND tool_name='choose_next_step' AND decision IS NOT NULL`,
-        [key.conversationId, key.requestId]);
-      if (answered.rowCount) throw new MemberStoreError("conflict");
+      const segments = await db.query<{ resuming: boolean; answered: boolean }>(
+        `SELECT s.resume_activity_id IS NOT NULL AS resuming,
+           p.tool_name='choose_next_step' AND p.decision IS NOT NULL AS answered
+         FROM birbcrew_ts.deferred_calls p LEFT JOIN birbcrew_ts.paused_segments s USING (approval_id)
+         WHERE p.conversation_id=$1 AND p.request_id=$2`, [key.conversationId, key.requestId]);
+      const segment = segments.rows[0];
+      if (segment?.resuming) {
+        await db.query("INSERT INTO birbcrew_ts.native_stop_requests VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+          [key.conversationId, key.requestId, turn.token]);
+      } else if (segment?.answered) {
+        throw new MemberStoreError("conflict");
+      }
       await db.query("INSERT INTO birbcrew_ts.tool_cancellations (conversation_id, request_id) VALUES ($1,$2)",
         [key.conversationId, key.requestId]);
       await publishObservation(db, key.conversationId, { kind: "cancelled", requestId: key.requestId });

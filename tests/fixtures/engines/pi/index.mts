@@ -1,4 +1,4 @@
-import { streamGate, waitForGate } from "../stream-gate.mts";
+import { holdResumedReceipt, streamGate, waitForGate } from "../stream-gate.mts";
 import { randomUUID } from "node:crypto";
 import type { BaseEvent, RunAgentInput } from "@ag-ui/core";
 import { createTranslator, toAguiMessages } from "@ag-ui/pi";
@@ -128,7 +128,7 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
   const message = fauxAssistantMessage(text, { responseId: randomUUID() });
   stream.push({ type: "start", partial: fauxAssistantMessage("") });
   stream.push({ type: "text_delta", contentIndex: 0, partial: message, delta: text });
-  if (wait) {
+  if (wait || (last?.role === "toolResult" && holdResumedReceipt(latest))) {
     if (!signal) throw new Error("Pi must supply a cancellation signal");
     if (signal.aborted) fail("aborted");
     else signal.addEventListener("abort", () => fail("aborted"), { once: true });
