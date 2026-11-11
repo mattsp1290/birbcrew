@@ -237,12 +237,15 @@ export class ApprovalStore {
   async previousDecision(input: Decision): Promise<Choice | null> {
     const key = decisionSchema.parse(input);
     return this.transaction(async (db) => {
-      await lockTurn(db, key);
+      const turn = await lockTurn(db, key);
       const call = await findCall(db, key);
       if (!acceptsChoice(call.toolName, key.choice)) throw new MemberStoreError("conflict");
       if (call.version !== key.version || call.argumentDigest !== key.argumentDigest ||
           (call.decision && call.decision !== key.choice)) throw new MemberStoreError("conflict");
-      if (!call.decision) {
+      if (!call.decision && (turn.phase !== "started" || call.childStopped || await cancelled(db,key))) {
+        throw new MemberStoreError("conflict");
+      }
+      if (!call.decision && call.live) {
         const closed = await db.query(`SELECT 1 FROM birbcrew_ts.codex_live_calls l JOIN birbcrew_ts.turns t USING (conversation_id,request_id)
           WHERE l.approval_id=$1 AND (l.phase <> 'waiting' OR t.phase <> 'started' OR l.expires_at <= clock_timestamp()
           OR EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests s WHERE

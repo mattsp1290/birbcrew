@@ -403,6 +403,9 @@ test("two HttpAgents close a streaming child and its sibling's protected call on
     assert.deepEqual(JSON.parse(String(results[0].content)), { kind: "cancelled" });
     assert.deepEqual(reader.agent.messages, snapshot.messages);
   }
+  assert.equal((await host.api(path + "/human", {
+    memberId,requestId,invocationId:approval.invocationId,approvalId:approval.approvalId,version:1,choice:"approve",
+  })).status,409);
   assert.deepEqual(snapshot.childText, {});
   assert.deepEqual(snapshot.state.pendingApprovals, []);
   assert.equal((await host.db.query("SELECT count(*) AS n FROM birbcrew_ts.work_items WHERE conversation_id=$1", [conversationId])).rows[0].n, "0");
