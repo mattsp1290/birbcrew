@@ -33,6 +33,7 @@ type Projection = {
 };
 
 type Change = ChildChange
+  | { kind: "nativeItem"; requestId: string; index: number; text: string }
   | { kind: "input" | "reply"; requestId: string; text: string }
   | { kind: "toolValue"; invocationId: string; publicId: string; requestId: string }
   | { kind: "toolPreview"; invocationId: string; publicId: string }
@@ -89,6 +90,7 @@ export async function readSnapshot(db: Pool, owner: string, id: string): Promise
 
 function logicalKey(change: Change) {
   switch (change.kind) {
+    case "nativeItem": return change.requestId + "/item/" + change.index;
     case "text": return "text/" + change.messageId + "/" + change.index;
     case "toolValue": return change.kind + "/" + change.publicId;
     case "toolPreview": return "toolPreview/" + change.publicId;
@@ -128,6 +130,15 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
     if (text) messages.push({id:text.id,role:"assistant",content:text.prefix,...(childId && {subagentRunId:childId})});
   }
   switch (change.kind) {
+    case "nativeItem": {
+      if (!state.openStep || !Number.isSafeInteger(change.index) || change.index < 0 || change.index >= 128 ||
+          !change.text || Buffer.byteLength(change.text) > 65_536) throw new MemberStoreError("input_limit");
+      const messageId = change.requestId + "/item/" + change.index;
+      messages.push({id:messageId,role:"assistant",content:change.text});
+      frames.push({type:E.TEXT_MESSAGE_START,messageId,role:"assistant"},
+        {type:E.TEXT_MESSAGE_CONTENT,messageId,delta:change.text},{type:E.TEXT_MESSAGE_END,messageId});
+      break;
+    }
     case "text": {
       const { messageId, childId, index, delta } = change;
       const active = childId ? state.children?.some(c => c.childId === childId && c.phase === "running") : state.openStep;
@@ -280,6 +291,13 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
     }
     case "reply": {
       if (Object.keys(snapshot.openTools).length) throw new MemberStoreError("conflict");
+      const items = messages.filter(m => m.role === "assistant" && m.id.startsWith(change.requestId + "/item/"));
+      if (items.length) {
+        if (items.map(m => m.content).join("") !== change.text) throw new MemberStoreError("conflict");
+        finishStep();
+        state.phase = messages.filter(m => m.role === "user").length >= 4 ? "complete" : "idle";
+        break;
+      }
       const initialId = change.requestId + "/assistant";
       const id = snapshot.openText?.id ?? (messages.some(m => m.id === initialId) ? change.requestId + "/resumed-assistant" : initialId);
       if (snapshot.openText) {
@@ -339,7 +357,8 @@ export async function publishObservation(db: PoolClient, id: string, change: Cha
   await db.query(`INSERT INTO birbcrew_ts.public_snapshots (conversation_id,state) VALUES ($1,$2)
     ON CONFLICT DO NOTHING`, [id, JSON.stringify(snapshot.state)]);
   const key = logicalKey(change);
-  const digest = change.kind === "text" ? createHash("sha256").update(change.delta).digest() : null;
+  const digest = change.kind === "text" ? createHash("sha256").update(change.delta).digest() :
+    change.kind === "nativeItem" ? createHash("sha256").update(change.text).digest() : null;
   const admitted = await db.query(`INSERT INTO birbcrew_ts.public_publications (conversation_id,logical_key,payload_digest)
     VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [id, key, digest]);
   if (!admitted.rowCount) {

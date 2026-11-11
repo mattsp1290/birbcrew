@@ -1,3 +1,4 @@
+import { MemberStore } from "./store.ts";
 import { runLiveTool } from "./codex-live.ts";
 import { trustedProjectContext } from "./project-notes.ts";
 import { withNativeAdmission } from "./native-admission.ts";
@@ -40,6 +41,8 @@ process.once("message", async (command: AdmittedTurn) => {
       const projectContext = command.childProfile ? undefined : await trustedProjectContext(pool, member);
       const profile = profiles.get(member.profile);
       const tool = profile?.protectedTool ?? profile?.humanTool;
+      const store = new MemberStore(pool);
+      let nextItem = 0;
       reply = await withNativeAdmission(pool,command.launch,AbortSignal.any([controller.signal,AbortSignal.timeout(170_000)]), signal => {
         const input: DriverInput = {
         ...(projectContext && { projectContext }),
@@ -47,7 +50,9 @@ process.once("message", async (command: AdmittedTurn) => {
         ...(command.childResults && {childResults: command.childResults}),
         threadId: command.threadId, runId: command.runId, text: command.text,
         onToolArgs: (toolArgs, matchedOperation) => process.send?.({ toolArgs, matchedOperation }),
-        onText: (delta) => { process.send?.({ delta }); },
+        onText: member.engine === "codex"
+          ? text => store.appendCodexItem(command.launch, nextItem++, text)
+          : delta => { process.send?.({ delta }); },
         checkpoint: command.checkpoint, continuation: command.continuation, signal,
         };
         return member.engine === "codex" && tool

@@ -363,6 +363,19 @@ export class MemberStore {
     });
   }
 
+  async appendCodexItem(claim: Claim, index: number, text: string) {
+    await this.transaction(async db => {
+      const member = await conversationFor(db, claim, true);
+      if (member.engine !== "codex") throw new MemberStoreError("conflict");
+      const current = await db.query("SELECT 1 FROM birbcrew_ts.turns t WHERE conversation_id=$1 AND request_id=$2 AND token=$3 AND phase='started' " +
+        "AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests WHERE conversation_id=$1 AND request_id=$2 AND token=$3)",
+        [claim.conversationId, claim.requestId, claim.token]);
+      if (!current.rowCount) throw new MemberStoreError("stale");
+      const project = await textProjection(db,claim.conversationId);
+      await publishObservation(db,claim.conversationId,{kind:"nativeItem",requestId:claim.requestId,index,text:project(text,true)});
+    });
+  }
+
   async commitTurn(input: Claim & { checkpoint: unknown; reply: string }): Promise<string> {
     const key = commitSchema.parse(input);
     return this.transaction(async (db) => {
