@@ -242,6 +242,13 @@ export class ApprovalStore {
       if (!acceptsChoice(call.toolName, key.choice)) throw new MemberStoreError("conflict");
       if (call.version !== key.version || call.argumentDigest !== key.argumentDigest ||
           (call.decision && call.decision !== key.choice)) throw new MemberStoreError("conflict");
+      if (!call.decision) {
+        const closed = await db.query(`SELECT 1 FROM birbcrew_ts.codex_live_calls l JOIN birbcrew_ts.turns t USING (conversation_id,request_id)
+          WHERE l.approval_id=$1 AND (l.phase <> 'waiting' OR t.phase <> 'started' OR l.expires_at <= clock_timestamp()
+          OR EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests s WHERE
+            (s.conversation_id,s.request_id,s.token)=(l.conversation_id,l.request_id,l.token)))`,[key.approvalId]);
+        if (closed.rowCount) throw new MemberStoreError("conflict");
+      }
       return call.decision;
     });
   }
