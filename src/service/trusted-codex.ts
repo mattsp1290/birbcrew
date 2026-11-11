@@ -18,6 +18,18 @@ const callSchema=z.object({threadId:z.uuid(),turnId:z.uuid(),callId:z.string().m
 
 export async function runTrustedCodex(input:TrustedNativeInput,profile:CodexProfile) {
   input={...input,signal:AbortSignal.any([input.signal,AbortSignal.timeout(170_000)])};
+  if (profile.proxyTransport) {
+    if (profile.subscription) throw new Error("Proxy and subscription transports cannot be combined");
+    const transport = await profile.proxyTransport(input.signal);
+    try {
+      return await executeTrustedCodex(input,{...profile,proxyTransport:undefined,
+        baseUrl:transport.baseUrl,apiKey:transport.apiKey,authorize:profile.authorize ?? (async()=>{})});
+    } finally {await transport.close();}
+  }
+  return executeTrustedCodex(input,profile);
+}
+
+async function executeTrustedCodex(input:TrustedNativeInput,profile:CodexProfile) {
   const prior=input.checkpoint===null?null:saved.parse(input.checkpoint);
   const threadId=z.uuid().parse(input.threadId),memberId=z.uuid().parse(profile.memberId),ownerDigest=hash(profile.ownerId);
   if(!isAbsolute(profile.stateDir) || !profile.model)throw new Error("Invalid trusted Codex profile");

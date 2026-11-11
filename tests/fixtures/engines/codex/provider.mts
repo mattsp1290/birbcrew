@@ -23,7 +23,9 @@ export async function startProvider(onFailure = () => {},
   dynamicNamespace?: string) {
   const toolSurfaces: z.infer<typeof providerInput>["tools"][] = [];
   const requests: InputItem[][] = [];
+  let cancelled = 0;
   const server = createServer(async (request, response) => {
+    response.once("close", () => { if (!response.writableEnded) cancelled++; });
     try {
       if (request.method !== "POST" || request.url !== "/responses") {
         response.writeHead(404).end(); return;
@@ -118,7 +120,7 @@ export async function startProvider(onFailure = () => {},
   await once(server, "listening");
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Local provider failed to bind");
-  return {url:"http://127.0.0.1:" + address.port, requests, toolSurfaces, async close() {
+  return {url:"http://127.0.0.1:" + address.port, requests, toolSurfaces, cancelled:()=>cancelled, async close() {
     const closed = once(server, "close");
     server.close(); server.closeAllConnections(); await closed;
   }};

@@ -62,6 +62,14 @@ for(const engine of ["pi","claude","codex"] as const) {
     const read=await runTrustedNativeTurn({...input,threadId:randomUUID(),runId:randomUUID(),text:engine==="claude"?"next step":"choose"},selected);assert.ok(read.text.includes("inspect"));
     const operation=randomUUID();const effect=await runTrustedNativeTurn({...input,threadId:randomUUID(),runId:operation,text:"record "+operation},selected);assert.ok(effect.text.includes("receipt-fixture"));
     assert.equal(calls.length,2);assert.deepEqual(acks,calls);
+    if (engine === "codex" && "cancelled" in provider) {
+      const stopped = new AbortController(), before = provider.cancelled();
+      await assert.rejects(runTrustedNativeTurn({...input,threadId:randomUUID(),runId:randomUUID(),text:"wait",
+        signal:stopped.signal,onText:()=>stopped.abort()},selected));
+      assert.equal(stopped.signal.aborted,true,"must observe a native stream before cancellation");
+      for (let i=0;i<250 && provider.cancelled()===before;i++) await new Promise(r=>setTimeout(r,20));
+      assert.ok(provider.cancelled()>before,"turn cancellation must close its upstream stream");
+    }
     if(engine==="pi" && "catalogs" in provider)for(const names of provider.catalogs as string[][])assert.deepEqual([...names].sort(),tools.map(t=>t.name).sort());
     if(engine==="claude")for(const names of observed)assert.deepEqual([...names].sort(),tools.map(t=>"mcp__ag_ui__"+t.name).sort());
     if(engine === "codex" && "toolSurfaces" in provider) {
