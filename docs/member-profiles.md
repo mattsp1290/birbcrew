@@ -38,7 +38,8 @@ new member to select a different model or engine.
 
    In `BIRBCREW_CODEX_ATTESTATION`, set `provider` to `chatgpt-subscription`,
    `account_id` to the signed-in ChatGPT workspace ID, `approved_sdk_use` to
-   `true`, and `model` to the approved model ID. To display just the workspace
+   `true`, and `model` to an approved model listed in the Codex CLI’s `/model` picker.
+   To display just the workspace
    ID with the repository's pinned Node and dependencies installed, run
 
    ```sh

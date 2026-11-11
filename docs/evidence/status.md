@@ -12,7 +12,11 @@ Claude passed [hosted acceptance on the Anthropic API](typescript-claude-hosted.
 
 The first hosted Codex attempt at `d32edd1` received HTTP 200 from OpenAI. Two observers saw the pending tool call with zero work items before approval. The run ended after one provider request, before verifying receipt delivery or cold recall. A controlled regression reproduced the failure when the native client finished reading a completed Responses stream before HTTP end-of-stream. After the relay repair, the same controlled test passed through receipt delivery and cold recall.
 
-Codex passed [hosted acceptance on the OpenAI API](typescript-codex-hosted.json) with `gpt-5.4` at `4b823e7`. Three of the 12 authorized requests were used. Both observers saw one approved receipt and matching history. After worker replacement the same native thread recalled the marker with only the new prompt supplied. Human authentication and permissions sign-off and the production cutover are pending. The historical live evidence below belongs to the Python implementation.
+Codex passed [hosted acceptance on the OpenAI API](typescript-codex-hosted.json) with `gpt-5.4` at `4b823e7`. Three of the 12 authorized requests were used. Both observers saw one approved receipt and matching history. After worker replacement the same native thread recalled the marker with only the new prompt supplied.
+
+The [first ChatGPT subscription attempt](typescript-codex-subscription-attempt.json) used the same API model, `gpt-5.4`. ChatGPT rejected the model with HTTP 400 on the first request. The local Codex fixture passed on the same revision, `7b55900`.
+
+Human authentication and permissions sign-off and the production cutover are pending. The historical live evidence below belongs to the Python implementation.
 
 ## Historical Python milestone
 

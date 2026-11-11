@@ -1,0 +1,23 @@
+{
+  "status": "NOT VERIFIED",
+  "stage": "provider journey or cleanup",
+  "verifiedGates": [
+    "fresh owner-authorized private account and model",
+    "attributable source and locked engine packages",
+    "selected account, worker and gateway initialized"
+  ],
+  "attemptedRequests": 1,
+  "upstreamStatus": 400,
+  "engine": "codex",
+  "auth": "chatgpt-subscription",
+  "origin": "https://chatgpt.com/backend-api/codex",
+  "model": "gpt-5.4",
+  "maxRequests": 12,
+  "classification": "model-unavailable",
+  "liveProviderVerified": false,
+  "source": {
+    "revision": "7b55900cabf85c6833bd056d9a8def18b5dc33e8",
+    "state": "clean",
+    "sourceSha256": "5f3ab0689f707a55392052621976333c0ae402fb39cc491e8be487a2671f3aec"
+  }
+}
