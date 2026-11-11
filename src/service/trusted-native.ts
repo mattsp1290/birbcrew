@@ -41,7 +41,7 @@ export async function runTrustedNativeTurn(input: TrustedNativeInput, profile: T
       let abort: (() => void) | undefined;
       let result: {text:string;isError:boolean};
       try {
-        result = await Promise.race([input.dispatch({...call,signal}),new Promise<never>((_,reject) => {
+        result = await Promise.race([input.dispatch({...call,signal}).catch(() => { throw new Error("Trusted application tool failed"); }),new Promise<never>((_,reject) => {
           abort=()=>reject(new Error("Trusted tool deadline or cancellation"));
           signal.addEventListener("abort",abort,{once:true});
           if(signal.aborted)abort();

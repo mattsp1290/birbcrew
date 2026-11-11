@@ -126,7 +126,9 @@ After a worker disappears, call `recover(key)`. A live lease makes it busy. With
 no live lease it classifies the interrupted request as uncertain, returns receipt
 operation IDs/outcomes/acknowledgement status, and holds later queued work behind
 a generation barrier. Finish that barrier and explicitly release or cancel held
-requests. Recovery never calls an effect handler.
+requests. Recovery never calls an effect handler. If its acknowledgement is lost,
+`recover(key, requestId)` reconstructs the persisted uncertain outcome and receipt
+status without advancing the generation again.
 
 `acknowledged` means the native SDK/adapter confirmed the correctly paired tool
 result. It is **not** proof of remote provider durability, user delivery or an

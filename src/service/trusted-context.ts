@@ -106,7 +106,7 @@ export class TrustedContextStore {
   private async allowed(input: Authorization) {
     // A policy service hanging must not hold a durable admission lock indefinitely.
     const timeout = AbortSignal.timeout(5_000);
-    const approved = await Promise.race([this.application.authorize(input), new Promise<boolean>((_,reject) => {
+    const approved = await Promise.race([Promise.resolve().then(() => this.application.authorize(input)).catch(() => false), new Promise<boolean>((_,reject) => {
       timeout.addEventListener("abort", () => reject(new TrustedContextError("denied")), {once:true});
     })]);
     if (approved !== true) throw new TrustedContextError("denied");
@@ -291,7 +291,7 @@ export class TrustedContextStore {
 
       } catch (error) {
         await this.pool.query(`UPDATE birbcrew_ts.trusted_tool_calls SET outcome='uncertain' WHERE conversation_id=$1 AND request_id=$2 AND native_call_id=$3 AND outcome='admitted'`,[claim.conversationId,claim.requestId,nativeCallId]);
-        throw error;
+        throw error instanceof TrustedContextError ? error : new TrustedContextError("uncertain");
       }
     }
     return this.transaction(async db => {
@@ -332,19 +332,23 @@ export class TrustedContextStore {
    * An active worker/effect lease makes this busy. Retained receipt IDs are safe to
    * reconcile with the application; no callback is invoked by recovery.
    */
-  async recover(input: TrustedKey) {
+  async recover(input: TrustedKey, requestId?: string) {
+    if (requestId !== undefined) z.uuid().parse(requestId);
     return this.transaction(async db => {
       const lease = await db.query<{ok:boolean}>("SELECT pg_try_advisory_xact_lock(hashtextextended($1,71)) AS ok",[input.conversationId]);
       if (!lease.rows[0].ok) throw new TrustedContextError("busy");
       const s = await this.session(db,input,true);
-      if (s.phase !== "active") throw new TrustedContextError("busy");
-      const {rows:[r]} = await db.query<{request_id:string}>("SELECT request_id FROM birbcrew_ts.trusted_requests WHERE conversation_id=$1 AND phase='running'",[input.conversationId]);
+      const {rows:[r]} = await db.query<{request_id:string;phase:string}>(`SELECT request_id,phase FROM birbcrew_ts.trusted_requests
+        WHERE conversation_id=$1 AND phase IN ('running','uncertain') AND ($2::uuid IS NULL OR request_id=$2)
+        ORDER BY (phase='running') DESC,position DESC LIMIT 1`,[input.conversationId,requestId ?? null]);
       if (!r) return null;
       await this.allowed(this.authority(s,"output",r.request_id));
+      if (r.phase === "running" && s.phase !== "active") throw new TrustedContextError("busy");
       await db.query("UPDATE birbcrew_ts.trusted_tool_calls SET outcome='uncertain' WHERE conversation_id=$1 AND request_id=$2 AND outcome='admitted'",[input.conversationId,r.request_id]);
       const {rows:receipts} = await db.query<{operationId:string;toolName:string;outcome:string;acknowledged:boolean}>(`SELECT operation_id AS "operationId",tool_name AS "toolName",outcome,acknowledged
         FROM birbcrew_ts.trusted_tool_calls WHERE conversation_id=$1 AND request_id=$2 ORDER BY native_call_id`,[input.conversationId,r.request_id]);
-      await db.query("UPDATE birbcrew_ts.trusted_requests SET phase='cancelled',prompt=NULL WHERE conversation_id=$1 AND request_id=$2",[input.conversationId,r.request_id]);
+      if (r.phase === "uncertain") return {requestId:r.request_id,outcome:"uncertain" as const,receipts};
+      await db.query("UPDATE birbcrew_ts.trusted_requests SET phase='uncertain',prompt=NULL WHERE conversation_id=$1 AND request_id=$2",[input.conversationId,r.request_id]);
       await db.query("UPDATE birbcrew_ts.trusted_requests SET phase='held' WHERE conversation_id=$1 AND phase='queued'",[input.conversationId]);
       await db.query("UPDATE birbcrew_ts.trusted_sessions SET generation=generation+1,phase='draining',checkpoint=NULL,native_thread_id=gen_random_uuid() WHERE conversation_id=$1",[input.conversationId]);
       return {requestId:r.request_id,outcome:"uncertain" as const,receipts};

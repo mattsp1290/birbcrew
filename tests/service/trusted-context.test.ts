@@ -326,6 +326,8 @@ if (process.argv.includes("--fixture-effect-child")) {
         assert.equal(recovery.receipts.length,1); assert.equal(recovery.receipts[0].outcome,"uncertain");
         assert.equal(recovery.receipts[0].acknowledged,false);
         assert.equal(recovery.receipts[0].operationId,(await callRow(turn.claim,"crash-call")).operation_id);
+        assert.deepEqual(await fresh.recover(key,turn.claim.requestId),recovery);
+        assert.deepEqual(await fresh.result(key,turn.claim.requestId),{phase:"uncertain",reply:null});
         await store.finishRotation(key);
         assert.equal((await callRow(turn.claim,"crash-call")).outcome,"uncertain");
       } else {
@@ -428,6 +430,12 @@ if (process.argv.includes("--fixture-effect-child")) {
     await assert.rejects(store.erase(key),errorCode("conflict"));
     await store.invalidate(key,1,nextSnapshot);
     assert.deepEqual(await store.result(key,turn.claim.requestId),{phase:"completed",reply:null});
+    const locations = await store.nativeStateForDeletion(key);
+    assert.equal(locations.engine,"pi");
+    assert.equal(locations.ownerId,key.ownerId);
+    assert.deepEqual(locations.generations.map(g => g.generation),[1,2]);
+    assert.equal(locations.generations[0].threadId,turn.threadId);
+    assert.notEqual(locations.generations[1].threadId,turn.threadId);
     await store.erase(key);
     const s = (await pool.query("SELECT phase,context_text,checkpoint FROM birbcrew_ts.trusted_sessions WHERE conversation_id=$1",[key.conversationId])).rows[0];
     assert.deepEqual(s,{phase:"deleted",context_text:null,checkpoint:null});
@@ -439,4 +447,18 @@ if (process.argv.includes("--fixture-effect-child")) {
     await assert.rejects(store.result(key,turn.claim.requestId),errorCode("stale"));
     await assert.rejects(store.submit(key,randomUUID(),"cannot resurrect"),errorCode("stale"));
   });
+  test("application callback errors do not disclose credential-like diagnostics", async () => {
+    const secret = "fixture-private-credential-" + randomUUID();
+    const failed = await fixture({effect:async () => {throw new Error(secret);}});
+    const turn = await start(failed.store,failed.key);
+    await assert.rejects(failed.store.dispatch(turn.claim,"error","record_effect",{note:"ok"},noAbort()), error => {
+      assert.ok(error instanceof Error); assert.ok(!error.message.includes(secret));
+      return (error as {code?:string}).code === "uncertain";
+    });
+    const denied = new TrustedContextStore(pool,application({authorize:async () => {throw new Error(secret);}}));
+    await assert.rejects(denied.open(await newKey(),snapshot),errorCode("denied"));
+    const row = await callRow(turn.claim,"error");
+    assert.equal(row.outcome,"uncertain"); assert.equal(row.result,null);
+  });
+
 }

@@ -18,7 +18,7 @@ CREATE TABLE birbcrew_ts.trusted_requests (
  generation integer NOT NULL,
  prompt text CHECK (octet_length(prompt) <= 16384),
  prompt_digest text NOT NULL,
- phase text NOT NULL CHECK (phase IN ('queued','held','running','completed','cancelled')),
+ phase text NOT NULL CHECK (phase IN ('queued','held','running','completed','cancelled','uncertain')),
  token uuid,
  reply text CHECK (octet_length(reply) <= 65536),
  PRIMARY KEY (conversation_id,request_id), UNIQUE (conversation_id,position)
