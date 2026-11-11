@@ -1,3 +1,4 @@
+import { progressActivity } from "./progress-activity.ts";
 import { answerLive, cancelLive } from "./codex-calls.ts";
 import { fileURLToPath } from "node:url";
 import { NativeConnection, Worker } from "@temporalio/worker";
@@ -18,7 +19,7 @@ export async function runMemberWorker(store: MemberStore, address: string, profi
     const children = new ChildStore(store.pool);
     workers.push(await Worker.create({
       connection, taskQueue: memberTaskQueue,
-      activities: { recordAcceptance:store.recordAcceptance.bind(store), rejectAccepted:store.rejectAccepted.bind(store), conversationProgress:store.conversationProgress.bind(store), cancelGenerating:store.cancelGenerating.bind(store), decideLive:answerLive.bind(null,store.pool), cancelLive:cancelLive.bind(null,store.pool),
+      activities: { recordAcceptance:store.recordAcceptance.bind(store), rejectAccepted:store.rejectAccepted.bind(store), conversationProgress:progressActivity(store), cancelGenerating:store.cancelGenerating.bind(store), decideLive:answerLive.bind(null,store.pool), cancelLive:cancelLive.bind(null,store.pool),
         reconcileTurn: store.reconcileTurn.bind(store), reconcileChild:children.reconcile.bind(children),
         closeExitedChild: children.closeExitedChild.bind(children), quarantineDelegation: children.quarantineDelegation.bind(children) },
       workflowsPath: fileURLToPath(new URL("./workflow.ts", import.meta.url)),

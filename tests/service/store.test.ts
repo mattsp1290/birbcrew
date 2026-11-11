@@ -211,3 +211,17 @@ test("durable admissions preserve rejected queue outcomes without replay or iden
   const count=await pool.query("SELECT count(*)::int AS count FROM birbcrew_ts.turns WHERE conversation_id=$1",[key.conversationId]);
   assert.equal(count.rows[0].count,1);
 });
+
+test("progress activity projects only exact legacy DTOs without weakening the store schema", async () => {
+  const key=await newConversation("pi");
+  const conversation=await store.getConversation(key);
+  const {progressActivity}=await import("../../src/service/progress-activity.ts");
+  const activity=progressActivity(store);
+  await assert.rejects(store.conversationProgress(conversation),{name:"ZodError"});
+  assert.deepEqual(await activity(key),{turns:0,limit:128,terminal:false});
+  assert.deepEqual(await activity(conversation),await activity(key));
+  await assert.rejects(activity({...conversation,extra:true}),{name:"ZodError"});
+  await assert.rejects(activity({...conversation,memberId:randomUUID()}),{code:"conflict"});
+  await assert.rejects(activity({...conversation,engine:"claude"}),{code:"conflict"});
+  await assert.rejects(activity({...key,extra:true}),{name:"ZodError"});
+});

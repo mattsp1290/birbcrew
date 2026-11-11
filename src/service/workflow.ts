@@ -298,7 +298,12 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   await condition(() => (failed || cancelled || turns.size >= generationLimit || historyBoundary()) && inFlight === 0 && allHandlersFinished());
   if (failed) throw ApplicationFailure.nonRetryable("Member conversation failed");
   if (rollover && !cancelled) {
-    const progress = await conversationProgress(conversation);
+    // Keep the recorded full-record command on replay of an affected history.
+    // The activity adapter handles that exact legacy DTO while the store stays strict.
+    const progressKey = patched("narrow-progress-key-v1")
+      ? { ownerId: conversation.ownerId, conversationId: conversation.conversationId }
+      : conversation;
+    const progress = await conversationProgress(progressKey);
     // Updates/signals can arrive while the progress activity runs. Never abandon a handler,
     // pending approval, child batch or cancellation acknowledgement at the run boundary.
     await condition(() => allHandlersFinished());

@@ -1,7 +1,7 @@
+import { assertOfflineNetwork } from "./offline-network.mts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { networkInterfaces } from "node:os";
+import { mkdir, readFile, readdir, readlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, Connection } from "@temporalio/client";
@@ -17,7 +17,7 @@ import { MemberClient } from "../../src/service/client.ts";
 
 // Replay runs in a separate network namespace, without activities or a provider.
 if (process.argv[2] === "offline-replay") {
-  assert.deepEqual(networkInterfaces(), {}, "Replay must have no network interfaces");
+  await assertOfflineNetwork();
   const directory = process.argv[3];
   const manifest: {workflowId:string;file:string}[] = JSON.parse(await readFile(join(directory,"manifest.json"),"utf8"));
   assert.ok(manifest.length >= 9, "Capture at least three generations for each engine");
@@ -114,7 +114,7 @@ if (process.argv[2] === "offline-replay") {
         await fixtures.close();
         // No credential environment, no connected database or Temporal client in the child.
         const replay=await run("unshare",["--user","--net",process.execPath,"tests/proof/rollover.mts","offline-replay",historyDir],
-          {env:{PATH:process.env.PATH,HOME:s.directory},timeout:180_000,maxBuffer:4*1024*1024});
+          {env:{PATH:process.env.PATH,HOME:s.directory,BIRBCREW_REPLAY_PARENT_NETNS:await readlink("/proc/self/ns/net")},timeout:180_000,maxBuffer:4*1024*1024});
         console.log(replay.stdout.trim());
         // Protected calls at the fourth-turn boundary must be drained, not moved or abandoned.
         stop = await s.worker();
@@ -183,5 +183,20 @@ if (process.argv[2] === "offline-replay") {
         console.log("Approval/cancellation boundary and durable accepted-successor rejection passed for all engines; no duplicate effects.");
       } finally { await pool.end(); await connection.close(); await temporalStop(); }
     } finally { await fixtures.close(); }
+  } catch (error) {
+    // The harness uses synthetic credentials only. Preserve bounded, redacted logs
+    // before disposable services are removed so CI failures remain diagnosable.
+    const output = join(process.cwd(), ".proof", "rollover-failure");
+    await mkdir(output, {recursive:true});
+    for (const name of await readdir(s.directory)) {
+      if (!name.endsWith(".log")) continue;
+      const raw = (await readFile(join(s.directory,name),"utf8")).slice(-128*1024);
+      const safe = raw.replace(/Bearer\s+[^\s"',}]+/gi,"Bearer [REDACTED]")
+        .replace(/(authorization["']?\s*[:=]\s*)[^\r\n]+/gi,"$1[REDACTED]");
+      await writeFile(join(output,name),safe,{mode:0o600});
+      console.error(`${name} (last40 lines):\n${safe.split("\n").slice(-40).join("\n")}`);
+    }
+    console.error(`Rollover failed; bounded diagnostic logs retained in ${output}`);
+    throw error;
   } finally { await s.close(); }
 }
