@@ -1,8 +1,12 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
+case "${1:-}" in
+  "") uv sync --locked ;;
+  --mode) if [ "${2:-}" != fixture ] || [ "$#" -ne 2 ]; then echo 'Use scripts/setup [--mode fixture]' >&2; exit 2; fi ;;
+  *) echo 'Use scripts/setup [--mode fixture]' >&2; exit 2 ;;
+esac
 scripts/build-native
-uv sync --locked
 mkdir -p .proof/bin
 case "$(uname -m)" in
   aarch64|arm64) arch=arm64 ;;
@@ -32,3 +36,5 @@ fi
 .proof/bin/node --version
 docker run --rm --user "$(id -u):$(id -g)" -e npm_config_cache=/tmp/npm-cache \
   -v "$PWD/clients:/work" -w /work "$node" npm ci --ignore-scripts --no-audit --no-fund
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e npm_config_cache=/tmp/npm-cache \
+  -v "$PWD:/work" -w /work "$node" npm ci --include=dev --no-audit --no-fund

@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
-scripts/build-native
-node --test tests/fixtures/engines/codex/native.test.ts
-exec python3 tests/proof/durable-members.py
+if [ -x .proof/bin/node ]; then
+  PATH="$PWD/.proof/bin:$PATH"
+  export PATH
+fi
+exec node tests/proof/verify-members.mts "$@"

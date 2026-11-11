@@ -144,7 +144,7 @@ test("supervisors deduplicate concurrent launches and confirm remote stops", { t
   assert.equal(status.stopped, true);
 });
 
-test("a replacement recovers Claude's stopped native deferral without a second generation", { timeout: 100_000 }, async (t) => {
+test("claude recovers a stopped native deferral without a second generation", { timeout: 100_000 }, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "birb-stopped-proposal-"));
   const requests = join(dir, "requests.jsonl"), marker = join(dir, "lost"), config = join(dir, "profile.mjs");
   const profile = "recover-" + randomUUID();

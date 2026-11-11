@@ -9,8 +9,12 @@ are pinned. The JavaScript lockfile pins the AG-UI clients.
 2. Run `scripts/verify`.
 3. Read `report.json` in the printed temporary evidence directory.
 
-The command runs lint and focused boundary checks before the real-service
-journey. All listeners bind to loopback. Each run uses a fresh PostgreSQL
+With no arguments, the command runs the Python checks and journey followed by the
+TypeScript member fixtures. Use `scripts/verify --mode test` for the original
+Python proof alone or `scripts/verify --mode fixture` for the TypeScript suite.
+To select one member SDK, add `--engine pi` or `--engine claude` to the fixture
+command. Each selected run checks the adapter archive, exercises a member across
+a cold restart, and verifies the provider calls and stored member identities. All listeners bind to loopback. Each run uses a fresh PostgreSQL
 container, Temporal development database, credentials, and Beans hub. The
 verifier removes its container and stops its processes. Evidence and disposable
 fixture files remain in the printed temporary directory for inspection. They
@@ -20,7 +24,16 @@ Python runs in isolated mode to prevent the host's automatic Datadog injection
 from changing workflow behavior. The proof records OpenTelemetry locally.
 Local capture does not verify Datadog installation or delivery.
 
-## Run the subscription journey
+## Check a live member account
+
+`scripts/verify --engine pi --mode live --attestation /absolute/private/account.json`
+validates the selected engine's local account evidence and credential configuration.
+Use `--engine claude` for Claude. The live member acceptance journey is still
+unimplemented. Even a successful account preflight exits nonzero and sends no
+model request. See the [account and profile guide](member-profiles.md) for the
+supported worker configuration.
+
+## Run the Python subscription journey
 
 Before model calls, verify that the chosen account is an eligible OpenCode Go
 subscription and that Extra Usage is disabled. If it is enabled or unknown, stop

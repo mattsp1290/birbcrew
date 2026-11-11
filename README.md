@@ -31,16 +31,21 @@ uses Temporal to order turns and PostgreSQL to store the member, each
 conversation's native checkpoint, and its committed replies. Claude and Codex also need
 the same private state directory when a worker is replaced.
 
-Run `npm ci` and `npm run test:integration` on Linux with Node 22.23.3, Docker,
-Python 3, Beans (`bn`), Git, and Temporal CLI 1.10.0. Claude requires Linux
-Landlock ABI 3 or newer. The native Codex driver requires ABI 4. Build the
-shared launcher with `scripts/build-native` using a C11 compiler and Linux
-development headers. Setup and integration verification build it automatically. Set `TEMPORAL_CLI` if the executable is outside PATH
-and `.proof/bin`. This command starts disposable services and uses
-local scripted model providers. To use an approved account, follow the
-[live profile guide](docs/member-profiles.md). The verifier replaces the worker, PostgreSQL
-process, and Temporal server before asking both SDKs to recall earlier turns.
-It also kills a worker during two model requests and checks the recorded outcomes.
+Run `scripts/setup` to install the locked dependencies and pinned Node and
+Temporal binaries. On Linux with Docker and Python 3, verify either SDK independently:
+
+```sh
+scripts/verify --engine pi --mode fixture
+scripts/verify --engine claude --mode fixture
+```
+
+Each command spawns members of the selected engine, runs the native SDK against
+a local scripted provider, and drives the HTTP gateway with AG-UI clients.
+It checks protected decisions, cold restart, and interrupted native work.
+Claude requires Linux Landlock ABI 3 or newer. Use `scripts/verify --mode fixture`
+for both engines and the shared member tests. `npm run test:integration` runs
+that same suite. See the [live profile guide](docs/member-profiles.md) to run
+a worker with an approved account.
 
 For an existing local installation, set `BIRBCREW_DATABASE_URL` to a dedicated
 PostgreSQL database, `BIRBCREW_TEMPORAL_ADDRESS` to the Temporal endpoint,
