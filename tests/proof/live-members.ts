@@ -68,7 +68,7 @@ async function journey(account: LiveAccount, services: Services, signal: AbortSi
   verified("one approved work item and its provider-returned receipt");
   const history = await reader.messages();
   await services.replaceWorker();
-  verified("worker container replaced with fresh writable home and scratch");
+  verified("worker container and its /tmp replaced, declared native volume retained");
   const followup = "Reply with the exact test marker I asked you to remember. Use the earlier conversation and do not call a tool.";
   await post(path + "/inputs", { requestId: randomUUID(), text: followup });
   const [recall] = await Promise.all([completed(path, reader, nonce), completed(path, second, nonce)]);
@@ -121,17 +121,16 @@ async function journey(account: LiveAccount, services: Services, signal: AbortSi
     ...(account.engine === "pi" && { delegatedChild: true, returnedModelVerified: true }) };
 }
 
-export async function verifyLive(account: LiveAccount, signal: AbortSignal, controlledTransport?: typeof fetch, verified: (gate: string) => void = () => {}) {
+export async function verifyLive(account: LiveAccount, signal: AbortSignal, controlledTransport?: typeof fetch, verified: (gate: string) => void = () => {}, onAttempt: (count: number) => void = () => {}) {
   const cleanup: (() => Promise<unknown>)[] = [];
   const source = await sourceFingerprint();
   if (!controlledTransport && !attributable(source)) throw new Error("An approved provider run requires attributable source");
   const packages = await lockedPackages([account.engine]);
   if (!controlledTransport) verified("attributable source and locked engine packages");
   let result;
+  const relay = await openRelay(account, signal, controlledTransport, onAttempt);
   try {
-    const relay = await openRelay(account, controlledTransport);
-    cleanup.push(() => relay.close());
-    const services = await proofInfrastructure(account, relay.url, signal, cleanup);
+    const services = await proofInfrastructure(account, relay, signal, cleanup);
     verified("selected account, worker and gateway initialized");
     const outcome = await journey(account, services, signal, () => relay.stats().sessions, verified);
     const stats = relay.stats();
@@ -143,7 +142,7 @@ export async function verifyLive(account: LiveAccount, signal: AbortSignal, cont
       workerContainerReplaced: true, ...outcome };
   } finally {
     let failed = false;
-    for (const close of cleanup.reverse()) { try { await close(); } catch { failed = true; } }
+    for (const close of [() => relay.close(), ...cleanup.reverse()]) { try { await close(); } catch { failed = true; } }
     if (failed) throw new Error("Disposable resource cleanup failed");
   }
   verified("disposable services, private client outputs and native volume cleaned up");
@@ -159,16 +158,16 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   process.once("SIGINT", () => controller.abort());
   process.once("SIGTERM", () => controller.abort());
   const verifiedGates: string[] = [];
-  let stage = "account preflight";
+  let stage = "account preflight", attemptedRequests = 0;
   try {
     const account = await authorizeLive(process.argv.slice(2), process.env);
     verifiedGates.push("fresh owner-authorized private account and model");
     stage = "provider journey or cleanup";
     const report = await verifyLive(account, AbortSignal.any([controller.signal, AbortSignal.timeout(10 * 60_000)]), undefined,
-      (gate) => verifiedGates.push(gate));
+      (gate) => verifiedGates.push(gate), (count) => { attemptedRequests = count; });
     console.log(JSON.stringify({ ...report, verifiedGates }));
   } catch {
-    console.error(JSON.stringify({ status: "NOT VERIFIED", stage, verifiedGates }));
+    console.error(JSON.stringify({ status: "NOT VERIFIED", stage, verifiedGates, attemptedRequests }));
     process.exitCode = 1;
   }
 }

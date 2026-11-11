@@ -22,12 +22,12 @@ for (const engine of ["claude", "codex"] as const) {
     const claude = engine === "claude";
     const endpoint = claude ? "https://api.anthropic.com" : "https://api.openai.com/v1";
     const model = claude ? "claude-sonnet-4-6" : "gpt-5.4";
-    await writeFile(path, JSON.stringify({ provider: claude ? "anthropic-api" : "openai-api", account_path: "controlled",
+    await writeFile(path, JSON.stringify({ approval_id: randomUUID(), provider: claude ? "anthropic-api" : "openai-api", account_path: "controlled",
       checked_at: new Date().toISOString(), evidence: "offline rehearsal", approved_live_proof: true, max_requests: 12,
       approved_sdk_use: true, endpoint, model }), { mode: 0o600 });
     const args = ["--engine", engine, "--attestation", path];
     await assert.rejects(authorizeLive(args, { OPENAI_API_KEY: "ambient", ANTHROPIC_API_KEY: "ambient" }));
-    const account = await authorizeLive(args, { [accountKey[engine]]: "synthetic" });
+    const account = await authorizeLive(args, { [accountKey[engine]]: "synthetic" }, join(dir, "claims"));
     let toolResults = 0;
     const transport: typeof fetch = async (input, init) => {
       const request = new Request(input, init);

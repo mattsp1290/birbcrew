@@ -8,7 +8,9 @@ const relay = new URL(process.env.BIRBCREW_LIVE_RELAY!);
 if (relay.protocol !== "http:" || relay.hostname !== "127.0.0.1" || !relay.port || !/^\/[a-f0-9]{64}$/.test(relay.pathname)) {
   throw new Error("Invalid proof relay");
 }
-const selected = { [attestationEnv[engine]]: "/run/birb-account.json", [accountKey[engine]]: "proof-relay" };
+const workerKey = process.env.BIRBCREW_LIVE_TOKEN;
+if (!workerKey || !/^[a-f0-9]{64}$/.test(workerKey)) throw new Error("Missing private proof relay credential");
+const selected = { [attestationEnv[engine]]: "/run/birb-account.json", [accountKey[engine]]: workerKey };
 export const profiles = await loadLiveProfiles(selected, async (input, init) => {
   const url = input.toString();
   if (![goEndpoint + "/models", goEndpoint + "/chat/completions"].includes(url)) throw new Error("Unexpected Go route");

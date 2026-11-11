@@ -84,7 +84,10 @@ export async function runCodexTurn(input: CodexInput, profile: CodexProfile): Pr
   const ownerDigest = hash(profile.ownerId);
   if (!isAbsolute(profile.stateDir) || !profile.model || !input.text || Buffer.byteLength(input.text) > 16_384) throw new Error("Invalid Codex member input");
   const provider = profile.baseUrl ? loopback(profile.baseUrl) : undefined;
-  if (!provider && (!profile.apiKey || !profile.authorize)) throw new Error("Approved Codex account required");
+  const approved = profile.apiKey !== undefined || profile.authorize !== undefined;
+  if ((approved && (!profile.apiKey || !profile.authorize)) || (!approved && !provider)) {
+    throw new Error("Approved Codex account required");
+  }
   const endpoint = input.mcp && loopback(input.mcp.url);
   if (input.mcp && (!input.mcp.token || !["record_work_item", "choose_next_step"].includes(input.mcp.tool))) throw new Error("Invalid Codex tool binding");
   const prior = input.checkpoint === null ? null : checkpointSchema.parse(input.checkpoint).state;
@@ -123,9 +126,9 @@ export async function runCodexTurn(input: CodexInput, profile: CodexProfile): Pr
       BIRBCREW_NATIVE_PROVIDER_PORT: provider?.port ?? "443",
       ...(input.mcp && endpoint && { BIRBCREW_NATIVE_MCP_PORT: endpoint.port, BIRBCREW_MCP_AUTH: input.mcp.token }),
     },
-    ...(!provider && { apiKey: profile.apiKey, baseUrl: "https://api.openai.com/v1" }),
+    ...(approved && { apiKey: profile.apiKey, baseUrl: provider?.href ?? "https://api.openai.com/v1" }),
     config: {
-      ...(provider && { model_provider: "fixture", model_providers: { fixture: { name: "BirbCrew local fixture",
+      ...(!approved && provider && { model_provider: "fixture", model_providers: { fixture: { name: "BirbCrew local fixture",
         base_url: provider.href.replace(/\/$/, ""), wire_api: "responses", requires_openai_auth: false,
         supports_websockets: false, request_max_retries: 0, stream_max_retries: 0 } } }),
       features: { plugins: false, apps: false, shell_tool: false, unified_exec: false, shell_snapshot: false, multi_agent: false, multi_agent_v2: false, code_mode: false, goals: false, image_generation: false },

@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import type { Message } from "@ag-ui/core";
 import { Pool } from "pg";
+import type { openRelay } from "./live-relay.ts";
 import type { LiveAccount } from "./live-account.ts";
 
 const run = promisify(execFile);
@@ -26,7 +27,7 @@ export async function until<T>(check: () => Promise<T | undefined>, signal: Abor
   }
 }
 
-export async function proofInfrastructure(account: LiveAccount, relay: string, signal: AbortSignal, cleanup: (() => Promise<unknown>)[]) {
+export async function proofInfrastructure(account: LiveAccount, relay: Awaited<ReturnType<typeof openRelay>>, signal: AbortSignal, cleanup: (() => Promise<unknown>)[]) {
   if (process.version !== "v22.23.3") throw new Error("Use pinned Node 22.23.3");
   const temp = await mkdtemp(join(tmpdir(), "birb-live-"));
   cleanup.push(() => rm(temp, { recursive: true, force: true }));
@@ -121,7 +122,7 @@ export async function proofInfrastructure(account: LiveAccount, relay: string, s
   const stop = async () => { if (running) { await docker(["rm", "-f", worker]); running = false; } };
   cleanup.push(stop);
   const start = async () => {
-    const env = { ...durable, DD_INJECTION_ENABLED: "false", DD_TRACE_ENABLED: "false", DD_INSTRUMENTATION_TELEMETRY_ENABLED: "false", BIRBCREW_STATE_DIR: "/state", BIRBCREW_LIVE_ENGINE: account.engine, BIRBCREW_LIVE_RELAY: relay };
+    const env = { ...durable, DD_INJECTION_ENABLED: "false", DD_TRACE_ENABLED: "false", DD_INSTRUMENTATION_TELEMETRY_ENABLED: "false", BIRBCREW_STATE_DIR: "/state", BIRBCREW_LIVE_ENGINE: account.engine, BIRBCREW_LIVE_RELAY: relay.url, BIRBCREW_LIVE_TOKEN: relay.workerKey };
     const id = await docker(["run", "-d", "--name", worker, "--log-driver", "none", "--network", "host", "--read-only", "--init",
       "--user", uid, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
       "--tmpfs", "/tmp:rw,exec,nosuid,nodev,mode=1777", "-e", "HOME=/tmp", "-w", "/app",
