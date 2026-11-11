@@ -1,6 +1,6 @@
 # Approved documentation delivery pilot
 
-Birbforge owns approval and the delivery workflow. Birbcrew runs three versioned Temporal activities on the subscription-authenticated executor host. The activities author an approved documentation change, obtain an independent Claude review, and publish the reviewed commit as a draft GitHub PR. They do not merge or deploy it.
+Birbforge owns approval and the delivery workflow. Crew runs three versioned Temporal activities on the subscription-authenticated executor host. The activities author an approved documentation change, obtain an independent Claude review, and publish the reviewed commit as a draft GitHub PR. They do not merge or deploy it.
 
 The public contract is generated from `execution/contract.py` into `contracts/execution.v1/schema.json`. Approval binds an immutable goal record, its content digest, repository, base commit, installed policy revision, exact documentation paths and trusted acceptance identifier. Birbforge computes the offer digest and clients echo it. Digests use UTF-8 JSON with sorted object keys, no insignificant whitespace and unescaped Unicode. Contract offers contain no floating-point values. The installation selects one record from a dedicated Beans hub; it must not read the owner's default hub or reuse `FixtureHub` as a live adapter.
 

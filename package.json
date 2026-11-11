@@ -1,5 +1,5 @@
 {
-  "name": "birbcrew",
+  "name": "crew",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -57,5 +57,14 @@
     "@types/node": "22.20.5",
     "@types/pg": "8.23.1",
     "typescript": "5.9.3"
+  },
+  "description": "Durable Claude, Codex and Pi coding coworkers",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mattsp1290/crew.git"
+  },
+  "homepage": "https://github.com/mattsp1290/crew#readme",
+  "bugs": {
+    "url": "https://github.com/mattsp1290/crew/issues"
   }
 }

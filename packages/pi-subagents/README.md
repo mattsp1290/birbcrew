@@ -1,6 +1,6 @@
-# BirbCrew Pi subagents
+# Crew Pi subagents
 
-The BirbCrew worker creates one `createDelegationBatch({ model, allowRecordWorkItem })` per parent model segment. Pass its `extension` to the Pi resource loader and add `delegate_task` to the parent tool allowlist. A child session omits this factory. The standalone Pi entry rejects calls that lack a BirbCrew host.
+The Crew worker creates one `createDelegationBatch({ model, allowRecordWorkItem })` per parent model segment. Pass its `extension` to the Pi resource loader and add `delegate_task` to the parent tool allowlist. A child session omits this factory. The standalone Pi entry rejects calls that lack a Crew host.
 
 On SDK settlement, pass the assistant's complete ordered tool-call batch and its native tool-result messages to `confirm`. Commit the returned proposals and pinned child profiles with the native assistant checkpoint. Each task can contain up to 4096 UTF-8 bytes. Analysts have no tools. Recorders require the parent's protected work-item capability. A segment accepts at most two distinct sibling calls.
 

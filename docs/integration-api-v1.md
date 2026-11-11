@@ -43,7 +43,7 @@ A consumer with owner-scoped event identities must durably record their mapping 
 **both** conversation and request UUID before sending. Use a deterministic UUID
 scheme scoped to that application/owner, or generate UUIDs once inside the consumer's
 inbound-event/outbox transaction. Retrying the same event in a different conversation
-is a different request and can execute twice. Birbcrew does not deduplicate across
+is a different request and can execute twice. Crew does not deduplicate across
 conversations or databases.
 
 ## Acceptance, lookup, and failures
@@ -61,7 +61,7 @@ A successful submit returns `202` with a receipt:
 ```
 
 The successful boundary means the admission identity/payload digest is committed in
-Birbcrew PostgreSQL and the Temporal workflow owns the queued work. It does **not**
+Crew PostgreSQL and the Temporal workflow owns the queued work. It does **not**
 mean native execution started or completed, a tool effect happened, or the consumer
 recorded the reply. A request can complete before the submit response arrives; its
 receipt then already contains `status: "completed"` and `result: { "text": "..." }`.
