@@ -64,7 +64,12 @@ export async function openRelay(account: LiveAccount, signal: AbortSignal, trans
         redirect: "error", signal: AbortSignal.any([active, AbortSignal.timeout(120_000)]) });
       if (!upstream.ok || !upstream.body) throw new Error("provider");
       res.writeHead(upstream.status, { "Content-Type": upstream.headers.get("content-type") ?? "application/json" });
-      await pipeline(Readable.fromWeb(upstream.body as import("node:stream/web").ReadableStream<Uint8Array>), res);
+      try {
+        await pipeline(Readable.fromWeb(upstream.body as import("node:stream/web").ReadableStream<Uint8Array>), res);
+      } catch (error) {
+        // The native Responses client closes its reader as soon as it receives response.completed.
+        if (account.engine !== "codex" || !res.destroyed || (error as NodeJS.ErrnoException).code !== "ERR_STREAM_PREMATURE_CLOSE") throw error;
+      }
     } catch {
       rejected = true;
       if (res.headersSent) res.destroy();

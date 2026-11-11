@@ -10,9 +10,13 @@ import { verifyLive } from "./live-members.ts";
 
 const entries = z.array(z.looseObject({ role: z.string().optional(), content: z.unknown().optional(),
   type: z.string().optional(), output: z.unknown().optional() }));
-function stream(frames: [string, object][]) {
-  return new Response(frames.map(([type, data]) => "event: " + type + "\ndata: " + JSON.stringify({ type, ...data }) + "\n\n").join(""),
-    { headers: { "content-type": "text/event-stream" } });
+function stream(frames: [string, object][], onReaderClosed?: () => void) {
+  const data = frames.map(([type, event]) => "event: " + type + "\ndata: " + JSON.stringify({ type, ...event }) + "\n\n").join("");
+  const body = onReaderClosed ? new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new TextEncoder().encode(data)); },
+    cancel: onReaderClosed,
+  }) : data;
+  return new Response(body, { headers: { "content-type": "text/event-stream" } });
 }
 for (const engine of ["claude", "codex"] as const) {
   test("controlled " + engine + " upstream receives a native tool result and cold follow-up from the live proof entry", { timeout: 170_000 }, async (t) => {
@@ -29,6 +33,7 @@ for (const engine of ["claude", "codex"] as const) {
     await assert.rejects(authorizeLive(args, { OPENAI_API_KEY: "ambient", ANTHROPIC_API_KEY: "ambient" }));
     const account = await authorizeLive(args, { [accountKey[engine]]: "synthetic" }, join(dir, "claims"));
     let toolResults = 0;
+    let proposalReaderClosed = false;
     const transport: typeof fetch = async (input, init) => {
       const request = new Request(input, init);
       const url = new URL(request.url);
@@ -61,12 +66,15 @@ for (const engine of ["claude", "codex"] as const) {
       return stream([["response.created", { response: { id } }], ["response.output_item.done", { item: answer ?
         { type: "message", id: "msg_" + randomUUID(), role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: answer }] } :
         { type: "function_call", call_id: "call_" + operation, namespace: "mcp__birbcrew", name: "record_work_item", arguments: JSON.stringify(args) } }],
-        ["response.completed", { response: { id, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } }]]);
+        ["response.completed", { response: { id, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } }]], answer ? undefined : () => { proposalReaderClosed = true; });
     };
     const report = await verifyLive(account, AbortSignal.timeout(115_000), transport);
     assert.equal(toolResults, 1);
     assert.equal(report.liveProviderVerified, false);
     assert.equal(report.cleanup, "verified");
-    if (!claude) assert.equal(report.nativeUserTurnsVerified, 2);
+    if (!claude) {
+      assert.equal(proposalReaderClosed, true);
+      assert.equal(report.nativeUserTurnsVerified, 2);
+    }
   });
 }

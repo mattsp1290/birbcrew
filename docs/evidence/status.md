@@ -8,7 +8,9 @@ Independent implementation review covered `9fd67ce73ada5274e5e9560ad3aafe0c8e6d3
 
 Pi passed [hosted acceptance on OpenCode Go](typescript-pi-hosted.json) with `glm-5.3-flash` at `a5e9007`. Two independent observers verified one approved work item and its receipt, cold recall after worker replacement, and a separate Pi child session. The run used 12 provider requests.
 
-Claude passed [hosted acceptance on the Anthropic API](typescript-claude-hosted.json) with `claude-sonnet-4-6` at `505212b`. Both observers saw the pending call before the write and recovered matching histories after cold recall. All three provider requests succeeded. Hosted Codex acceptance remains pending. Human authentication and permissions sign-off and the production cutover are pending. The historical live evidence below belongs to the Python implementation.
+Claude passed [hosted acceptance on the Anthropic API](typescript-claude-hosted.json) with `claude-sonnet-4-6` at `505212b`. Both observers saw the pending call before the write and recovered matching histories after cold recall. All three provider requests succeeded.
+
+The first hosted Codex attempt at `d32edd1` received HTTP 200 from OpenAI. Two observers saw the pending tool call with zero work items before approval. The run ended after one provider request, before verifying receipt delivery or cold recall. A controlled regression reproduced the failure when the native client finished reading a completed Responses stream before HTTP end-of-stream. After the relay repair, the same controlled test passed through receipt delivery and cold recall. Hosted Codex acceptance remains pending. Human authentication and permissions sign-off and the production cutover are pending. The historical live evidence below belongs to the Python implementation.
 
 ## Historical Python milestone
 
