@@ -57,6 +57,29 @@ export class MemberClient {
     return conversation;
   }
 
+  async requestStatus(input: unknown) {
+    const key=turnKey.parse(input);
+    const conversation=await this.store.getConversation({ownerId:key.ownerId,conversationId:key.conversationId});
+    let status=await this.store.requestStatus(key);
+    if(status.phase!=="accepted")return status;
+    // Observation only: do not start a workflow or repeat an update to repair status.
+    const workflowId=`birbcrew-ts/member/${conversation.memberId}/conversation/${conversation.conversationId}`;
+    const execution=await this.temporal.connection.withDeadline(Date.now()+10_000,
+      ()=>this.temporal.workflow.getHandle(workflowId).describe());
+    if(["COMPLETED","FAILED","CANCELLED","CANCELED","TERMINATED","TIMED_OUT"].includes(execution.status.name)) {
+      await this.store.rejectUnstartedAdmission(key);
+      status=await this.store.requestStatus(key);
+    }
+    return status;
+  }
+
+  private async reconcileAcceptance(request: ReturnType<typeof submitSchema.parse>) {
+    if((await this.store.requestAdmission(request))?.phase!=="accepted")return;
+    const {ownerId,conversationId,requestId}=request;
+    const status=await this.requestStatus({ownerId,conversationId,requestId});
+    if(status.phase==="rejected")throw new MemberStoreError("request_rejected");
+  }
+
   async pending(input: unknown) {
     const key = conversationKey.parse(input);
     const { memberId } = await this.store.getConversation(key);
@@ -94,6 +117,7 @@ export class MemberClient {
   async accept(input: unknown) {
     const request = submitSchema.parse(input);
     const conversation = await this.store.getConversation({ ownerId: request.ownerId, conversationId: request.conversationId });
+    await this.reconcileAcceptance(request);
     if (await this.store.committedReply(request) === undefined) {
       try {
         await this.throughRollover(conversation, handle => handle.executeUpdate<string, [typeof request]>("acceptTurn", { args: [request] }));
@@ -108,6 +132,7 @@ export class MemberClient {
   async submit(input: unknown): Promise<string> {
     const request = submitSchema.parse(input);
     const conversation = await this.store.getConversation({ ownerId: request.ownerId, conversationId: request.conversationId });
+    await this.reconcileAcceptance(request);
     const reply = await this.store.committedReply(request);
     if (reply !== undefined) return reply;
     try {

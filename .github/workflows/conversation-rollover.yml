@@ -30,6 +30,12 @@ jobs:
           (cd .proof/bin && grep " $archive$" checksums.txt | sha256sum -c -)
           tar -xzf ".proof/bin/$archive" -C .proof/bin temporal
       - run: node --test tests/service/native-limits.test.ts tests/service/rollover-client.test.ts
+      - run: node tests/proof/progress-compatibility.mts
+        env:
+          TEMPORAL_CLI: ${{ github.workspace }}/.proof/bin/temporal
+      - run: node tests/proof/admission-compatibility.mts
+        env:
+          TEMPORAL_CLI: ${{ github.workspace }}/.proof/bin/temporal
       - run: npm run test:rollover
         env:
           TEMPORAL_CLI: ${{ github.workspace }}/.proof/bin/temporal

@@ -74,7 +74,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"]] as const;
+      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -179,6 +179,22 @@ export class MemberStore {
         AND NOT EXISTS(SELECT 1 FROM birbcrew_ts.turns t WHERE t.conversation_id=a.conversation_id AND t.request_id=a.request_id)`,
         [key.conversationId,key.requestId,createHash("sha256").update(key.text).digest(),reason]);
       if(!result.rowCount)throw new MemberStoreError("conflict");
+    });
+  }
+
+  // Caller must have either an admission activity failure (with original text)
+  // or a confirmed terminal logical workflow. Never infer this from a timeout.
+  async rejectUnstartedAdmission(input: z.input<typeof submitSchema> | {ownerId:string;conversationId:string;requestId:string}): Promise<void> {
+    const parsed=submitSchema.safeParse(input);
+    const key=parsed.success?parsed.data:claimSchema.omit({token:true}).parse(input);
+    const digest=parsed.success?createHash("sha256").update(parsed.data.text).digest():null;
+    await this.transaction(async db=>{
+      await conversationFor(db,key,true);
+      await db.query(`UPDATE birbcrew_ts.request_admissions a SET phase='rejected',reason='admission_unconfirmed'
+        WHERE conversation_id=$1 AND request_id=$2 AND phase='accepted'
+        AND ($3::bytea IS NULL OR prompt_digest=$3)
+        AND NOT EXISTS(SELECT 1 FROM birbcrew_ts.turns t WHERE t.conversation_id=a.conversation_id AND t.request_id=a.request_id)`,
+        [key.conversationId,key.requestId,digest]);
     });
   }
 

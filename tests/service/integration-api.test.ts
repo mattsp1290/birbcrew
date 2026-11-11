@@ -4,7 +4,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { after, before, test } from "node:test";
 import { Pool } from "pg";
-import type { MemberClient } from "../../src/service/client.ts";
+import type { Client } from "@temporalio/client";
+import { MemberClient } from "../../src/service/client.ts";
+import { ApprovalStore } from "../../src/service/approvals.ts";
 import { MemberStore } from "../../src/service/store.ts";
 import { createGateway } from "../../src/service/gateway.ts";
 import { IntegrationApi } from "../../src/service/integration-api.ts";
@@ -59,6 +61,7 @@ async function fixture(automaticallyComplete = false) {
       if (automaticallyComplete) await finish(input);
       return { requestId: input.requestId };
     },
+    async requestStatus(input: Parameters<MemberStore["requestStatus"]>[0]) { return store.requestStatus(input); },
     async cancelPending() { cancels++; },
   } as unknown as MemberClient;
   const auth = { [createHash("sha256").update(token).digest("hex")]: ownerId,
@@ -226,7 +229,7 @@ test("ambiguous cancellation delivery retries the original durable intent", asyn
   const input = { ownerId: f.ownerId, conversationId: f.conversationId, requestId: randomUUID(), text: "retry intent" };
   await store.recordAcceptance(input);
   let deliveries = 0;
-  const api = new IntegrationApi(store, { accept: f.members.accept.bind(f.members), async cancelPending() {
+  const api = new IntegrationApi(store, { accept: f.members.accept.bind(f.members), requestStatus: f.members.requestStatus.bind(f.members), async cancelPending() {
     if (++deliveries === 1) throw new Error("ambiguous transport failure");
   } });
   const key = { ownerId: input.ownerId, conversationId: input.conversationId, requestId: input.requestId };
@@ -245,7 +248,7 @@ test("failing older cancellation intents cannot starve a later healthy request",
   const ids = Array.from({ length: 65 }, () => randomUUID());
   const healthy = ids[64];
   let delivered = false;
-  const api = new IntegrationApi(store, { accept: f.members.accept.bind(f.members), async cancelPending(input, deadline) {
+  const api = new IntegrationApi(store, { accept: f.members.accept.bind(f.members), requestStatus: f.members.requestStatus.bind(f.members), async cancelPending(input, deadline) {
     assert.equal(typeof deadline, "number");
     assert.ok(deadline! > Date.now() && deadline! <= Date.now() + 10_000, "delivery gets a bounded actual RPC deadline");
     const { requestId } = input as { requestId: string };
@@ -318,4 +321,60 @@ test("legacy committed turn without an admission retains result and cancellation
   assert.equal(repeated.cancellation.receiptId, receipt.cancellation.receiptId);
   await new IntegrationApi(store, f.members).flushCancellations();
   assert.deepEqual(f.counts(), before, "legacy result and cancellation reconciliation cannot execute work");
+});
+
+
+test("legacy requests awaiting a human decision report waiting without mutating admission", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  const requestId = randomUUID(), key = { ownerId: f.ownerId, conversationId: f.conversationId, requestId };
+  const turn = await store.beginTurn({ ...key, text: "legacy human decision" },
+    { workflowRunId: randomUUID(), activityId: "legacy-wait", attempt: 1 });
+  assert.equal(turn.kind, "start"); if (turn.kind !== "start") return;
+  const conversation = await store.getConversation({ ownerId: f.ownerId, conversationId: f.conversationId });
+  const approvals = new ApprovalStore(pool);
+  const proposal = await approvals.propose({ ...key, memberId: conversation.memberId, token: turn.token,
+    invocationId: requestId, nativeCallId: "legacy-call", toolName: "record_work_item",
+    arguments: { operation_id: requestId, note: "not exposed" } });
+  const path = `/v1/conversations/${f.conversationId}/requests/${requestId}`;
+  const counts = f.counts();
+  for (let i = 0; i < 2; i++) {
+    const response = await f.api(path); assert.equal(response.status, 200);
+    const receipt = await response.json();
+    assert.equal(receipt.status, "waiting");
+    assert.equal(JSON.stringify(receipt).includes("not exposed"), false);
+  }
+  assert.equal((await pool.query("SELECT count(*)::integer n FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2", [f.conversationId, requestId])).rows[0].n, 0);
+  assert.deepEqual(f.counts(), counts, "read-only status must not materialize or execute admissions");
+  assert.equal((await f.api(path, undefined, f.stranger)).status, 404);
+  await approvals.decide({ ...key, memberId: conversation.memberId, invocationId: requestId,
+    nativeCallId: proposal.nativeCallId, approvalId: proposal.approvalId, argumentDigest: proposal.argumentDigest,
+    version: proposal.version, choice: "deny" });
+  assert.equal((await (await f.api(path)).json()).status, "running", "resolved decision no longer waits");
+});
+
+
+test("v1 status reconciles an unstarted admission after terminal workflow without dispatch", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  const key = { ownerId: f.ownerId, conversationId: f.conversationId, requestId: randomUUID() };
+  const input = { ...key, text: "SQL commit before admission acknowledgement was lost" };
+  await store.recordAcceptance(input);
+  let describes = 0;
+  const temporal = {
+    connection: { async withDeadline(deadline: number, action: () => Promise<unknown>) {
+      assert.ok(deadline > Date.now() && deadline <= Date.now() + 10_000); return action();
+    } },
+    workflow: { getHandle() { return { async describe() { describes++; return { status: { name: "FAILED" } }; } }; } },
+  } as unknown as Client;
+  const members = new MemberClient(store, temporal);
+  const api = new IntegrationApi(store, members);
+  const receipt = await api.status(key);
+  assert.equal(receipt.status, "failed");
+  assert.equal(receipt.reason, "admission_unconfirmed");
+  assert.equal(receipt.result, undefined);
+  assert.deepEqual(await api.status(key), receipt);
+  assert.equal(describes, 1, "terminal receipt no longer requires workflow observation");
+  await assert.rejects(api.submit(input), { code: "request_rejected" });
+  await assert.rejects(api.status({ ...key, ownerId: randomUUID() }), { code: "not_found" });
+  assert.equal(describes, 1, "wrong-owner reads and terminal retries cannot dispatch");
+  assert.equal((await pool.query("SELECT count(*)::integer n FROM birbcrew_ts.turns WHERE conversation_id=$1", [key.conversationId])).rows[0].n, 0);
 });

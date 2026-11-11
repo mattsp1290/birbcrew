@@ -58,7 +58,7 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   const rollover = patched("bounded-conversations-v1");
   const generationLimit = rollover ? workflowGenerationTurnLimit : 4;
   const historyBoundary = () => rollover && historyRequiresRollover(workflowInfo());
-  const { conversationProgress, recordAcceptance, rejectAccepted } = proxyActivities<Pick<MemberStore, "conversationProgress" | "recordAcceptance" | "rejectAccepted">>({
+  const { conversationProgress, recordAcceptance, rejectAccepted, rejectUnstartedAdmission } = proxyActivities<Pick<MemberStore, "conversationProgress" | "recordAcceptance" | "rejectAccepted" | "rejectUnstartedAdmission">>({
     taskQueue: memberTaskQueue, startToCloseTimeout: "20 seconds", scheduleToCloseTimeout: "60 seconds",
   });
   const { executeTurn, decideApproval, settleApproval, cancelPending } = actions(activityQueue(conversation.engine, conversation.profile));
@@ -275,7 +275,13 @@ export async function memberConversation(conversation: Conversation): Promise<vo
     const entry = { text: request.text, durable, admission, result: undefined! as Promise<string> };
     inFlight++;
     const result = previous.then(async () => {
-      await entry.admission;
+      try { await entry.admission; }
+      catch (error) {
+        // The SQL admission may have committed even if Temporal lost every ack.
+        // Persist a no-execution outcome before closing whenever storage is available.
+        if (patched("recover-admission-ack-v1")) await rejectUnstartedAdmission(request);
+        throw error;
+      }
       if (failed || cancelled) {
         if (entry.durable) await rejectAccepted(request, cancelled ? "predecessor_cancelled" : "predecessor_failed");
         throw ApplicationFailure.nonRetryable("Accepted request did not execute because the conversation closed", "RequestRejected");
@@ -298,7 +304,12 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   await condition(() => (failed || cancelled || turns.size >= generationLimit || historyBoundary()) && inFlight === 0 && allHandlersFinished());
   if (failed) throw ApplicationFailure.nonRetryable("Member conversation failed");
   if (rollover && !cancelled) {
-    const progress = await conversationProgress(conversation);
+    // Keep the recorded full-record command on replay of an affected history.
+    // The activity adapter handles that exact legacy DTO while the store stays strict.
+    const progressKey = patched("narrow-progress-key-v1")
+      ? { ownerId: conversation.ownerId, conversationId: conversation.conversationId }
+      : conversation;
+    const progress = await conversationProgress(progressKey);
     // Updates/signals can arrive while the progress activity runs. Never abandon a handler,
     // pending approval, child batch or cancellation acknowledgement at the run boundary.
     await condition(() => allHandlersFinished());

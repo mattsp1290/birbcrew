@@ -78,7 +78,7 @@ turn failed/cancelled is discoverable through GET even though resubmission retur
 | `completed` | Original reply committed; available as `result.text` |
 | `cancellation_requested` | Intent recorded, no terminal execution conclusion yet |
 | `cancelled` | Accepted queued request rejected due to predecessor cancellation; no turn executed |
-| `failed` | Accepted queued request rejected due to predecessor failure; see `reason` |
+| `failed` | Accepted queued request rejected due to predecessor failure or unconfirmed admission in a closed workflow; see `reason` |
 | `uncertain` | Existing native execution reconciliation cannot establish a safe final result; do not replay as new work |
 
 `completed` and `uncertain` are never overwritten by a cancellation intent. A native
@@ -95,6 +95,16 @@ the cancellation fields, not an assumption that `completed` means a tool succeed
   GET the same identity, then retry the exact submission if needed. Do not infer a
   rejection from a lost acknowledgement. A validation/explicit rejected submission
   is not reported with an accepted response.
+
+If the SQL admission committed but its activity acknowledgement was lost and retries
+were exhausted, a no-turn receipt is reconciled against the logical workflow. The
+workflow's guarded cleanup or a subsequent status read records `failed` with
+`reason: "admission_unconfirmed"` when that workflow is terminal. It never starts a
+replacement workflow or replays effects. Running/continued workflows and any request
+with a begun or committed turn are not rejected by this recovery. Status reads may
+persist this terminal reconciliation, but never invoke inference. Temporal observation
+has a ten-second RPC deadline; failure returns retryable error instead of falsely
+asserting the request is still accepted.
 
 Receipts and results are retained with the database, across gateway/client restarts
 and supported Continue-As-New rollover. There is no automatic receipt TTL in v1;
