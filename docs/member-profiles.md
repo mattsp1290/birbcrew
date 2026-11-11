@@ -109,7 +109,7 @@ while waiting returns a cancelled tool result. Neither path creates a work item.
 
 ## Run the account acceptance proof
 
-After `scripts/setup`, run the following command on a supported Linux host with Docker and the pinned Node and Temporal binaries. Select one account per run. The ten-minute deadline covers service startup and the provider journey.
+After `scripts/setup --mode fixture`, run the following command on a supported Linux host with Docker and the pinned Node and Temporal binaries. Select one account per run. The ten-minute deadline covers service startup and the provider journey.
 
 ```sh
 .proof/bin/node tests/proof/live-members.ts --engine pi --attestation /absolute/private/pi-proof.json
@@ -127,4 +127,4 @@ Use a private file owned by the invoking user outside the checkout (`chmod 600`)
 
 The verifier creates a disposable database, Temporal server, authenticated gateway and worker. Two independent observation clients compare their histories with the gateway. The verifier approves one synthetic work item, checks the provider's returned receipt, replaces the worker container and asks the member to recall a random marker. Pi also delegates to a separate analyst. Codex checks the native rollout contains exactly the two submitted user messages on the same thread.
 
-A private loopback relay holds the selected key, rechecks the account file before each upstream request and enforces the model, official route and request limit. The worker presents a disposable credential to that endpoint. Codex uses the stock authenticated OpenAI provider and its HTTP Responses fallback. Billing eligibility comes from the account owner's evidence. The command emits one redacted JSON result and removes its private transcripts and service state. A nonzero exit marks an incomplete gate. To rehearse the Pi journey with a synthetic account and controlled upstream, run `node --test tests/proof/live-controlled.test.ts`.
+A private loopback relay holds the selected key, rechecks the account file before each upstream request and enforces the model, official route and request limit. The worker presents a disposable credential to that endpoint. Codex uses the stock authenticated OpenAI provider and its HTTP Responses fallback. Billing eligibility comes from the account owner's evidence. The command emits one redacted JSON result and removes its private transcripts and service state. A nonzero exit marks an incomplete gate. To rehearse all three journeys with synthetic accounts and local responses, run `PATH="$PWD/.proof/bin:$PATH" node --test tests/proof/live-controlled.test.ts tests/proof/live-native-controlled.test.ts`.
