@@ -141,6 +141,7 @@ export async function loadLiveProfiles(env: NodeJS.ProcessEnv, transport: typeof
     configured.set(`anthropic-${model}.v1`, { accountId: account_path, claude });
   }
   for (const [name, profile] of [...configured]) {
+    if (profile.pi) configured.set(name.replace(/\.v1$/, ".crew.v1"), { ...profile, delegateTask: true, protectedTool: "record_work_item" });
     configured.set(name.replace(/\.v1$/, ".approval.v1"), { ...profile, protectedTool: "record_work_item" });
   }
   return configured;

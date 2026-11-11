@@ -1,3 +1,4 @@
+import { lockChildAdmission } from "./supervisor-child.ts";
 import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import type { TurnRequest } from "./domain.ts";
@@ -51,7 +52,7 @@ export async function withNativeAdmission<T>(
   let polling = false;
   try {
     await db.query("BEGIN");
-    const admitted = await db.query(`SELECT 1 FROM birbcrew_ts.turns t
+    const admitted = launch.childId ? await lockChildAdmission(db,launch) : await db.query(`SELECT 1 FROM birbcrew_ts.turns t
       JOIN birbcrew_ts.conversations c USING (conversation_id)
       JOIN birbcrew_ts.native_launches n USING (conversation_id,request_id,token)
       WHERE t.conversation_id=$1 AND t.request_id=$2 AND t.token=$3 AND t.phase='started'

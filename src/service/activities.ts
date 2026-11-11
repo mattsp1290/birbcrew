@@ -2,6 +2,8 @@ import type { Supervisor } from "./supervisor.ts";
 import type { MemberProfile } from "./profiles.ts";
 import { recoverClaudeProposal } from "./claude.ts";
 import { setTimeout as delay } from "node:timers/promises";
+import type { Delegation, ChildOutcome } from "@birbcrew/pi-subagents";
+import { ChildStore, type ChildKey } from "./children.ts";
 import { Context } from "@temporalio/activity";
 import { ApplicationFailure } from "@temporalio/client";
 import { ApprovalStore, recordWorkItemArguments, type Approval, type Decision, type ToolOutcome } from "./approvals.ts";
@@ -16,19 +18,23 @@ export interface DriverInput {
   signal: AbortSignal;
   onToolArgs?: (nativeCallId: string, matchedOperation: boolean) => void;
   onText?: (delta: string) => void;
+  childProfile?: Delegation["profile"];
+  childResults?: ChildOutcome[];
   continuation?: { nativeCallId: string; result: ToolOutcome };
 }
 
 export type DriverResult =
   | { kind: "complete"; text: string; checkpoint: unknown }
+  | { kind: "delegated"; proposals: Delegation[]; checkpoint: unknown }
   | { kind: "pending"; proposal: { nativeCallId: string; name: "record_work_item"; arguments: unknown }; checkpoint: unknown };
 export type TurnDriver = (input: DriverInput, member: Conversation) => Promise<DriverResult>;
 export type MemberProfiles = ReadonlyMap<string, Readonly<Partial<Record<Conversation["engine"], TurnDriver>>>>;
-export type PublicSegment = { kind: "complete"; text: string } | { kind: "pending"; approval: Approval };
+export type PublicSegment = { kind: "complete"; text: string } | { kind: "pending"; approval: Approval } | { kind: "delegated"; children: ChildKey[] };
 export type Resume = { approval: Approval; outcome: ToolOutcome };
 
 export function memberActivities(store: MemberStore, supervisor: Supervisor, profiles: ReadonlyMap<string, MemberProfile>, stateDir: string) {
   const ledger = new ApprovalStore(store.pool);
+  const children = new ChildStore(store.pool);
   return {
     async recoverPending(request: TurnRequest, workflowRunId: string): Promise<PublicSegment | null> {
       const signal = Context.current().cancellationSignal;
@@ -49,10 +55,45 @@ export function memberActivities(store: MemberStore, supervisor: Supervisor, pro
         const approval = await ledger.propose({ ownerId: request.ownerId, conversationId: request.conversationId,
           requestId: request.requestId, memberId: member.memberId, token, invocationId: request.requestId,
           nativeCallId: result.proposal.nativeCallId, toolName: result.proposal.name,
-          arguments: recordWorkItemArguments.parse(result.proposal.arguments) }, result.checkpoint, true);
+          arguments: recordWorkItemArguments.parse(result.proposal.arguments) }, result.checkpoint, {recoverStopped:true});
         return { kind: "pending", approval };
       }
       return null;
+    },
+    async cancelChild(key: ChildKey) {
+      await children.stopBeforeCancel(key);
+      await children.cancel(key);
+    },
+    async executeChildSegment(key: ChildKey, resume?: Resume): Promise<{ kind: "complete" } | { kind: "pending"; approval: Approval }> {
+      const ctx = Context.current();
+      const execution = ctx.info.workflowExecution;
+      if (execution?.workflowId !== `birbcrew-ts/child/${key.childId}`) throw ApplicationFailure.nonRetryable("Incorrect child workflow");
+      const timer = setInterval(() => ctx.heartbeat(), 2000);
+      try {
+        const identity = {workflowRunId: execution.runId, activityId: ctx.info.activityId, attempt: ctx.info.attempt};
+        let start = await children.begin(key, identity, !!resume);
+        if (start.kind === "draining") {
+          await children.waitStopped(key,start.generation);
+          start = await children.begin(key,identity,!!resume);
+        }
+        if (start.kind === "settled") return {kind:"complete"};
+        if (start.kind === "waiting") return {kind:"pending",approval:start.approval};
+        if (start.kind === "revoked") {
+          await children.waitStopped(key,start.generation);
+          await children.finish(key,start.generation,null,true);
+          return {kind:"complete"};
+        }
+        if (start.kind !== "start") throw new Error("Child native stop unconfirmed");
+        const {ownerId, conversationId, requestId, childId} = key;
+        const result = await supervisor.start({ownerId, conversationId, requestId, childId, text:start.task,
+          token:start.generation,execution:identity},ctx.cancellationSignal);
+        ctx.cancellationSignal.throwIfAborted();
+        if (result.kind === "childDone") return {kind:"complete"};
+        if (result.kind === "pending") return result;
+        throw ApplicationFailure.nonRetryable("Invalid native child response");
+      } finally {
+        clearInterval(timer);
+      }
     },
     async decideApproval(input: Decision) {
       try {
@@ -62,25 +103,27 @@ export function memberActivities(store: MemberStore, supervisor: Supervisor, pro
         throw error;
       }
     },
-    async cancelPending(approval: Approval) {
+    async cancelPending(approval: Pick<Approval, "ownerId" | "memberId" | "conversationId" | "requestId">) {
       const { ownerId, memberId, conversationId, requestId } = approval;
       await ledger.cancelTurn({ ownerId, memberId, conversationId, requestId });
     },
     async settleApproval(approval: Approval) {
       return await ledger.settleConfirmed(approval);
     },
-    async executeTurn(request: TurnRequest, resume?: Resume): Promise<PublicSegment> {
+    async executeTurn(request: TurnRequest, resume?: Resume | { children: true }): Promise<PublicSegment> {
       const ctx = Context.current();
       const timer = setInterval(() => ctx.heartbeat(), 2000);
       try {
         const workflow = ctx.info.workflowExecution;
         if (!workflow) throw ApplicationFailure.nonRetryable("Member turn requires a conversation workflow");
         const identity = { workflowRunId: workflow.runId, activityId: ctx.info.activityId, attempt: ctx.info.attempt };
-        const turn = resume ? await store.beginResume(request, resume.approval, identity) : await store.beginTurn(request, identity);
+        const turn = resume ? await store.beginResume(request, "approval" in resume ? resume.approval : null, identity) : await store.beginTurn(request, identity);
         if (turn.kind === "replay") return { kind: "complete", text: turn.reply };
-        if (turn.kind === "pending") return turn;
+        if (turn.kind === "pending" || turn.kind === "delegated") return turn;
         if (turn.kind === "uncertain") throw ApplicationFailure.nonRetryable("Native turn outcome unknown");
-        return await supervisor.start({ ...request, token: turn.token, execution: identity }, ctx.cancellationSignal);
+        const result = await supervisor.start({...request, token:turn.token, execution:identity},ctx.cancellationSignal);
+        if (result.kind === "childDone") throw ApplicationFailure.nonRetryable("Invalid native parent response");
+        return result;
       } catch (error) {
         if (error instanceof MemberStoreError) throw ApplicationFailure.nonRetryable(error.code);
         throw error;

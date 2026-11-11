@@ -6,6 +6,9 @@ import { z } from "zod";
 import { Pool, type PoolClient } from "pg";
 import { ApprovalStore, savedProposal, recordWorkItemArguments } from "./approvals.ts";
 import type { PublicSegment } from "./activities.ts";
+import { inspectChild, requestChildStop, revokeChild, type ReadySegment } from "./supervisor-child.ts";
+import type { ChildOutcome } from "@birbcrew/pi-subagents";
+import { ChildStore, childrenFor } from "./children.ts";
 import { commitSchema, type Conversation, type Checkpoint } from "./domain.ts";
 import { textProjection, textWriter } from "./text-stream.ts";
 import { MemberStore } from "./store.ts";
@@ -14,8 +17,10 @@ import { commandSchema, type Launch } from "./supervisor.ts";
 const pool = new Pool({ connectionString: process.env.BIRBCREW_DATABASE_URL });
 const store = new MemberStore(pool);
 const ledger = new ApprovalStore(pool);
+const children = new ChildStore(pool);
+type SegmentResult = PublicSegment | {kind:"childDone"};
 const active = new Map<string, ChildProcess>();
-const starts = new Map<string, { launch: Launch; result: Promise<PublicSegment> }>();
+const starts = new Map<string, { launch: Launch; result: Promise<SegmentResult> }>();
 let closing = false;
 const stopping = new WeakSet<ChildProcess>();
 
@@ -66,14 +71,16 @@ async function lockedTurn(db: PoolClient, launch: Launch, allowRevokedAttempt = 
     [launch.ownerId, launch.conversationId]);
   if (!lock.rowCount) throw new Error("Unknown conversation");
   const { rows: [turn] } = await db.query<Conversation & {
-    phase: string; reply: string | null; checkpoint: Checkpoint | null; paused: boolean; resuming: boolean;
+    phase: string; reply: string | null; checkpoint: Checkpoint | null; paused: boolean; resuming: boolean; delegated: boolean; child_resume: boolean;
   }>(`SELECT c.owner_id AS "ownerId", c.member_id AS "memberId", c.conversation_id AS "conversationId",
           m.engine, m.profile, t.phase, t.reply, s.approval_id IS NOT NULL AS paused,
           s.resume_activity_id IS NOT NULL AS resuming,
-          CASE WHEN s.resume_activity_id IS NOT NULL THEN s.checkpoint ELSE previous.checkpoint END AS checkpoint
+          d.request_id IS NOT NULL AS delegated, d.resume_activity_id IS NOT NULL AS child_resume,
+          CASE WHEN d.resume_activity_id IS NOT NULL THEN d.parent_checkpoint WHEN s.resume_activity_id IS NOT NULL THEN s.checkpoint ELSE previous.checkpoint END AS checkpoint
        FROM birbcrew_ts.turns t JOIN birbcrew_ts.conversations c USING (conversation_id)
        JOIN birbcrew_ts.members m USING (owner_id, member_id)
        LEFT JOIN birbcrew_ts.paused_segments s USING (conversation_id,request_id)
+       LEFT JOIN birbcrew_ts.delegations d USING(conversation_id,request_id)
        LEFT JOIN birbcrew_ts.turns previous ON previous.conversation_id=t.conversation_id AND previous.position=t.position-1
       WHERE c.owner_id=$1 AND t.conversation_id=$2 AND t.request_id=$3 AND t.token=$4
         AND t.workflow_run_id=$5 AND t.activity_id=$6 AND t.prompt_digest=$8
@@ -84,32 +91,50 @@ async function lockedTurn(db: PoolClient, launch: Launch, allowRevokedAttempt = 
   return turn;
 }
 
-async function start(launch: Launch): Promise<PublicSegment> {
+async function start(launch: Launch): Promise<SegmentResult> {
   const args = [launch.conversationId, launch.requestId, launch.token];
   // Commit the one-shot reservation before forking; a lost fork acknowledgement must never start a second process.
-  const inspect = async (db: PoolClient) => {
+  const inspect = async (db: PoolClient): Promise<SegmentResult | ReadySegment> => {
+    if (launch.childId) return inspectChild(db,launch);
     const turn = await lockedTurn(db, launch);
     if (turn.reply !== null) return { kind: "complete", text: turn.reply } as const;
     if (turn.phase !== "started") throw new Error("Native admission revoked");
     const approval = turn.paused ? await savedProposal(db, turn, launch.requestId) : undefined;
     if (turn.paused && !approval) throw new Error("Missing canonical proposal");
     if (approval && !turn.resuming) return { kind: "pending", approval } as const;
-    return { kind: "ready", approval } as const;
+    const {ownerId,memberId,conversationId,engine,profile} = turn;
+    const conversation = {ownerId,memberId,conversationId,engine,profile};
+    if (turn.delegated && !turn.child_resume) {
+      return {kind:"delegated",children:await childrenFor(db,conversation,launch.requestId)};
+    }
+    let childResults: ChildOutcome[] | undefined;
+    if (turn.child_resume) {
+      const {rows} = await db.query<{outcome:ChildOutcome|null}>(
+        "SELECT outcome FROM birbcrew_ts.pi_children WHERE conversation_id=$1 AND request_id=$2 ORDER BY ordinal",
+        [conversationId,launch.requestId]);
+      childResults = rows.map(({outcome}) => {
+        if (!outcome) throw new Error("Child outcome missing");
+        return outcome;
+      });
+      if (!childResults.length) throw new Error("Delegation has no children");
+    }
+    return {kind:"ready", approval, conversation, checkpoint:turn.checkpoint, parentToken:launch.token, childResults};
+
   };
   const admission = await transaction(async (db) => {
     const status = await inspect(db);
     if (status.kind !== "ready") return status;
     const { approval } = status;
     const continuation = approval ? { nativeCallId: approval.nativeCallId,
-      result: await ledger.settleLocked(db, { ...approval, token: launch.token }) } : undefined;
+      result: await ledger.settleLocked(db, { ...approval, token: status.parentToken }) } : undefined;
     const digest = continuation ? createHash("sha256").update(JSON.stringify(continuation.result)).digest() : null;
     const inserted = await db.query(`INSERT INTO birbcrew_ts.native_launches
-      (conversation_id,request_id,token,approval_id,receipt_digest,workflow_run_id,activity_id,attempt)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (conversation_id,request_id,token) DO NOTHING`,
-      [...args, approval?.approvalId ?? null, digest, launch.execution.workflowRunId, launch.execution.activityId, launch.execution.attempt]);
-    return { kind: inserted.rowCount ? "launch" : "observe", continuation } as const;
+      (conversation_id,request_id,token,approval_id,receipt_digest,workflow_run_id,activity_id,attempt,child_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (conversation_id,request_id,token) DO NOTHING`,
+      [...args, approval?.approvalId ?? null, digest, launch.execution.workflowRunId, launch.execution.activityId, launch.execution.attempt, launch.childId ?? null]);
+    return { kind: inserted.rowCount ? "launch" : "observe", continuation, resuming:!!(continuation || status.childResults) } as const;
   });
-  if (admission.kind === "complete" || admission.kind === "pending") return admission;
+  if (!("continuation" in admission)) return admission;
   if (admission.kind === "observe") {
     const until = Date.now() + 170_000;
     while (!closing && Date.now() < until) {
@@ -128,12 +153,13 @@ async function start(launch: Launch): Promise<PublicSegment> {
   try {
     const { continuation } = admission;
     const project = await textProjection(pool, launch.conversationId);
-    const messageId = launch.requestId + (continuation ? "/resumed-assistant" : "/assistant");
+    const messageId = (launch.childId ?? launch.requestId) + (admission.resuming ? "/resumed-assistant" : "/assistant");
     const stream = textWriter((index, delta) => store.appendText(launch, messageId, index, delta));
     // Recheck under the takeover lock after reservation. Both the fork and its command happen before releasing it.
     const member = await transaction(async (db) => {
-      const { phase, checkpoint, reply: previousReply, paused, resuming, ...conversation } = await lockedTurn(db, launch);
-      if (closing || phase !== "started" || previousReply !== null || (paused && !resuming)) throw new Error("Native admission revoked");
+      const status = await inspect(db);
+      if (closing || status.kind !== "ready") throw new Error("Native admission revoked");
+      const { conversation, checkpoint, childProfile, childResults } = status;
       const child = fork(new URL("./supervisor-runner.ts", import.meta.url), process.argv.slice(2), {
         stdio: ["ignore", "ignore", "ignore", "ipc"], execArgv: [], detached: true,
       });
@@ -154,10 +180,10 @@ async function start(launch: Launch): Promise<PublicSegment> {
         child.once("error", () => resolve(false));
         child.once("close", (code) => resolve(code === 0));
       });
-      child.send({ launch, conversation, checkpoint, continuation, runId: launch.requestId, text: launch.text }, (error) => {
+      child.send({ launch, conversation, checkpoint, continuation, childProfile, childResults,threadId:launch.childId ?? conversation.conversationId, runId: launch.requestId, text: launch.text }, (error) => {
         if (error) killNativeGroup(child);
       });
-      return conversation;
+      return status;
     });
     confirmed = Boolean(await exited && reply !== undefined);
     stream.push(project("", true));
@@ -166,18 +192,36 @@ async function start(launch: Launch): Promise<PublicSegment> {
     const pid = active.get(launch.token)?.pid;
     reaped = pid !== undefined && await groupStopped(pid);
     if (!confirmed || !reaped) throw new Error("SDK process stopped without a confirmed result");
+    const {ownerId,conversationId,requestId,token} = launch;
+    const childKey = launch.childId ? {ownerId,conversationId,requestId,memberId:member.conversation.memberId,childId:launch.childId} : undefined;
+    if (childKey && z.strictObject({error:z.literal("Native SDK turn failed")}).safeParse(reply).success) {
+      await children.finish(childKey,token,null);
+      return {kind:"childDone"};
+    }
     const result = z.discriminatedUnion("kind", [
       z.strictObject({ kind: z.literal("complete"), text: commitSchema.shape.reply, checkpoint: commitSchema.shape.checkpoint }),
+      z.strictObject({ kind:z.literal("delegated"),checkpoint:commitSchema.shape.checkpoint,proposals:z.array(z.strictObject({
+        nativeCallId:z.string().min(1).max(256),task:z.string().min(1).max(4096),
+        profile:z.strictObject({role:z.enum(["analyst","recorder"]),version:z.literal(1),instructions:z.string().min(1),
+          model:z.string().min(1),tools:z.array(z.literal("record_work_item")).max(1)}),
+      })).min(1).max(2) }),
       z.strictObject({ kind: z.literal("pending"), checkpoint: commitSchema.shape.checkpoint,
         proposal: z.strictObject({ name: z.literal("record_work_item"), nativeCallId: z.string(), arguments: recordWorkItemArguments }) }),
     ]).parse(reply);
-    const { ownerId, conversationId, requestId, token } = launch;
+    if (result.kind === "delegated") {
+      if (childKey || continuation || member.childResults || member.conversation.engine !== "pi") throw new Error("Unexpected delegation");
+      return {kind:"delegated",children:await children.delegate(member.conversation,requestId,token,result.proposals,result.checkpoint)};
+    }
     if (result.kind === "pending") {
-      if (continuation || result.checkpoint.engine !== member.engine) throw new Error("Invalid protected call");
+      if (continuation || member.childResults || result.checkpoint.engine !== member.conversation.engine) throw new Error("Invalid protected call");
       const { name: toolName, nativeCallId, arguments: args } = result.proposal;
-      const approval = await ledger.propose({ ownerId, conversationId, requestId, token, memberId: member.memberId,
-        invocationId: requestId, toolName, nativeCallId, arguments: args }, result.checkpoint);
+      const approval = await ledger.propose({ ownerId, conversationId, requestId, token, memberId: member.conversation.memberId,
+        invocationId: childKey?.childId ?? requestId, toolName, nativeCallId, arguments: args }, result.checkpoint, childKey ? {childGeneration:token} : undefined);
       return { kind: "pending", approval };
+    }
+    if (childKey) {
+      await children.finish(childKey,token,result);
+      return {kind:"childDone"};
     }
     const text = await store.commitTurn({ ownerId, conversationId, requestId, token,
       reply: result.text, checkpoint: result.checkpoint });
@@ -194,11 +238,13 @@ async function start(launch: Launch): Promise<PublicSegment> {
 
 async function handle(launch: Launch, action: "start" | "stop") {
   if (action === "stop") {
-    await requestNativeStop(pool, launch, {
+    if (launch.childId) await requestChildStop(pool,{...launch,childId:launch.childId},{...launch.execution,token:launch.token});
+    else await requestNativeStop(pool, launch, {
       workflowRunId: launch.execution.workflowRunId, activityId: launch.execution.activityId,
       token: launch.token, attempt: launch.execution.attempt
     });
     await transaction(async (db) => {
+      if (launch.childId) return revokeChild(db,launch);
       const retired = await db.query(`SELECT 1 FROM birbcrew_ts.native_launches n
         JOIN birbcrew_ts.turns t USING (conversation_id,request_id)
         JOIN birbcrew_ts.conversations c USING (conversation_id)
@@ -208,7 +254,7 @@ async function handle(launch: Launch, action: "start" | "stop") {
           launch.execution.activityId, launch.execution.attempt, createHash("sha256").update(launch.text).digest()]);
       if (retired.rowCount) return;
       const turn = await lockedTurn(db, launch, true);
-      if (turn.phase === "started" && (!turn.paused || turn.resuming)) {
+      if (turn.phase === "started" && (!turn.paused || turn.resuming) && (!turn.delegated || turn.child_resume)) {
         await db.query("UPDATE birbcrew_ts.turns SET phase='uncertain' WHERE conversation_id=$1 AND request_id=$2 AND token=$3",
           [launch.conversationId, launch.requestId, launch.token]);
       }
@@ -243,7 +289,10 @@ const timer = setInterval(async () => {
   try {
     const { rows } = await pool.query<{token: string}>(
       `SELECT t.token FROM birbcrew_ts.turns t LEFT JOIN birbcrew_ts.native_stop_requests s USING (conversation_id,request_id,token)
-       WHERE t.token=ANY($1::uuid[]) AND (t.phase<>'started' OR s.token IS NOT NULL)`, [tokens]);
+       WHERE t.token=ANY($1::uuid[]) AND (t.phase<>'started' OR s.token IS NOT NULL)        UNION ALL SELECT j.generation FROM birbcrew_ts.pi_children j JOIN birbcrew_ts.turns t USING(conversation_id,request_id)
+          LEFT JOIN birbcrew_ts.tool_cancellations x USING(conversation_id,request_id)
+          LEFT JOIN birbcrew_ts.native_stop_requests st ON st.conversation_id=j.conversation_id AND st.request_id=j.request_id AND st.token=j.generation
+          WHERE j.generation=ANY($1::uuid[]) AND (st.token IS NOT NULL OR j.launch_revoked OR x.request_id IS NOT NULL OR t.phase <> 'started')`, [tokens]);
     for (const {token} of rows) stopRunner(active.get(token));
   } catch {
     for (const token of tokens) stopRunner(active.get(token));

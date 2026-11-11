@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { NativeConnection, Worker } from "@temporalio/worker";
+import { ChildStore } from "./children.ts";
 import { startSupervisor } from "./supervisor.ts";
 import type { MemberProfile } from "./profiles.ts";
 import { memberActivities } from "./activities.ts";
@@ -12,9 +13,10 @@ export async function runMemberWorker(store: MemberStore, address: string, profi
   const workers: Worker[] = [];
   let supervisor;
   try {
+    const children = new ChildStore(store.pool);
     workers.push(await Worker.create({
       connection, taskQueue: memberTaskQueue,
-      activities: { reconcileTurn: store.reconcileTurn.bind(store) },
+      activities: { reconcileTurn: store.reconcileTurn.bind(store), reconcileChild:children.reconcile.bind(children) },
       workflowsPath: fileURLToPath(new URL("./workflow.ts", import.meta.url)),
     }));
     supervisor = await startSupervisor(configPath, stateDir);

@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTranslator, toAguiMessages, type HistoryEntry } from "@ag-ui/pi";
+import { createDelegationBatch, delegationToolName, delegationToolResults } from "@birbcrew/pi-subagents";
 import { contentText, type Api, type Model } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
@@ -26,11 +27,12 @@ const thinkingPart = z.object({
 const tokens = {
   input: z.number(), output: z.number(), cacheRead: z.number(), cacheWrite: z.number(),
 };
+const piToolName = z.enum([toolName, delegationToolName]);
 const systemMessage = z.strictObject({
   role: z.literal("system"), content: z.union([z.string(), z.array(textPart)]), timestamp: z.number(),
   sections: z.record(z.string(), z.string().nullable()).optional(),
-  toolsAdded: z.array(z.looseObject({ name: z.literal(toolName), description: z.string(), parameters: z.object({}).passthrough() })).optional(),
-  toolsRemoved: z.array(z.object({ name: z.literal(toolName) })).optional(),
+  toolsAdded: z.array(z.looseObject({ name: piToolName, description: z.string(), parameters: z.object({}).passthrough() })).optional(),
+  toolsRemoved: z.array(z.object({ name: piToolName })).optional(),
 });
 const userMessage = z.looseObject({
   role: z.literal("user"), timestamp: z.number(), content: z.union([z.string(), z.array(textPart)]),
@@ -42,11 +44,15 @@ const assistantMessage = z.looseObject({
     ...tokens, totalTokens: z.number(), cost: z.looseObject({ ...tokens, total: z.number() }),
   }),
 });
+const delegationCall = z.looseObject({
+  type: z.literal("toolCall"), name: z.literal(delegationToolName), id: z.string().min(1).max(256),
+  arguments: z.record(z.string(), z.json()), argumentsError: z.never().optional(),
+});
 const proposalMessage = assistantMessage.extend({
-  stopReason: z.literal("toolUse"), content: z.array(z.union([textPart, thinkingPart, nativeCall])),
+  stopReason: z.literal("toolUse"), content: z.array(z.union([textPart, thinkingPart, nativeCall, delegationCall])),
 });
 const resultMessage = z.strictObject({
-  role: z.literal("toolResult"), toolCallId: z.string(), toolName: z.literal(toolName),
+  role: z.literal("toolResult"), toolCallId: z.string(), toolName: piToolName,
   timestamp: z.number(), isError: z.boolean(), content: z.array(textPart).length(1),
 });
 const turnPrefix = z.strictObject({
@@ -54,7 +60,10 @@ const turnPrefix = z.strictObject({
 });
 const pendingTurn = turnPrefix.extend({ proposal: proposalMessage });
 const completedTurn = turnPrefix.extend({
-  tool: z.strictObject({ proposal: proposalMessage, result: resultMessage, system: z.array(systemMessage).max(4) }).optional(),
+  tool: z.union([
+    z.strictObject({ proposal: proposalMessage, result: resultMessage, system: z.array(systemMessage).max(4) }),
+    z.strictObject({ proposal: proposalMessage, results: z.array(resultMessage).min(1).max(2), system: z.array(systemMessage).max(4) }),
+  ]).optional(),
   assistant: assistantMessage,
 });
 const stateSchema = z.strictObject({
@@ -66,12 +75,14 @@ type Pending = z.infer<typeof pendingTurn>;
 export interface PiProfile {
   model: Model<Api>;
   modelRuntime: ModelRuntime;
+  instructions?: string;
+  allowRecordWorkItem?: boolean;
   prepare?: () => Promise<{ extension: ExtensionFactory; verify: () => void }>;
 }
 
 function onlyCall(pending: Pending) {
   const calls = pending.proposal.content.filter((part) => part.type === "toolCall");
-  if (calls.length !== 1 || calls[0].arguments.operation_id !== pending.runId) {
+  if (calls.length !== 1 || calls[0].name !== toolName || calls[0].arguments.operation_id !== pending.runId) {
     throw new Error("Expected one Pi tool call for this input");
   }
   return calls[0];
@@ -82,17 +93,23 @@ function privateCheckpoint(state: PiState) {
   return checkpointSchema.parse({ engine: "pi", version: 1, state: JSON.parse(JSON.stringify(data)) });
 }
 
-export function runPiSegment(input: DriverInput, profile: PiProfile) {
-  return runSegment(input, profile, true);
+export function runPiDelegatingSegment(input: DriverInput, profile: PiProfile) {
+  return runSegment(input, profile, "delegating");
+}
+
+export async function runPiSegment(input: DriverInput, profile: PiProfile) {
+  const segment = await runSegment(input, profile, "protected");
+  if (segment.kind === "delegated") throw new Error("Unexpected Pi delegation in a protected session");
+  return segment;
 }
 
 export async function runPiTurn(input: DriverInput, profile: PiProfile) {
-  const segment = await runSegment(input, profile, false);
+  const segment = await runSegment(input, profile, "text");
   if (segment.kind !== "complete") throw new Error("Unexpected Pi tool proposal on a text turn");
   return { text: segment.text, checkpoint: segment.checkpoint };
 }
 
-async function runSegment(input: DriverInput, profile: PiProfile, protectedTool: boolean) {
+async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" | "protected" | "delegating") {
   input.signal.throwIfAborted();
   const prior = input.checkpoint;
   if (prior !== null && (prior.engine !== "pi" || prior.version !== 1)) throw new Error("Invalid Pi checkpoint");
@@ -104,13 +121,24 @@ async function runSegment(input: DriverInput, profile: PiProfile, protectedTool:
   }
   if (state.turns.length >= 4) throw new Error("Pi conversation input limit reached");
   const pending = state.pending;
-  if ((pending === undefined) !== (input.continuation === undefined) ||
-      (pending && (!protectedTool || pending.runId !== input.runId || contentText(pending.user.content) !== input.text))) {
+  const protectedTool = mode === "protected" || (mode === "delegating" && profile.allowRecordWorkItem === true);
+  const hasContinuation = input.continuation !== undefined || input.childResults !== undefined;
+  if (Boolean(pending) !== hasContinuation || (input.childResults && input.continuation) ||
+      (pending && (pending.runId !== input.runId || contentText(pending.user.content) !== input.text))) {
     throw new Error("Pi continuation does not match the pending turn");
   }
-  const result = pending && input.continuation ? toolResult(onlyCall(pending), input.continuation) : undefined;
+  const results = [];
+  if (pending && input.continuation && protectedTool) results.push(toolResult(onlyCall(pending), input.continuation));
+  if (pending && input.childResults && mode === "delegating") {
+    const calls = pending.proposal.content.filter((part) => part.type === "toolCall");
+    if (calls.some((call) => call.name !== delegationToolName)) throw new Error("Expected pending Pi delegations");
+    results.push(...delegationToolResults(calls.map((call) => ({ nativeCallId: call.id })), input.childResults, pending.proposal.timestamp));
+  }
+  if (pending && results.length === 0) throw new Error("Missing authorized Pi continuation");
   const tool = protectedTool ? proposalTool(input.runId) : undefined;
+  const batch = mode === "delegating" ? createDelegationBatch({ model: profile.model.id, allowRecordWorkItem: protectedTool }) : undefined;
   const prepared = await profile.prepare?.();
+  const factories = [...(prepared ? [prepared.extension] : []), ...(batch ? [batch.extension] : [])];
   const cwd = await mkdtemp(join(tmpdir(), "birb-pi-"));
   try {
     const settingsManager = SettingsManager.inMemory({
@@ -118,12 +146,12 @@ async function runSegment(input: DriverInput, profile: PiProfile, protectedTool:
     });
     const resourceLoader = new DefaultResourceLoader({
       cwd, agentDir: cwd, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true,
-      noContextFiles: true, noThemes: true, systemPrompt: "You are a BirbCrew coworker.",
-      appendSystemPrompt: [], extensionFactories: prepared ? [prepared.extension] : [],
+      noContextFiles: true, noThemes: true, systemPrompt: profile.instructions ?? "You are a BirbCrew coworker.",
+      appendSystemPrompt: [], extensionFactories: factories,
     });
     await resourceLoader.reload();
     const extensions = resourceLoader.getExtensions();
-    const expectedPaths = prepared ? ["<inline:1>"] : [];
+    const expectedPaths = factories.map((_, index) => `<inline:${index + 1}>`);
     if (extensions.errors.length || extensions.extensions.length !== expectedPaths.length ||
         extensions.extensions.some((extension, i) => extension.path !== expectedPaths[i])) {
       throw new Error("Unexpected Pi extensions");
@@ -138,18 +166,23 @@ async function runSegment(input: DriverInput, profile: PiProfile, protectedTool:
       for (const change of turn.system) sessionManager.appendMessage(change);
       append(turn.runId + ":user", turn.user);
       const toolHistory = "proposal" in turn
-        ? { proposal: turn.proposal, result, system: [] }
+        ? { proposal: turn.proposal, results, system: [] }
         : turn.tool;
       if (toolHistory) {
-        const call = onlyCall({ ...turn, proposal: toolHistory.proposal });
-        if (call.id !== toolHistory.result?.toolCallId) throw new Error("Invalid Pi tool history");
+        const calls = toolHistory.proposal.content.filter((part) => part.type === "toolCall");
+        if (calls.some((call) => call.name === toolName)) onlyCall({ ...turn, proposal: toolHistory.proposal });
+        const replies = "result" in toolHistory ? [toolHistory.result] : toolHistory.results;
+        if (calls.length !== replies.length || new Set(calls.map((c) => c.id)).size !== calls.length ||
+            calls.some((call, i) => call.id !== replies[i].toolCallId || call.name !== replies[i].toolName)) {
+          throw new Error("Invalid Pi tool history");
+        }
         append(turn.runId + ":assistant", toolHistory.proposal);
-        append(turn.runId + ":result:" + call.id, toolHistory.result);
+        for (const reply of replies) append(turn.runId + ":result:" + reply.toolCallId, reply);
         for (const change of toolHistory.system) sessionManager.appendMessage(change);
       }
       if ("assistant" in turn) append(turn.runId + (toolHistory ? ":resumed" : ":assistant"), turn.assistant);
     }
-    const tools = tool ? [tool.definition.name] : [];
+    const tools = [...(tool ? [tool.definition.name] : []), ...(batch ? [delegationToolName] : [])];
     const { session } = await createAgentSession({
       model: profile.model, modelRuntime: profile.modelRuntime, cwd, agentDir: cwd, resourceLoader, settingsManager, sessionManager,
       tools, customTools: tool ? [tool.definition] : [], thinkingLevel: "off",
@@ -185,7 +218,7 @@ async function runSegment(input: DriverInput, profile: PiProfile, protectedTool:
       }
     });
     try {
-      if (JSON.stringify(session.getActiveToolNames()) !== JSON.stringify(tools)) throw new Error("Unexpected Pi tools");
+      if (JSON.stringify(session.getActiveToolNames().sort()) !== JSON.stringify([...tools].sort())) throw new Error("Unexpected Pi tools");
       session.agent.finishTurn = () => ({ action: "end" });
       const before = sessionManager.getEntries().length;
       input.signal.addEventListener("abort", abort, { once: true });
@@ -199,27 +232,37 @@ async function runSegment(input: DriverInput, profile: PiProfile, protectedTool:
         .flatMap((entry) => entry.type === "message" ? [entry.message] : []);
       const last = messages.at(-1);
       if (last?.role === "toolResult") {
-        if (!tool || pending || committedCallIds.length !== 1 || committedCallIds[0] !== last.toolCallId ||
-            !tool.accepted.has(last.toolCallId) || last.isError || bytes > 65_536) {
-          throw new Error("Pi did not confirm a permitted tool proposal");
-        }
+        if (pending || bytes > 65_536) throw new Error("Unexpected repeated Pi tool proposal");
+        const at = messages.findIndex((message) => message.role === "assistant");
         const proposal = pendingTurn.parse({
-          runId: input.runId, system: messages.slice(0, -3), user: messages.at(-3), proposal: messages.at(-2),
+          runId: input.runId, system: messages.slice(0, at - 1), user: messages[at - 1], proposal: messages[at],
         });
-        const call = onlyCall(proposal);
-        if (call.id !== last.toolCallId) throw new Error("Pi reported an inconsistent native call");
+        const calls = proposal.proposal.content.filter((part) => part.type === "toolCall");
+        if (calls.length !== committedCallIds.length || calls.some((call, i) => call.id !== committedCallIds[i])) {
+          throw new Error("Pi did not confirm its native calls");
+        }
         history.push({ id: input.runId + ":user", message: proposal.user }, { id: assistantId, message: proposal.proposal });
         translator.finish();
         prepared?.verify();
+        const receipts = messages.slice(at + 1);
+        if (batch && calls.every((call) => call.name === delegationToolName)) {
+          const proposals = batch.confirm(calls, receipts);
+          return { kind: "delegated" as const, proposals, checkpoint: privateCheckpoint({ ...state, pending: proposal }) };
+        }
+        const call = onlyCall(proposal);
+        if (!tool || receipts.length !== 1 || call.id !== last.toolCallId || !tool.accepted.has(call.id) || last.isError) {
+          throw new Error("Pi did not confirm a permitted tool proposal");
+        }
         return { kind: "pending" as const, proposal: { name: toolName, nativeCallId: call.id, arguments: call.arguments },
           checkpoint: privateCheckpoint({ ...state, pending: proposal }) } satisfies DriverResult;
       }
       if (last?.role !== "assistant" || last.stopReason !== "stop" || committedCallIds.length) {
         throw new Error("Pi did not complete the text turn");
       }
-      const turn = completedTurn.parse(pending && result ? {
+      const turn = completedTurn.parse(pending ? {
         runId: input.runId, system: pending.system, user: pending.user, assistant: last,
-        tool: { proposal: pending.proposal, result, system: messages.slice(0, -1).filter((m) => m.role === "system") },
+        tool: { proposal: pending.proposal, ...(input.continuation ? { result: results[0] } : { results }),
+          system: messages.slice(0, -1).filter((m) => m.role === "system") },
       } : {
         runId: input.runId, system: messages.slice(0, -2), user: messages.at(-2), assistant: last,
       });

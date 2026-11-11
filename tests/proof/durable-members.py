@@ -15,6 +15,7 @@ from contextlib import ExitStack, contextmanager
 from uuid import uuid4
 
 from approval_cases import verify_approvals
+from child_cases import verify_children
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -75,7 +76,7 @@ def verify(directory, stack):
     }
     cli = [node, "src/service/cli.ts"]
     run(node, "--test", "tests/service/store.test.ts", "tests/service/providers.test.ts",
-        "tests/service/approvals.test.ts", "tests/fixtures/engines/pi/protected.test.ts",
+        "tests/service/approvals.test.ts", "tests/fixtures/engines/pi/protected.test.ts", "tests/fixtures/engines/pi/delegation.test.ts",
         "tests/fixtures/engines/claude/protected.test.ts",
         "tests/fixtures/engines/pi/durable.test.ts", "tests/fixtures/engines/claude/durable.test.ts", env=env)
 
@@ -123,7 +124,7 @@ def verify(directory, stack):
                                     text=True, capture_output=True)
             return result.returncode == 0 and result.stdout.strip() == "2"
         wait_until(ready_profiles, "worker profiles registered")
-        run(node, "--test", "tests/service/closure.test.ts", "tests/service/supervisor.test.ts", env=env)
+        run(node, "--test", "tests/service/closure.test.ts", "tests/service/supervisor.test.ts", "tests/service/child-launch.test.ts", env=env)
         for engine in ["pi", "claude"]:
             owner = f"{engine}-{uuid4()}"
             spawn = {"ownerId": owner, "requestId": str(uuid4()), "engine": engine, "profile": "fixture.v1"}
@@ -157,6 +158,7 @@ def verify(directory, stack):
             return run("docker", "exec", db, "psql", "-U", "postgres", "-d", "birbcrew_ts", "-Atc", statement,
                        capture_output=True).stdout.strip()
         current = verify_approvals(runtime, current, worker, command, wait_until, sql)
+        current = verify_children(runtime, current, worker, command, wait_until, sql)
         for override in [{"BIRBCREW_STATE_DIR": str(directory / "wrong-volume")},
                          {"BIRBCREW_PROOF_ACCOUNT": "another-account"}]:
             invalid = subprocess.run([*cli, "worker", "tests/proof/fixture-profiles.mts"],

@@ -1,6 +1,10 @@
-import { allHandlersFinished, ApplicationFailure, CancellationScope, workflowInfo, condition, defineUpdate, proxyActivities, setHandler } from "@temporalio/workflow";
+import {
+  allHandlersFinished, ApplicationFailure, CancellationScope, workflowInfo, condition, defineSignal, defineUpdate,
+  executeChild, getExternalWorkflowHandle, isCancellation, proxyActivities, setHandler
+} from "@temporalio/workflow";
 import { submitSchema, type Conversation, type TurnRequest } from "./domain.ts";
 import type { Approval, Decision } from "./approvals.ts";
+import type { ChildKey, ChildStore } from "./children.ts";
 import type { MemberActivities, Resume } from "./activities.ts";
 
 import type { MemberStore } from "./store.ts";
@@ -8,14 +12,46 @@ import { activityQueue, memberTaskQueue } from "./queues.ts";
 
 export const submitTurn = defineUpdate<string, [TurnRequest]>("submitTurn");
 
-export async function memberConversation(conversation: Conversation): Promise<void> {
-  const { executeTurn, decideApproval, settleApproval, cancelPending } = proxyActivities<MemberActivities>({
-    taskQueue: activityQueue(conversation.engine, conversation.profile),
-    startToCloseTimeout: "3 minutes",
-    scheduleToCloseTimeout: "10 minutes",
-    heartbeatTimeout: "15 seconds",
-    retry: { maximumAttempts: 3 },
+const childDecision = defineSignal("childDecision");
+
+function actions(queue: string) {
+  return proxyActivities<MemberActivities>({
+    taskQueue: queue, startToCloseTimeout: "3 minutes", scheduleToCloseTimeout: "10 minutes",
+    heartbeatTimeout: "15 seconds", retry: { maximumAttempts: 3 }, cancellationType: "WAIT_CANCELLATION_COMPLETED",
   });
+}
+
+export async function piChildWorkflow(key: ChildKey, profile: string): Promise<void> {
+  const { executeChildSegment, settleApproval, cancelChild } = actions(activityQueue("pi", profile));
+  const {reconcileChild} = proxyActivities<{reconcileChild:ChildStore["reconcile"]}>({
+    taskQueue:memberTaskQueue,startToCloseTimeout:"20 seconds",scheduleToCloseTimeout:"2 minutes",
+  });
+  async function segment(resume?: Resume) {
+    try {
+      return await executeChildSegment(key,resume);
+    } catch (error) {
+      if (isCancellation(error)) throw error;
+      return reconcileChild(key,workflowInfo().runId,!!resume);
+    }
+  }
+  let answered = false;
+  setHandler(childDecision, () => { answered = true; });
+  try {
+    const first = await segment();
+    if (first.kind === "complete") return;
+    await condition(() => answered);
+    const outcome = await settleApproval(first.approval);
+    const last = await segment({ approval: first.approval, outcome });
+    if (last.kind !== "complete") throw ApplicationFailure.nonRetryable("Repeated child approval");
+  } catch (error) {
+    if (!isCancellation(error)) throw error;
+    await CancellationScope.nonCancellable(() => cancelChild(key));
+    throw error;
+  }
+}
+
+export async function memberConversation(conversation: Conversation): Promise<void> {
+  const { executeTurn, decideApproval, settleApproval, cancelPending, cancelChild } = actions(activityQueue(conversation.engine, conversation.profile));
   const { reconcileTurn } = proxyActivities<Pick<MemberStore, "reconcileTurn">>({
     taskQueue: memberTaskQueue, startToCloseTimeout: "20 seconds",
   });
@@ -29,11 +65,12 @@ export async function memberConversation(conversation: Conversation): Promise<vo
 
   let pending: Approval | undefined;
   let answered = false;
+  let batch: { requestId: string; children: ChildKey[]; scope: CancellationScope } | undefined;
 
   async function waitForPublishedCall(requestId: string) {
     const turn = turns.get(requestId);
-    if (!pending && turn) {
-      await Promise.race([condition(() => pending?.requestId === requestId), turn.result]);
+    if (!pending && !batch && turn) {
+      await Promise.race([condition(() => pending?.requestId === requestId || batch?.requestId === requestId), turn.result]);
     }
   }
 
@@ -49,6 +86,12 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   setHandler(defineUpdate<string, [Decision]>("decide"), async (value) => {
     if (value.ownerId !== conversation.ownerId) throw ApplicationFailure.nonRetryable("Conversation not found");
     await waitForPublishedCall(value.requestId);
+    const child = batch?.requestId === value.requestId && batch.children.find(({ childId }) => childId === value.invocationId);
+    if (child) {
+      const choice = await decideApproval(value);
+      await getExternalWorkflowHandle(`birbcrew-ts/child/${child.childId}`).signal(childDecision);
+      return choice;
+    }
     if (!matches(value)) throw ApplicationFailure.nonRetryable("Unknown or stale approval");
     const decision = await decideApproval(value);
     answered = true;
@@ -59,13 +102,19 @@ export async function memberConversation(conversation: Conversation): Promise<vo
     async (value) => {
       if (value.ownerId !== conversation.ownerId) throw ApplicationFailure.nonRetryable("Conversation not found");
       await waitForPublishedCall(value.requestId);
+      const active = batch;
+      if (active && active.requestId === value.requestId && value.conversationId === conversation.conversationId) {
+        await cancelPending({ ...value, memberId: conversation.memberId });
+        active.scope.cancel();
+        return;
+      }
       if (!pending || value.ownerId !== conversation.ownerId || value.conversationId !== conversation.conversationId ||
           value.requestId !== pending.requestId) throw ApplicationFailure.nonRetryable("No matching pending turn");
       await cancelPending(pending);
       answered = true;
     });
 
-  async function segment(request: TurnRequest, resume?: Resume) {
+  async function segment(request: TurnRequest, resume?: Resume | {children:true}) {
     try {
       return await executeTurn(request, resume);
     } catch (error) {
@@ -90,6 +139,27 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   async function run(request: TurnRequest) {
     const first = await segment(request);
     if (first.kind === "complete") return first.text;
+    if (first.kind === "delegated") {
+      const scope = new CancellationScope();
+      batch = { requestId: request.requestId, children: first.children, scope };
+      try {
+        const operations = first.children.map(key => scope.run(() => executeChild(piChildWorkflow, {
+          workflowId: `birbcrew-ts/child/${key.childId}`, workflowIdReusePolicy: "REJECT_DUPLICATE",
+          cancellationType: "WAIT_CANCELLATION_COMPLETED", args: [key, conversation.profile],
+        })));
+        const results = await Promise.allSettled(operations);
+        for (const [index, result] of results.entries()) {
+          if (result.status === "fulfilled") continue;
+          if (!isCancellation(result.reason)) throw result.reason;
+          await CancellationScope.nonCancellable(() => cancelChild(first.children[index]));
+        }
+      } finally {
+        batch = undefined;
+      }
+      const resumed = await segment(request, { children: true });
+      if (resumed.kind !== "complete") throw ApplicationFailure.nonRetryable("Expected a completed delegation");
+      return resumed.text;
+    }
     pending = first.approval;
     answered = false;
     await condition(() => answered);

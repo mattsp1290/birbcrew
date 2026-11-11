@@ -11,6 +11,9 @@ interface AdmittedTurn {
   launch: Launch;
   conversation: Conversation;
   runId: string;
+  threadId: string;
+  childProfile?: DriverInput["childProfile"];
+  childResults?: DriverInput["childResults"];
   text: string;
   checkpoint: Checkpoint | null;
   continuation?: DriverInput["continuation"];
@@ -32,8 +35,10 @@ process.once("message", async (command: AdmittedTurn) => {
       const member = command.conversation;
       const driver = memberProfiles(profiles, stateDir, process.pid).get(member.profile)?.[member.engine];
       if (!driver) throw new Error("Unsupported member profile");
-      reply = await withNativeAdmission(pool, command.launch, AbortSignal.any([controller.signal, AbortSignal.timeout(170_000)]), signal => driver({
-        threadId: member.conversationId, runId: command.runId, text: command.text,
+      reply = await withNativeAdmission(pool,command.launch,AbortSignal.any([controller.signal,AbortSignal.timeout(170_000)]), signal => driver({
+        ...(command.childProfile && {childProfile: command.childProfile}),
+        ...(command.childResults && {childResults: command.childResults}),
+        threadId: command.threadId, runId: command.runId, text: command.text,
         onToolArgs: (toolArgs, matchedOperation) => process.send?.({ toolArgs, matchedOperation }),
         onText: (delta) => process.send?.({ delta }),
         checkpoint: command.checkpoint, continuation: command.continuation, signal,

@@ -378,3 +378,166 @@ for (const engine of ["pi", "claude"]) {
     });
   }
 }
+
+test("two HttpAgents keep both Pi subagents open through separate owner decisions", { timeout: 100_000 }, async (t) => {
+  const host = await service(t);
+  const { memberId } = await host.post("/members", { requestId: randomUUID(), engine: "pi", profile: "fixture.crew.v1" });
+  const conversationId = randomUUID(), path = "/conversations/" + conversationId;
+  await host.post("/conversations", { memberId, conversationId });
+  const first = host.attach(conversationId);
+  await until(async () => first.events.some(e => e.type === "STATE_SNAPSHOT") || undefined);
+  const requestId = randomUUID();
+  const tasks = ["first", "second"].map(label => ({ role: "recorder", task: "record assigned " + label }));
+  await host.post(path + "/inputs", { requestId, text: "delegate " + JSON.stringify(tasks) });
+  const waiting = await until(async () => {
+    const { state } = await (await host.api(path)).json();
+    return state.pendingApprovals.length === 2 ? state : undefined;
+  });
+  const late = host.attach(conversationId);
+  await until(async () => late.events.filter(e => e.type === "SUBAGENT_STARTED").length === 2 || undefined);
+  for (const [i, approval] of waiting.pendingApprovals.entries()) {
+    const { approvalId, invocationId, nativeCallId, version } = approval;
+    const choice = { memberId, requestId, approvalId, invocationId, ...(nativeCallId && { nativeCallId }), version, choice: i ? "approve" : "deny" };
+    await host.post(path + "/human", choice);
+    await until(async () => late.events.some(e => e.type === "SUBAGENT_FINISHED" && e.subagentRunId === invocationId) || undefined);
+  }
+  const terminal = await until(async () => {
+    const snapshot = await (await host.api(path)).json();
+    return snapshot.state.phase === "idle" && [first, late].every(r => r.agent.messages.length === snapshot.messages.length) ?
+      snapshot : undefined;
+  });
+  for (const observer of [first, late]) {
+    const starts = observer.events.filter(e => e.type === "SUBAGENT_STARTED");
+    const ends = observer.events.filter(e => e.type === "SUBAGENT_FINISHED");
+    assert.equal(starts.length, 2);
+    assert.deepEqual(new Set(starts.map(e => e.subagentRunId)), new Set(ends.map(e => e.subagentRunId)));
+    for (const opener of starts) {
+      assert.ok(terminal.messages.some((m: { id: string }) => m.id === opener.parentMessageId));
+      assert.equal(observer.events.filter(e => e.type === "TOOL_CALL_RESULT" && e.toolCallId === opener.parentToolCallId).length, 1);
+      assert.ok(observer.events.some(e => e.type === "TOOL_CALL_RESULT" && e.subagentRunId === opener.subagentRunId));
+    }
+    assert.deepEqual(observer.agent.messages, terminal.messages);
+    assert.ok(!observer.events.some(e => e.type === "RUN_ERROR" || e.type === "RUN_FINISHED"));
+  }
+});
+
+test("two HttpAgents restore child text while its sibling awaits approval", { timeout: 90_000 }, async t => {
+  const host = await service(t);
+  const { memberId } = await host.post("/members", { requestId: randomUUID(), engine: "pi", profile: "fixture.crew.v1" });
+  const gate = randomUUID(), requestId = randomUUID(), conversationId = randomUUID();
+  const path = "/conversations/" + conversationId;
+  await host.post("/conversations", { memberId, conversationId });
+  const first = host.attach(conversationId);
+  await until(async () => first.events.some(e => e.type === "STATE_SNAPSHOT") || undefined);
+  await host.post(path + "/inputs", {
+    requestId, text: "delegate " + JSON.stringify([
+      { role: "analyst", task: "stream " + gate }, { role: "recorder", task: "record assigned checkpoint" },
+    ])
+  });
+  const paused = await until(async () => {
+    const snapshot = await (await host.api(path)).json();
+    return Object.keys(snapshot.childText).length === 1 && snapshot.state.pendingApprovals.length === 1 ? snapshot : undefined;
+  });
+  const [childId] = Object.keys(paused.childText);
+  assert.equal(paused.childText[childId].prefix, "first");
+  assert.ok(!paused.messages.some((m: { id: string }) => m.id === paused.childText[childId].id));
+  const second = host.attach(conversationId);
+  await until(async () => second.events.some(e => e.type === "TEXT_MESSAGE_CONTENT" && e.subagentRunId === childId) || undefined);
+  const { approvalId, invocationId, version } = paused.state.pendingApprovals[0];
+  await host.post(path + "/human", { memberId, requestId, approvalId, invocationId, version, choice: "deny" });
+  await until(async () => first.events.some(e => e.type === "SUBAGENT_FINISHED" && e.subagentRunId === invocationId) || undefined);
+  await writeFile(join(process.env.BIRBCREW_PROOF_STREAM_DIR!, gate), "release");
+  const terminal = await until(async () => {
+    const snapshot = await (await host.api(path)).json();
+    return snapshot.state.phase === "idle" && [first, second].every(r => r.events.some(e => e.type === "STATE_SNAPSHOT" &&
+      (e.snapshot as { phase: string })?.phase === "idle") && r.agent.messages.length === snapshot.messages.length) ? snapshot : undefined;
+  });
+  for (const reader of [first, second]) {
+    const events = reader.events.filter(e => e.subagentRunId === childId);
+    assert.equal(events.filter(e => e.type === "SUBAGENT_STARTED").length, 1);
+    assert.deepEqual(events.filter(e => e.type === "TEXT_MESSAGE_CONTENT").map(e => e.delta), ["first", " second"]);
+    assert.equal(events.filter(e => e.type === "TEXT_MESSAGE_END").length, 1);
+    assert.deepEqual(reader.agent.messages, terminal.messages);
+  }
+  assert.deepEqual(terminal.childText, {});
+});
+
+test("two HttpAgents close a streaming child and its sibling's protected call on cancel", { timeout: 90_000 }, async t => {
+  const host = await service(t);
+  const { memberId } = await host.post("/members", { requestId: randomUUID(), engine: "pi", profile: "fixture.crew.v1" });
+  const requestId = randomUUID(), conversationId = randomUUID(), path = "/conversations/" + conversationId;
+  await host.post("/conversations", { memberId, conversationId });
+  const first = host.attach(conversationId);
+  await until(async () => first.events.some(e => e.type === "STATE_SNAPSHOT") || undefined);
+  await host.post(path + "/inputs", {
+    requestId, text: "delegate " + JSON.stringify([
+      { role: "analyst", task: "child wait" }, { role: "recorder", task: "record assigned cancelled" },
+    ])
+  });
+  const waiting = await until(async () => {
+    const snapshot = await (await host.api(path)).json();
+    return Object.keys(snapshot.childText).length && snapshot.state.pendingApprovals.length ? snapshot : undefined;
+  });
+  const second = host.attach(conversationId);
+  await until(async () => second.events.some(e => e.type === "TEXT_MESSAGE_CONTENT") || undefined);
+  const approval = waiting.state.pendingApprovals[0];
+  await host.post(path + "/cancel", { requestId });
+  const snapshot = await until(async () => {
+    const state = await (await host.api(path)).json();
+    return state.state.phase === "idle" && [first, second].every(r => r.agent.messages.length === state.messages.length) ? state : undefined;
+  });
+  for (const reader of [first, second]) {
+    assert.equal(reader.events.filter(e => e.type === "SUBAGENT_ERROR" && e.code === "cancelled").length, 2);
+    const results = reader.events.filter(e => e.type === "TOOL_CALL_RESULT" && e.toolCallId === approval.approvalId);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].subagentRunId, approval.invocationId);
+    assert.deepEqual(JSON.parse(String(results[0].content)), { kind: "cancelled" });
+    assert.deepEqual(reader.agent.messages, snapshot.messages);
+  }
+  assert.deepEqual(snapshot.childText, {});
+  assert.deepEqual(snapshot.state.pendingApprovals, []);
+  assert.equal((await host.db.query("SELECT count(*) AS n FROM birbcrew_ts.work_items WHERE conversation_id=$1", [conversationId])).rows[0].n, "0");
+});
+
+test("two HttpAgents restore one child's argument stream while a sibling awaits approval", {timeout:95_000}, async t => {
+  const host = await service(t);
+  const requestId = randomUUID(), conversationId = randomUUID(), path = "/conversations/" + conversationId;
+  const {memberId} = await host.post("/members",{requestId:randomUUID(),engine:"pi",profile:"fixture.crew.v1"});
+  await host.post("/conversations",{conversationId,memberId});
+  const first = host.attach(conversationId);
+  await until(async () => first.events.some(e => e.type === "STATE_SNAPSHOT") || undefined);
+  await host.post(path + "/inputs",{requestId,text:"delegate " + JSON.stringify([
+    {role:"recorder",task:"record assigned immediate"}, {role:"recorder",task:"record stream " + requestId},
+  ])});
+  const waiting = await until(async () => {
+    const s = await (await host.api(path)).json();
+    return s.state.pendingApprovals.length === 1 && Object.keys(s.openTools).length === 1 ? s : undefined;
+  });
+  const childId = Object.keys(waiting.openTools)[0], partial = waiting.openTools[childId];
+  const sibling = waiting.state.pendingApprovals[0];
+  assert.notEqual(childId,sibling.invocationId);
+  assert.equal(partial.prefix,'{"operation_id":');
+  assert.equal((await host.api(path + "/human",{memberId,requestId,invocationId:childId,approvalId:partial.publicId,version:1,choice:"approve"})).status,409);
+  const second = host.attach(conversationId);
+  await until(async () => second.events.some(e => e.type === "TOOL_CALL_ARGS" && e.subagentRunId === childId) || undefined);
+  await host.post(path + "/human",{memberId,requestId,invocationId:sibling.invocationId,approvalId:sibling.approvalId,version:1,choice:"deny"});
+  await writeFile(join(process.env.BIRBCREW_PROOF_STREAM_DIR!,requestId + ".value"),"");
+  await until(async () => second.events.some(e => e.toolCallId === partial.publicId && e.delta === JSON.stringify(requestId)) || undefined);
+  await writeFile(join(process.env.BIRBCREW_PROOF_STREAM_DIR!,requestId),"");
+  await until(async () => (await (await host.api(path)).json()).state.pendingApprovals.find((a:{approvalId:string}) => a.approvalId === partial.publicId));
+  await host.post(path + "/human",{memberId,requestId,invocationId:childId,approvalId:partial.publicId,version:1,choice:"approve"});
+  const end = await until(async () => {
+    const s = await (await host.api(path)).json();
+    return s.state.phase === "idle" && [first,second].every(r => r.agent.messages.length === s.messages.length) ? s : undefined;
+  });
+  for (const reader of [first,second]) {
+    const tools = reader.events.filter(e => e.toolCallId === partial.publicId);
+    assert.ok(tools.every(e => e.subagentRunId === childId));
+    assert.equal(tools.filter(e => e.type === "TOOL_CALL_START").length,1);
+    assert.equal(tools.filter(e => e.type === "TOOL_CALL_END").length,1);
+    assert.equal(tools.filter(e => e.type === "TOOL_CALL_RESULT").length,1);
+    assert.deepEqual(JSON.parse(tools.filter(e => e.type === "TOOL_CALL_ARGS").map(e => e.delta).join("")),{operation_id:requestId});
+    assert.ok(!JSON.stringify(reader.events).includes("private fixture note"));
+    assert.deepEqual(reader.agent.messages,end.messages);
+  }
+});

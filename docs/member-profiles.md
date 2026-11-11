@@ -68,3 +68,23 @@ waiting, pass ownerId, conversationId and requestId to `members -- cancel-pendin
 Each command reads a single JSON object on standard input. The original turn
 finishes after the same SDK receives its native tool result. A retry of the
 same decision returns the recorded choice.
+
+## Delegate tasks from a Pi member
+
+Spawn a Pi member with the `fixture.crew.v1` profile to try delegation locally.
+For example, submit the following text as a turn.
+
+```text
+delegate [{"role":"analyst","task":"recall"},{"role":"recorder","task":"record assigned cedar"}]
+```
+
+The parent may assign up to two tasks in one turn. Each child runs in its own
+Pi coding session with a pinned role, model and tool list. An analyst receives
+only its task. A recorder can request the same work-item approval as the parent.
+Use the invocation and approval IDs from the pending list to answer the intended
+child. The entire turn has one work-item budget. The parent receives both
+results in its original call order, even when the second child finishes first.
+
+Use `members -- cancel-pending` with the parent request ID to cancel active and
+waiting children. The production profile for separately authorized Pi use is
+`pi-go-glm-5.3-flash.crew.v1`.

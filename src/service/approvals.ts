@@ -69,6 +69,14 @@ async function lockTurn(db: PoolClient, scope: Scope) {
   return turn;
 }
 
+export async function confirmedApproval(db: PoolClient, key: Scope & { invocationId: string; approvalId: string }) {
+  const { rows: [row] } = await db.query<CallRow>(
+    `SELECT ${columns} FROM birbcrew_ts.protected_calls p WHERE p.conversation_id=$1 AND p.request_id=$2
+     AND p.invocation_id=$3 AND p.approval_id=$4`, [key.conversationId, key.requestId, key.invocationId, key.approvalId]);
+  if (!row) throw new MemberStoreError("not_found");
+  return publicApproval(key, row);
+}
+
 async function findCall(db: PoolClient, key: CallKey) {
   const { rows: [row] } = await db.query<CallRow>(
     `SELECT ${columns} FROM birbcrew_ts.protected_calls p WHERE p.conversation_id = $1 AND p.request_id = $2
@@ -122,7 +130,7 @@ export class ApprovalStore {
     });
   }
 
-  async propose(input: z.input<typeof proposalSchema>, pendingCheckpoint?: unknown, recoverStopped = false): Promise<Approval> {
+  async propose(input: z.input<typeof proposalSchema>, pendingCheckpoint?: unknown, mode?: {recoverStopped:true} | {childGeneration:string}): Promise<Approval> {
     const key = proposalSchema.parse(input);
     if (key.arguments.operation_id !== key.requestId) throw new MemberStoreError("conflict");
     const checkpoint = pendingCheckpoint === undefined ? undefined : checkpointSchema.parse(pendingCheckpoint);
@@ -131,8 +139,17 @@ export class ApprovalStore {
     const ids = [key.conversationId, key.requestId, key.invocationId, key.nativeCallId];
     return this.transaction(async (db) => {
       const turn = await lockTurn(db, key);
-      if (turn.token !== key.token) throw new MemberStoreError("stale");
-      if (recoverStopped && turn.phase === "uncertain" && checkpoint?.engine === "claude") {
+      const childGeneration = mode && "childGeneration" in mode ? mode.childGeneration : undefined;
+      if (childGeneration) {
+        const child = await db.query(`SELECT 1 FROM birbcrew_ts.pi_children
+          WHERE child_id=$1 AND conversation_id=$2 AND request_id=$3 AND generation=$4 AND NOT launch_revoked AND phase IN ('running','waiting')
+          AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests
+                          WHERE conversation_id=$2 AND request_id=$3 AND token=$4)`,
+          [key.invocationId, key.conversationId, key.requestId, childGeneration]);
+        if (!child.rowCount || !checkpoint || key.token !== childGeneration) throw new MemberStoreError("stale");
+      }
+      if (!childGeneration && turn.token !== key.token) throw new MemberStoreError("stale");
+      if (mode && "recoverStopped" in mode && turn.phase === "uncertain" && checkpoint?.engine === "claude") {
         const recovered = await db.query(`UPDATE birbcrew_ts.turns t SET phase='started'
           FROM birbcrew_ts.native_launches n WHERE n.conversation_id=t.conversation_id AND n.request_id=t.request_id
             AND n.token=t.token AND t.token=$3 AND t.conversation_id=$1 AND t.request_id=$2 AND n.stopped AND NOT n.recovery_closed
@@ -149,7 +166,9 @@ export class ApprovalStore {
       if (prior) {
         if (prior.argumentDigest !== digest) throw new MemberStoreError("conflict");
         if (checkpoint) {
-          const same = await db.query("SELECT 1 FROM birbcrew_ts.paused_segments WHERE approval_id=$1 AND checkpoint=$2::jsonb",
+          const same = await db.query(childGeneration
+            ? "SELECT 1 FROM birbcrew_ts.pi_children WHERE approval_id=$1 AND native_checkpoint=$2::jsonb"
+            : "SELECT 1 FROM birbcrew_ts.paused_segments WHERE approval_id=$1 AND checkpoint=$2::jsonb",
             [prior.approvalId, JSON.stringify(checkpoint)]);
           if (!same.rowCount) throw new MemberStoreError("conflict");
         }
@@ -169,7 +188,11 @@ export class ApprovalStore {
       );
       if (!inserted.rows.length) throw new MemberStoreError("input_limit");
       const row = inserted.rows[0];
-      if (checkpoint) {
+      if (childGeneration) {
+        const updated = await db.query(`UPDATE birbcrew_ts.pi_children SET phase='waiting',native_checkpoint=$2,approval_id=$3
+          WHERE child_id=$1 AND phase='running' AND generation=$4`, [key.invocationId, JSON.stringify(checkpoint), row.approvalId, childGeneration]);
+        if (!updated.rowCount) throw new MemberStoreError("stale");
+      } else if (checkpoint) {
         await db.query(`INSERT INTO birbcrew_ts.paused_segments (approval_id,conversation_id,request_id,checkpoint)
                         VALUES ($1,$2,$3,$4)`, [row.approvalId, key.conversationId, key.requestId, JSON.stringify(checkpoint)]);
       }
@@ -240,6 +263,14 @@ export class ApprovalStore {
       await db.query("INSERT INTO birbcrew_ts.tool_cancellations (conversation_id, request_id) VALUES ($1,$2)",
         [key.conversationId, key.requestId]);
       await publishObservation(db, key.conversationId, { kind: "cancelled", requestId: key.requestId });
+      const {rows} = await db.query<CallRow>(`SELECT ${columns}
+        FROM birbcrew_ts.protected_calls p JOIN birbcrew_ts.pi_children j USING (approval_id)
+        WHERE p.conversation_id=$1 AND p.request_id=$2 AND j.phase IN ('waiting','resuming')`,
+        [key.conversationId,key.requestId]);
+      for (const call of rows) {
+        await this.settleLocked(db,{...key,invocationId:call.invocationId,nativeCallId:call.nativeCallId,
+          approvalId:call.approvalId,token:turn.token});
+      }
     });
   }
 

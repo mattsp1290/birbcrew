@@ -1,3 +1,5 @@
+import type { ChildOutcome } from "@birbcrew/pi-subagents";
+import type { ChildKey } from "./children.ts";
 import type { Approval } from "./approvals.ts";
 import { z } from "zod";
 
@@ -40,8 +42,9 @@ export type Member = Pick<z.infer<typeof spawnSchema>, "ownerId" | "engine" | "p
 export type Conversation = Member & { conversationId: string };
 export type Checkpoint = z.infer<typeof checkpointSchema>;
 export type BeginTurn =
-  | { kind: "start"; conversation: Conversation; token: string; checkpoint: Checkpoint | null }
+  | { kind: "start"; conversation: Conversation; token: string; checkpoint: Checkpoint | null; childResults?: ChildOutcome[] }
   | { kind: "pending"; approval: Approval }
+  | { kind: "delegated"; children: ChildKey[] }
   | { kind: "replay"; reply: string }
   | { kind: "uncertain" };
 

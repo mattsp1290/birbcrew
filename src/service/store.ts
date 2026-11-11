@@ -1,6 +1,8 @@
 import { requestNativeStop } from "./native-admission.ts";
 import { textProjection } from "./text-stream.ts";
 import { publishObservation } from "./observation.ts";
+import type { ChildOutcome } from "@birbcrew/pi-subagents";
+import { childrenFor } from "./children.ts";
 import { savedProposal, type Approval } from "./approvals.ts";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -66,7 +68,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"]] as const;
+      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -153,6 +155,8 @@ export class MemberStore {
         }
         if (turn.reply !== null) return { kind: "complete", text: turn.reply } as const;
         if (!resuming && turn.phase === "started") {
+          const children = await childrenFor(db, conversation, key.requestId);
+          if (children.length) return {kind:"delegated" as const, children};
           const approval = await savedProposal(db, conversation, key.requestId);
           if (approval) return { kind: "pending", approval } as const;
         }
@@ -222,6 +226,8 @@ export class MemberStore {
         if (!turn.prompt_digest.equals(digest)) throw new MemberStoreError("conflict");
         if (turn.reply !== null) return { kind: "replay", reply: turn.reply };
         if (turn.phase === "started") {
+          const children = await childrenFor(db, conversation, key.requestId);
+          if (children.length) return { kind: "delegated", children };
           const approval = await savedProposal(db, conversation, key.requestId);
           if (approval) return { kind: "pending", approval };
         }
@@ -257,7 +263,7 @@ export class MemberStore {
     });
   }
 
-  async beginResume(request: TurnRequest, approval: Approval, execution: Execution) {
+  async beginResume(request: TurnRequest, approval: Approval | null, execution: Execution) {
     const key = submitSchema.parse(request);
     if (execution && execution.attempt > 1) await requestNativeStop(this.pool, key, {
       workflowRunId: execution.workflowRunId,
@@ -265,12 +271,14 @@ export class MemberStore {
     });
     return this.transaction(async (db) => {
       const conversation = await conversationFor(db, key, true);
+      const args = [key.conversationId, key.requestId];
+      const paused = approval
+        ? "SELECT checkpoint,resume_activity_id FROM birbcrew_ts.paused_segments WHERE conversation_id=$1 AND request_id=$2 AND approval_id=$3"
+        : "SELECT parent_checkpoint AS checkpoint,resume_activity_id FROM birbcrew_ts.delegations WHERE conversation_id=$1 AND request_id=$2";
       const { rows: [turn] } = await db.query<TurnRow & {
-        token: string; checkpoint: unknown; resume_activity_id: string | null;
-      }>(`SELECT t.*, s.checkpoint, s.resume_activity_id FROM birbcrew_ts.turns t
-          JOIN birbcrew_ts.paused_segments s USING (conversation_id, request_id)
-          WHERE t.conversation_id=$1 AND t.request_id=$2 AND s.approval_id=$3`,
-        [key.conversationId, key.requestId, approval.approvalId]);
+        checkpoint: unknown; resume_activity_id: string | null;
+      }>(`SELECT t.*,s.checkpoint,s.resume_activity_id FROM birbcrew_ts.turns t CROSS JOIN (${paused}) s
+          WHERE t.conversation_id=$1 AND t.request_id=$2`, approval ? [...args, approval.approvalId] : args);
       if (!turn || !turn.prompt_digest.equals(createHash("sha256").update(key.text).digest()) ||
           turn.workflow_run_id !== execution.workflowRunId) throw new MemberStoreError("stale");
       if (turn.phase === "committed" && turn.reply !== null) return { kind: "replay" as const, reply: turn.reply };
@@ -289,41 +297,61 @@ export class MemberStore {
         `UPDATE birbcrew_ts.turns SET token=gen_random_uuid(),activity_id=$3,attempt=$4
          WHERE conversation_id=$1 AND request_id=$2 RETURNING token`,
         [key.conversationId, key.requestId, execution.activityId, execution.attempt]);
-      await db.query("UPDATE birbcrew_ts.paused_segments SET resume_activity_id=$2 WHERE approval_id=$1",
-        [approval.approvalId, execution.activityId]);
-      await publishObservation(db, key.conversationId, { kind: "resume", approvalId: approval.approvalId });
-      return { kind: "start" as const, token, conversation, checkpoint: checkpointSchema.parse(turn.checkpoint) };
+      let childResults: ChildOutcome[] | undefined;
+      if (approval) {
+        await db.query("UPDATE birbcrew_ts.paused_segments SET resume_activity_id=$2 WHERE approval_id=$1",
+          [approval.approvalId, execution.activityId]);
+        await publishObservation(db,key.conversationId,{kind:"resume",approvalId:approval.approvalId});
+      } else {
+        const { rows } = await db.query<{ outcome: ChildOutcome | null }>(
+          "SELECT outcome FROM birbcrew_ts.pi_children WHERE conversation_id=$1 AND request_id=$2 ORDER BY ordinal", args);
+        childResults = rows.map(({ outcome }) => {
+          if (!outcome) throw new MemberStoreError("busy");
+          return outcome;
+        });
+        if (!childResults.length) throw new MemberStoreError("not_found");
+        await db.query("UPDATE birbcrew_ts.delegations SET resume_activity_id=$3 WHERE conversation_id=$1 AND request_id=$2",
+          [...args, execution.activityId]);
+      }
+      return { kind: "start" as const, token, conversation, checkpoint: checkpointSchema.parse(turn.checkpoint), childResults };
     });
   }
 
-  async previewTool(claim: Claim, nativeCallId: string, matchedOperation = false) {
+  async previewTool(claim: Claim & {childId?:string}, nativeCallId: string, matchedOperation = false) {
     await this.transaction(async (db) => {
       await conversationFor(db, { ownerId: claim.ownerId, conversationId: claim.conversationId }, true);
       const { rows: [preview] } = await db.query<{ public_id: string }>(`INSERT INTO birbcrew_ts.tool_previews AS p
         (conversation_id,request_id,invocation_id,native_call_id,generation)
-        SELECT t.conversation_id,t.request_id,t.request_id,$4,t.token FROM birbcrew_ts.turns t
-        JOIN birbcrew_ts.native_launches n USING(conversation_id,request_id,token)
-        WHERE t.conversation_id=$1 AND t.request_id=$2 AND t.token=$3 AND t.phase='started' AND NOT n.stopped
-          AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests WHERE conversation_id=$1 AND request_id=$2 AND token=$3)
+        SELECT n.conversation_id,n.request_id,COALESCE(n.child_id,t.request_id),$4,n.token
+          FROM birbcrew_ts.native_launches n JOIN birbcrew_ts.turns t USING(conversation_id,request_id)
+          LEFT JOIN birbcrew_ts.pi_children j ON j.child_id=n.child_id
+         WHERE n.conversation_id=$1 AND n.request_id=$2 AND n.token=$3 AND n.child_id IS NOT DISTINCT FROM $5::uuid
+           AND t.phase='started' AND NOT n.stopped AND
+           ((n.child_id IS NULL AND t.token=n.token) OR (j.generation=n.token AND j.phase='running' AND NOT j.launch_revoked))
+           AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests WHERE conversation_id=$1 AND request_id=$2 AND token=$3)
         ON CONFLICT (conversation_id,request_id,invocation_id) DO UPDATE SET public_id=p.public_id
         WHERE p.native_call_id=EXCLUDED.native_call_id AND p.generation=EXCLUDED.generation RETURNING public_id`,
-        [claim.conversationId, claim.requestId, claim.token, nativeCallId]);
+        [claim.conversationId, claim.requestId, claim.token, nativeCallId, claim.childId ?? null]);
       if (!preview) throw new MemberStoreError("stale");
-      await publishObservation(db, claim.conversationId, { kind: "toolPreview", invocationId: claim.requestId, publicId: preview.public_id });
+      await publishObservation(db, claim.conversationId, { kind: "toolPreview", invocationId: claim.childId ?? claim.requestId, publicId: preview.public_id });
       if (matchedOperation) await publishObservation(db, claim.conversationId, {
-        kind: "toolValue", invocationId: claim.requestId, publicId: preview.public_id, requestId: claim.requestId,
+        kind: "toolValue", invocationId: claim.childId ?? claim.requestId, publicId: preview.public_id, requestId: claim.requestId,
       });
     });
   }
 
-  async appendText(claim: Claim, messageId: string, index: number, delta: string) {
+  async appendText(claim: Claim & { childId?: string }, messageId: string, index: number, delta: string) {
     await this.transaction(async (db) => {
       await conversationFor(db, { ownerId: claim.ownerId, conversationId: claim.conversationId }, true);
-      const active = await db.query(`SELECT 1 FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2
-        AND token=$3 AND phase='started' AND NOT EXISTS (
-          SELECT 1 FROM birbcrew_ts.native_stop_requests WHERE conversation_id=$1 AND request_id=$2 AND token=$3)`, [claim.conversationId, claim.requestId, claim.token]);
+      const args = [claim.conversationId,claim.requestId,claim.token];
+      const active = claim.childId
+        ? await db.query(`SELECT 1 FROM birbcrew_ts.pi_children WHERE conversation_id=$1 AND request_id=$2 AND generation=$3
+           AND child_id=$4 AND phase IN ('running','resuming') AND NOT launch_revoked
+           AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests WHERE conversation_id=$1 AND request_id=$2 AND token=$3)`, [...args,claim.childId])
+        : await db.query(`SELECT 1 FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2 AND token=$3 AND phase='started'
+           AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests WHERE conversation_id=$1 AND request_id=$2 AND token=$3)`, args);
       if (!active.rowCount) throw new MemberStoreError("stale");
-      await publishObservation(db, claim.conversationId, { kind: "text", messageId, index, delta });
+      await publishObservation(db, claim.conversationId, { kind:"text", messageId,index,delta,childId:claim.childId });
     });
   }
 

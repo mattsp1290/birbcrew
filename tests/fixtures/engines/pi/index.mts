@@ -5,6 +5,8 @@ import { createTranslator, toAguiMessages } from "@ag-ui/pi";
 import { Agent } from "@earendil-works/pi-agent-core";
 import {
   type Context,
+  getCurrentTools,
+  type ToolCall,
   type JsonObject,
   contentText,
   createAssistantMessageEventStream,
@@ -16,7 +18,12 @@ import {
   fauxProvider,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { z } from "zod";
 import { Observable } from "rxjs";
+
+const recordToolSchema = z.object({
+  properties: z.object({ operation_id: z.object({ const: z.string() }) }),
+});
 
 const model = fauxProvider({ api: "birbcrew-fixture" }).getModel();
 
@@ -25,6 +32,7 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
     .filter((message) => message.role === "user")
     .map((message) => contentText(message.content));
   const latest = prompts.at(-1);
+  const wait = latest === "wait" || latest === "child wait";
   const prefix = "remember ";
   const remembered = prompts.findLast((text) => text.startsWith(prefix))?.slice(prefix.length);
   const stream = createAssistantMessageEventStream();
@@ -40,10 +48,24 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
     return stream;
   }
   const last = context.messages.findLast((message) => message.role !== "system");
+  let calls: ToolCall[] | undefined;
+  if (latest?.startsWith("delegate ") && last?.role !== "toolResult") {
+    const tasks: JsonObject[] = JSON.parse(latest.slice("delegate ".length));
+    calls = tasks.map((args) => fauxToolCall("delegate_task", args, { id: "call_" + randomUUID() }));
+  }
+  if (calls) {
+    const preamble = "Assigning tasks.";
+    const message = fauxAssistantMessage([{type:"text", text:preamble},...calls],{stopReason:"toolUse",responseId:randomUUID()});
+    stream.push({type:"start",partial:fauxAssistantMessage("")});
+    stream.push({type:"text_delta",contentIndex:0,partial:fauxAssistantMessage(preamble),delta:preamble});
+    stream.push({type:"done",reason:"toolUse",message});
+    return stream;
+  }
   if (latest?.startsWith("record ") && last?.role !== "toolResult") {
     const [, operation, ...words] = latest.split(" ");
     const gate = streamGate(latest.slice(7));
-    const operation_id = gate ? words[0] : operation;
+    const tool = getCurrentTools(context.messages).find(t => t.name === "record_work_item");
+    const operation_id = gate ? words[0] : operation === "assigned" ? recordToolSchema.parse(tool?.parameters).properties.operation_id.const : operation;
     const args: JsonObject = { operation_id, note: !gate && words.length ? words.join(" ") : "private fixture note" };
     const call = fauxToolCall("record_work_item", args, { id: "call_" + randomUUID() });
     const message = fauxAssistantMessage([call], { stopReason: "toolUse", responseId: randomUUID() });
@@ -77,16 +99,20 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
     return stream;
   }
   let text: string;
-  if (latest?.startsWith("record ") && last?.role === "toolResult") text = "settled " + contentText(last.content);
+  if (latest?.startsWith("delegate ") && last?.role === "toolResult") {
+    const start = context.messages.findLastIndex((m) => m.role === "assistant");
+    const outcomes = context.messages.slice(start + 1).filter((m) => m.role === "toolResult");
+    text = "delegated " + JSON.stringify(outcomes.map((m) => JSON.parse(contentText(m.content))));
+  } else if (latest?.startsWith("record ") && last?.role === "toolResult") text = "settled " + contentText(last.content);
   else if (latest === "recall") text = "recalled " + (remembered ?? "none");
   else if (latest?.startsWith(prefix)) text = "stored " + latest.slice(prefix.length);
-  else if (latest === "wait") text = "waiting";
+  else if (wait) text = "waiting";
   else throw new Error("Unexpected Pi fixture prompt");
 
   const message = fauxAssistantMessage(text, { responseId: randomUUID() });
   stream.push({ type: "start", partial: fauxAssistantMessage("") });
   stream.push({ type: "text_delta", contentIndex: 0, partial: message, delta: text });
-  if (latest === "wait") {
+  if (wait) {
     if (!signal) throw new Error("Pi must supply a cancellation signal");
     if (signal.aborted) fail("aborted");
     else signal.addEventListener("abort", () => fail("aborted"), { once: true });

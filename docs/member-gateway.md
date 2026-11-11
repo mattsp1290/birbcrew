@@ -51,3 +51,10 @@ The fixture suite exercises two official observers during a protected approval o
 Both SDKs also report when they start receiving arguments for a protected work item. Observers first see the public argument prefix `{"operation_id":`. A client joining at that point receives the same tool opener and prefix. When the native arguments contain the expected operation ID, both clients receive its value while the call remains open. The confirmed native proposal closes the arguments and enables the decision. The public tool ID stays the same through the result. If the worker dies before confirmation, the observer receives the closing tool frame and the committed message history.
 
 Active-generation cancellation and Pi child runs have separate implementation and proof gates.
+
+Pi crew profiles publish each delegation with a public tool-call ID. A child’s
+`SUBAGENT_STARTED` carries that ID in `parentToolCallId`. Its text, protected
+tool calls and results carry the same `subagentRunId` until it finishes.
+Connecting during a sibling’s approval restores open child scopes and any
+partial text before further deltas arrive. Cancelling the parent closes active
+children and publishes a cancelled result for pending work items.

@@ -1,3 +1,4 @@
+import { childOpener } from "./child-observation.ts";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
@@ -75,6 +76,15 @@ async function observe(
     await send({ type: E.MESSAGES_SNAPSHOT, messages: snapshot.messages });
     await send({ type: E.STATE_SNAPSHOT, snapshot: snapshot.state }, cursor);
     if (snapshot.state.openStep) await send({ type: E.STEP_STARTED, stepName: snapshot.state.openStep });
+    for (const child of snapshot.state.children ?? []) {
+      if (child.phase !== "running") continue;
+      await send(childOpener(child));
+      const text = snapshot.childText[child.childId];
+      if (text) {
+        await send({ type: E.TEXT_MESSAGE_START, messageId: text.id, role: "assistant", subagentRunId: child.childId });
+        await send({ type: E.TEXT_MESSAGE_CONTENT, messageId: text.id, delta: text.prefix, subagentRunId: child.childId });
+      }
+    }
     if (snapshot.openText) {
       const { id, prefix } = snapshot.openText;
       await send({ type: E.TEXT_MESSAGE_START, role: "assistant", messageId: id });
