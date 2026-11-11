@@ -63,6 +63,8 @@ test('capture produces checksummed generation and rejects tampering or an unfenc
   await writeFile(join(t.bundle,manifest.artifacts[0].file),'tampered');
   await assert.rejects(readRecoveryManifest(t.bundle),/mismatch/);
   await t.pool.query('CREATE TABLE birbcrew_ts.unfenced_test(id int)');
+  await assert.rejects(t.recovery.capture(t.bundle,pins,t.hooks),/already captured/);
+  await t.recovery.resume(t.hooks);
   await assert.rejects(t.recovery.capture(t.bundle,pins,t.hooks),/Unfenced/);
  } finally {await t.cleanup();}
 });

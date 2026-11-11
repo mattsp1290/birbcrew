@@ -106,6 +106,7 @@ export class InstallationRecovery {
  private async captureImpl(directory:string,pins:RecoveryPins,hooks:RecoveryHooks) {
   const generation=await this.freezeImpl();
   const {control:c}=await this.status();
+  if((await this.pool.query("SELECT 1 FROM birbcrew_ts.recovery_runs WHERE generation=$1 AND completed_at IS NOT NULL",[generation])).rowCount) throw new Error("Generation already captured; resume then begin a new generation");
   await hooks.quiesce();
   // Independently await all instrumented native admissions, even if an operator
   // hook accidentally returns before a surviving SDK tears down.
@@ -146,7 +147,8 @@ export class InstallationRecovery {
   if(JSON.stringify(schemas)!==JSON.stringify(manifest.schemaVersions)||c.installation!==manifest.installation||c.generation!==manifest.generation||c.phase==='active'||targetInstance===manifest.sourceInstance||!(c.instance===manifest.sourceInstance||c.instance===targetInstance)) throw new Error('Restored database does not match generation');
   // Checksums cannot authenticate a bundle. Its source/manifest must be trusted;
   // preserve the manifest digest in the operator's independent backup catalog.
-  await this.inventory();
+  const restoredInventory=await this.inventory();
+  if(JSON.stringify(restoredInventory)!==JSON.stringify(manifest.inventory)) throw new Error("Restored inventory does not match generation");
   await this.fence.transfer(c.installation,manifest.sourceInstance,targetInstance,manifest.generation);
   await this.pool.query(`UPDATE birbcrew_ts.recovery_control SET instance_id=$1,phase='restored' WHERE singleton`,[targetInstance]);
   return {generation:manifest.generation,instance:targetInstance,phase:'restored' as const};
