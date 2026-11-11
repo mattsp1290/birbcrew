@@ -1,5 +1,13 @@
 # Conversation ownership
 
+## TypeScript members
+
+An owner spawns a member with a fixed engine and execution profile. Each conversation under that member has its own Temporal workflow, native session and PostgreSQL checkpoints. The authenticated gateway submits commands and serves the committed AG-UI event stream to independent observers.
+
+Pi and Claude release the inference worker during a confirmed human wait. Pi can delegate to two child workflows with separate native sessions and one shared write budget. Codex keeps its invocation-scoped MCP call open until the owner responds or the deadline expires. SQL records the decision, effect receipt and confirmation of native delivery separately. On interruption, clients can distinguish a proven zero-effect call from a committed receipt with unknown delivery. See the [gateway contract](member-gateway.md).
+
+## Historical Python proof
+
 One Temporal workflow owns each conversation. Its stable ID derives from the
 conversation UUID. Durable Updates accept and deduplicate input, validate human
 decisions, and request cancellation. The main workflow loop processes inputs in

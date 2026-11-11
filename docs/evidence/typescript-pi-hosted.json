@@ -1,0 +1,78 @@
+{
+  "status": "VERIFIED",
+  "scope": "approved API journey",
+  "liveProviderVerified": true,
+  "engine": "pi",
+  "auth": "opencode-go",
+  "origin": "https://opencode.ai/inference/go/openai/v1",
+  "model": "glm-5.3-flash",
+  "returnedModelVerified": true,
+  "requests": 12,
+  "maxRequests": 24,
+  "node": "v22.23.3",
+  "architecture": "arm64",
+  "packages": [
+    {
+      "name": "@temporalio/worker",
+      "version": "1.25.0",
+      "integrity": "sha512-I4b/OwhDb/UhyoHLJDCnuKqROSlT95xHACRxOsg0UjH6qgcYCusch+9mLol1IN7ml2cNkSbnm+5hvzpVuywP3Q=="
+    },
+    {
+      "name": "@ag-ui/core",
+      "version": "1.0.4",
+      "integrity": "sha512-Z/G3UXYRyZ/1LcOtCCf6RJiFPTjRqaNublW/kQ7wsfiP4Qw5oIVmvO6NkUQYoqCoMXuXggyD3MMH2Td5OVKECQ=="
+    },
+    {
+      "name": "@ag-ui/client",
+      "version": "1.0.4",
+      "integrity": "sha512-bACZj5CG/B6coQL54/LT0b29RjoyZf7k+XTs1c4+PBpsZbCYCNQ/TVDE5ffvmZvZ4NnH2Zc+JjbIeGdNdYJu8w=="
+    },
+    {
+      "name": "@ag-ui/encoder",
+      "version": "1.0.4",
+      "integrity": "sha512-fq5kqj+kCFtpLhBhfLjv55DRTKdbduFg6Wcsw4VL3uCABSQhH+PLC36vMjbjZdDp9q+mgVrGhRvaW+JdkdfVog=="
+    },
+    {
+      "name": "@ag-ui/pi",
+      "version": "0.0.1",
+      "integrity": "sha512-OImhsyC+QD8qa+PsABPAQOemUqXL6IG3msOK5t6L3gDd74ADHfFVlLXqGpFaRiJdBiJg4g8JYr/4y3itCHRTFA=="
+    },
+    {
+      "name": "@earendil-works/pi-coding-agent",
+      "version": "1.5.2",
+      "integrity": "sha512-mUWI04rqF1Vd/m1q+Ps1XeWsTXEVvRUnsmRa83I3Dzua0Tx5bYS93imeqtIfrXf7PkkaR6ERz+AuQhIJlom5yA=="
+    },
+    {
+      "name": "@birbcrew/pi-subagents",
+      "version": "0.1.0",
+      "integrity": "sha512-qOAabB+552qMruXk4SH0meWSSL8GIVa/N5nijM37aC6MthyNC3LsBj3PopfqXGt0Cpm67VIb7EfJCCwkSD3CbA=="
+    }
+  ],
+  "source": {
+    "revision": "a5e90073ea6475b483f4dec2ec39a78fb65f7885",
+    "state": "clean",
+    "sourceSha256": "3282f9cd84636bd5143fbc453c6f31b7b368568a8d8404d981c3dad8a028cf29"
+  },
+  "lockSha256": "f54ef9af33368f0350aaa362d62851c5f68f19a3bcf6b9ca48055835ca4d8c23",
+  "zeroBeforeApproval": true,
+  "committedWorkItems": 1,
+  "workerContainerReplaced": true,
+  "delegatedChild": true,
+  "answerHashes": [
+    "a5deffaa696fe2dfba4d33caece134394bb329e1b25f4ac311369183f8c4ae79",
+    "8c5f6b3b9a3b84ef1d56dff2e68bddac13e8358c682c4bdcfc6a63097cf23ba8"
+  ],
+  "cleanup": "verified",
+  "billing": "owner-attested",
+  "verifiedGates": [
+    "fresh owner-authorized private account and model",
+    "attributable source and locked engine packages",
+    "selected account, worker and gateway initialized",
+    "two independent observers saw the pending action before any work-item effect",
+    "one approved work item and its provider-returned receipt",
+    "worker container and its /tmp replaced, declared native volume retained",
+    "cold follow-up and both final message files match canonical history",
+    "Go response model and session headers across cold resume, crew parent and child",
+    "disposable services, private client outputs and native volume cleaned up"
+  ]
+}

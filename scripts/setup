@@ -1,7 +1,12 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
-uv sync --locked
+case "${1:-}" in
+  "") uv sync --locked ;;
+  --mode) if [ "${2:-}" != fixture ] || [ "$#" -ne 2 ]; then echo 'Use scripts/setup [--mode fixture]' >&2; exit 2; fi ;;
+  *) echo 'Use scripts/setup [--mode fixture]' >&2; exit 2 ;;
+esac
+scripts/build-native
 mkdir -p .proof/bin
 case "$(uname -m)" in
   aarch64|arm64) arch=arm64 ;;
@@ -12,7 +17,7 @@ if [ ! -x .proof/bin/temporal ]; then
   archive="temporal_cli_1.10.0_linux_${arch}.tar.gz"
   curl -fsSL "https://github.com/temporalio/cli/releases/download/v1.10.0/$archive" -o ".proof/bin/$archive"
   curl -fsSL https://github.com/temporalio/cli/releases/download/v1.10.0/checksums.txt -o .proof/bin/checksums.txt
-  (cd .proof/bin && rg " $archive\$" checksums.txt | sha256sum -c -)
+  (cd .proof/bin && awk -v name="$archive" '$2 == name { print }' checksums.txt | sha256sum -c -)
   tar -xzf ".proof/bin/$archive" -C .proof/bin temporal
 fi
 .proof/bin/temporal --version
@@ -21,13 +26,21 @@ node='node@sha256:363e1587494626837fa7f9a23bdb453d13b0ff3c67c705c2805cfc69c2d2fa
 for image in "$postgres" "$node"; do
   docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image"
 done
-if [ ! -x .proof/bin/node ]; then
+if [ ! -x .proof/bin/node ] || [ ! -e .proof/npm/bin/npm-cli.js ]; then
+  stage=$(mktemp -d .proof/node-install.XXXXXX)
   container=$(docker create "$node")
-  trap 'docker rm "$container" >/dev/null' EXIT
-  docker cp "$container:/usr/local/bin/node" .proof/bin/node
+  trap 'docker rm "$container" >/dev/null; rm -rf "$stage"' EXIT
+  docker cp "$container:/usr/local/bin/node" "$stage/node"
+  docker cp "$container:/usr/local/lib/node_modules/npm" "$stage/npm"
+  mv -f "$stage/node" .proof/bin/node
+  rm -rf .proof/npm
+  mv "$stage/npm" .proof/npm
   docker rm "$container" >/dev/null
+  rm -rf "$stage"
   trap - EXIT
 fi
-.proof/bin/node --version
-docker run --rm --user "$(id -u):$(id -g)" -e npm_config_cache=/tmp/npm-cache \
-  -v "$PWD/clients:/work" -w /work "$node" npm ci --ignore-scripts --no-audit --no-fund
+ln -sf ../npm/bin/npm-cli.js .proof/bin/npm
+export PATH="$PWD/.proof/bin:$PATH"
+node --version
+npm ci --prefix clients --ignore-scripts --no-audit --no-fund
+npm ci --include=dev --no-audit --no-fund

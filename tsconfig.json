@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "erasableSyntaxOnly": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "types": [
+      "node"
+    ],
+    "allowImportingTsExtensions": true,
+    "lib": [
+      "ES2023",
+      "ESNext.String",
+      "ES2024.Promise",
+      "DOM"
+    ]
+  },
+  "include": [
+    "tests/fixtures/engines/**/*.mts",
+    "tests/fixtures/engines/**/*.ts",
+    "src/service/**/*.ts",
+    "tests/service/**/*.ts",
+    "tests/proof/**/*.ts",
+    "tests/proof/**/*.mts"
+  ]
+}

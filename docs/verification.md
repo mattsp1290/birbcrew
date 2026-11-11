@@ -9,18 +9,49 @@ are pinned. The JavaScript lockfile pins the AG-UI clients.
 2. Run `scripts/verify`.
 3. Read `report.json` in the printed temporary evidence directory.
 
-The command runs lint and focused boundary checks before the real-service
-journey. All listeners bind to loopback. Each run uses a fresh PostgreSQL
-container, Temporal development database, credentials, and Beans hub. The
-verifier removes its container and stops its processes. Evidence and disposable
-fixture files remain in the printed temporary directory for inspection. They
-include test credentials and must not be committed wholesale.
+For the historical Python journey, use `scripts/verify` or
+`scripts/verify-legacy --mode test`. Its report and private temporary files
+belong to that run. To reproduce the historical hosted proof, invoke
+`scripts/verify-legacy` explicitly with its approved attestation.
 
-Python runs in isolated mode to prevent the host's automatic Datadog injection
-from changing workflow behavior. The proof records OpenTelemetry locally.
-Local capture does not verify Datadog installation or delivery.
+### TypeScript fixture verification
 
-## Run the subscription journey
+Run `scripts/setup --mode fixture` on Linux with Docker, Git, curl,
+sha256sum, a C compiler and Linux development headers. Claude needs Landlock ABI
+3 or newer and Codex needs ABI 4. Install Beans (`bn`) for the project-note
+cases. Setup installs the pinned Node and Temporal executables, both npm
+lockfiles, and the native launcher. The member fixture path requires no Python
+interpreter. Offline replay also needs Linux user and network namespaces.
+
+Run `scripts/verify --mode fixture` for the combined matrix, or add
+`--engine pi`, `--engine claude`, or `--engine codex` for one member SDK.
+`scripts/verify-members` and `npm run test:integration` use the same Node
+entrypoint. Each run starts disposable PostgreSQL and Temporal on loopback,
+checks two distinct conversations per member before and after cold replacement,
+and cleans up its processes, containers, and native transcripts. Two separate
+`clients/observe.mjs` processes use the client lockfile. One watches throughout
+the conversation and the other attaches to a pending call. The verifier compares
+both saved `.messages.json` files with the complete ordered PostgreSQL and HTTP
+snapshots after the owner approves the call. Engine-specific
+tests cover native calls, approvals, isolation, cancellation and observers.
+The combined run also exercises simultaneous cancellation and offline replay.
+
+Set `BIRBCREW_FIXTURE_EVIDENCE` to an output file outside the checkout for the
+redacted JSON report. Use separate files for fixture and replay evidence. It records selected engines, passed stages, pinned package
+integrities, launcher checksum, source fingerprint, and result. Release evidence
+requires a clean checkout or a verified `git archive`. For an independently
+attested source copy set both `BIRBCREW_SOURCE_REVISION` and
+`BIRBCREW_SOURCE_SHA256` to the revision and source fingerprint established
+from the original checkout.
+
+### Live member verification
+
+The opt-in member entrypoint is `scripts/verify --mode live --engine ENGINE
+--attestation /absolute/private/account.json`. Each provider needs its own
+approved account and credential. Fixture results apply only to the controlled
+local providers. See the [account and profile guide](member-profiles.md).
+
+## Run the Python subscription journey
 
 Before model calls, verify that the chosen account is an eligible OpenCode Go
 subscription and that Extra Usage is disabled. If it is enabled or unknown, stop
@@ -55,3 +86,23 @@ The raw Temporal histories stay in the disposable evidence directory.
 Treat missing, failed, or inconclusive gates as unresolved. Source review cannot
 replace a live integration run. Human review of authentication and permissions
 is required before merge, even when all automated proof checks pass.
+
+### TypeScript history replay and traces
+
+Run `node tests/proof/replay-traces.mts` from the checkout against disposable
+PostgreSQL and Temporal instances using `BIRBCREW_DATABASE_URL` and
+`BIRBCREW_TEMPORAL_ADDRESS`. The probe uses local Claude, Codex and Pi providers and
+requires Linux `unshare --user --net`. It replaces the worker while a Claude and a Pi call await approval. It settles a Codex call on its live connection before the restart. It completes all three conversations and the Pi child, then exports four private histories into a temporary directory. It replays them with
+Temporal’s TypeScript Worker in a separate process with no network interfaces,
+checks that the provider request log and receipt ledger are unchanged, and
+removes the histories when it exits. To retain the redacted report with span
+correlations, history hashes, package integrity values and source revision, set
+`BIRBCREW_REPLAY_EVIDENCE` to an output file outside the checkout.
+
+Set `BIRBCREW_TRACE_FILE` on a member worker to write local OpenTelemetry
+spans to a private JSONL file. Model invocations, workflow segments, native
+restores and tool settlement carry the conversation, request, engine and
+Temporal run IDs. A Pi child also carries its child ID. Completed spans from
+the same conversation and request share a trace ID across processes and worker
+replacements. The exporter only records correlation IDs, span relationships,
+timing and status.

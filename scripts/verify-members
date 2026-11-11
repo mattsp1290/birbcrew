@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+if [ -x .proof/bin/node ]; then
+  PATH="$PWD/.proof/bin:$PATH"
+  export PATH
+fi
+exec node tests/proof/verify-members.mts "$@"

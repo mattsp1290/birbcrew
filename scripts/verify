@@ -1,10 +1,11 @@
 #!/bin/sh
 set -eu
-unset PYTHONPATH
-export DD_INJECTION_ENABLED=false
-export DD_TRACE_ENABLED=false
-export DD_INSTRUMENTATION_TELEMETRY_ENABLED=false
 cd "$(dirname "$0")/.."
-uv run --locked ruff check src tests
-uv run --locked python -I -m pytest -q
-exec uv run --locked python -I -m birbcrew.proof "$@"
+# Keep the historical no-argument proof available until member cutover is approved.
+if [ "$#" -eq 0 ]; then exec scripts/verify-legacy; fi
+for option do
+  case "$option" in
+    --engine|--engine=*|fixture|live|--mode=fixture|--mode=live) exec scripts/verify-members "$@" ;;
+  esac
+done
+exec scripts/verify-legacy "$@"

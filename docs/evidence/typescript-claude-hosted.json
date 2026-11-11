@@ -1,0 +1,75 @@
+{
+  "status": "VERIFIED",
+  "scope": "approved API journey",
+  "liveProviderVerified": true,
+  "engine": "claude",
+  "auth": "anthropic-api",
+  "origin": "https://api.anthropic.com",
+  "model": "claude-sonnet-4-6",
+  "requests": 3,
+  "maxRequests": 12,
+  "node": "v22.23.3",
+  "architecture": "arm64",
+  "packages": [
+    {
+      "name": "@temporalio/worker",
+      "version": "1.25.0",
+      "integrity": "sha512-I4b/OwhDb/UhyoHLJDCnuKqROSlT95xHACRxOsg0UjH6qgcYCusch+9mLol1IN7ml2cNkSbnm+5hvzpVuywP3Q=="
+    },
+    {
+      "name": "@ag-ui/core",
+      "version": "1.0.4",
+      "integrity": "sha512-Z/G3UXYRyZ/1LcOtCCf6RJiFPTjRqaNublW/kQ7wsfiP4Qw5oIVmvO6NkUQYoqCoMXuXggyD3MMH2Td5OVKECQ=="
+    },
+    {
+      "name": "@ag-ui/client",
+      "version": "1.0.4",
+      "integrity": "sha512-bACZj5CG/B6coQL54/LT0b29RjoyZf7k+XTs1c4+PBpsZbCYCNQ/TVDE5ffvmZvZ4NnH2Zc+JjbIeGdNdYJu8w=="
+    },
+    {
+      "name": "@ag-ui/encoder",
+      "version": "1.0.4",
+      "integrity": "sha512-fq5kqj+kCFtpLhBhfLjv55DRTKdbduFg6Wcsw4VL3uCABSQhH+PLC36vMjbjZdDp9q+mgVrGhRvaW+JdkdfVog=="
+    },
+    {
+      "name": "@ag-ui/claude-agent-sdk",
+      "version": "0.0.8",
+      "integrity": "sha512-9tteUCCbLzPL004P10KHr2OLJUAbefqnNG2D+hhjqCS/8wC37u2PY2iV43UGXbaT3B44NzplD05o41r1/5GhYA=="
+    },
+    {
+      "name": "@anthropic-ai/claude-agent-sdk",
+      "version": "0.3.306",
+      "integrity": "sha512-kmxcd+4WNhqhqnzODRPM5aOKb1EH2EdlRsf7ZeMx8uQsC1tHAHgHftQGFXGT8yMaYaYlDP9BGYJy1/aYv7IhkQ=="
+    },
+    {
+      "name": "@anthropic-ai/claude-agent-sdk-linux-arm64",
+      "version": "0.3.306",
+      "integrity": "sha512-Vee1MIEqd7I8NKF2GOLxLJOuCghf/k4poEk7E/p6zXCIt7MmmtrK7ph9/WiYqOgEpOagXm8D6fRgEJvxWYGIXg=="
+    }
+  ],
+  "source": {
+    "revision": "505212beecf2f16399c064b35d8466258a44fc5a",
+    "state": "clean",
+    "sourceSha256": "3282f9cd84636bd5143fbc453c6f31b7b368568a8d8404d981c3dad8a028cf29"
+  },
+  "lockSha256": "f54ef9af33368f0350aaa362d62851c5f68f19a3bcf6b9ca48055835ca4d8c23",
+  "zeroBeforeApproval": true,
+  "committedWorkItems": 1,
+  "workerContainerReplaced": true,
+  "answerHashes": [
+    "54f919acb2061f6c1633b7439861867f13bb1ffa4478389a48440542923f4382",
+    "d2ff553385a63172ca57db8d96dda43a6f82e4ff4973cbf7f4d4e06f8a2deb87"
+  ],
+  "cleanup": "verified",
+  "billing": "owner-attested",
+  "verifiedGates": [
+    "fresh owner-authorized private account and model",
+    "attributable source and locked engine packages",
+    "selected account, worker and gateway initialized",
+    "two independent observers saw the pending action before any work-item effect",
+    "one approved work item and its provider-returned receipt",
+    "worker container and its /tmp replaced, declared native volume retained",
+    "cold follow-up and both final message files match canonical history",
+    "disposable services, private client outputs and native volume cleaned up"
+  ]
+}

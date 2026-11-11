@@ -1,5 +1,25 @@
 # Milestone evidence status
 
+## TypeScript members
+
+The [TypeScript fixture report](typescript-members.json) records the source fingerprint, package integrities and results for Claude, Codex and Pi. Each engine ran against a local provider using its pinned native SDK. The combined run used a clean Git archive on Linux arm64 with Python removed. Two independent AG-UI client processes per engine saved transcripts matching both the gateway and PostgreSQL. Offline replay covered the three member workflows and a Pi child.
+
+Independent implementation review covered `9fd67ce73ada5274e5e9560ad3aafe0c8e6d3e63`. Reviewers exercised the receipt and cancellation races, Pi child ordering, account-proof authorization, report provenance and cleanup. If Codex loses a pending native call, the observer shows the known effect and whether delivery was confirmed. A committed receipt survives worker loss or cancellation.
+
+Pi passed [hosted acceptance on OpenCode Go](typescript-pi-hosted.json) with `glm-5.3-flash` at `a5e9007`. Two independent observers verified one approved work item and its receipt, cold recall after worker replacement, and a separate Pi child session. The run used 12 provider requests.
+
+Claude passed [hosted acceptance on the Anthropic API](typescript-claude-hosted.json) with `claude-sonnet-4-6` at `505212b`. Both observers saw the pending call before the write and recovered matching histories after cold recall. All three provider requests succeeded.
+
+The first hosted Codex attempt at `d32edd1` received HTTP 200 from OpenAI. Two observers saw the pending tool call with zero work items before approval. The run ended after one provider request, before verifying receipt delivery or cold recall. A controlled regression reproduced the failure when the native client finished reading a completed Responses stream before HTTP end-of-stream. After the relay repair, the same controlled test passed through receipt delivery and cold recall.
+
+Codex passed [hosted acceptance on the OpenAI API](typescript-codex-hosted.json) with `gpt-5.4` at `4b823e7`. Three of the 12 authorized requests were used. Both observers saw one approved receipt and matching history. After worker replacement the same native thread recalled the marker with only the new prompt supplied.
+
+The [first ChatGPT subscription attempt](typescript-codex-subscription-attempt.json) used the same API model, `gpt-5.4`. ChatGPT rejected the model with HTTP 400 on the first request. The local Codex fixture passed on the same revision, `7b55900`.
+
+Human authentication and permissions sign-off and the production cutover are pending. The historical live evidence below belongs to the Python implementation.
+
+## Historical Python milestone
+
 All twelve required runtime journeys are verified across the final clean
 deterministic and live reports. The final live run returned glm-5.3-flash through
 the selected Go endpoint after native identity checks, replay, and telemetry.
