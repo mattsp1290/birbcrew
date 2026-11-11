@@ -99,7 +99,7 @@ async function turn(host, threadId, prompt, t, cancel = false) {
   }
 }
 
-for (const engine of ["claude", "pi"]) {
+for (const engine of ["claude", "pi", "codex"]) {
   test(`${engine} clean consumer`, { timeout: 120_000 }, async (t) => {
     const { createFixture } = await import(`./${engine}/index.mts`);
     const providerFailure = t.mock.fn();

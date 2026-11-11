@@ -27,3 +27,15 @@ test("Pi's public coding-session example loads in the consumer", async () => {
   const { createExampleServer } = await import("@ag-ui/pi/examples/server");
   assert.equal(typeof createExampleServer, "function");
 });
+
+test("the locked official Codex packages launch the pinned Linux CLI", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const pins = JSON.parse(await readFile(new URL("vendor/ag-ui/codex-packages.json", root), "utf8"));
+  const { packages } = JSON.parse(await readFile(new URL("package-lock.json", root), "utf8"));
+  for (const pin of pins.packages) {
+    const pkg = packages[pin.installPath];
+    assert.deepEqual([pkg.version, pkg.integrity, pkg.resolved, pkg.license], [pin.version, pin.integrity, pin.download, pin.license]);
+  }
+  const binary = new URL("node_modules/@openai/codex/bin/codex.js", root);
+  assert.equal(execFileSync(process.execPath, [binary.pathname,"--version"], {encoding:"utf8"}).trim(), "codex-cli 0.167.1");
+});

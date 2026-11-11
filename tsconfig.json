@@ -14,6 +14,7 @@
     "lib": [
       "ES2023",
       "ESNext.String",
+      "ES2024.Promise",
       "DOM"
     ]
   },
