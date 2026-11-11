@@ -124,6 +124,7 @@ if (process.argv[2] === "offline-replay") {
         },"approval worker registration");
         for (const engine of ["claude","codex","pi"] as Engine[]) {
           for(const cancel of [false,true]) {
+            console.log(`Checking ${engine} fourth-turn ${cancel?"cancellation":"approval"} boundary`);
             const member=await create(engine,"fixture.approval.v1");
             const key=await member.open();
             const workflowId=`birbcrew-ts/member/${member.memberId}/conversation/${key.conversationId}`;
@@ -137,7 +138,14 @@ if (process.argv[2] === "offline-replay") {
             void queued.catch(()=>{});
             // Codex live callbacks are not resumable after process loss; their uncertain
             // outcomes are qualified separately. Do not pretend a live approval survives.
-            if(engine!=="codex") { await stop(); stop=await s.worker(); }
+            if(engine!=="codex") {
+              // The public card precedes the durable native pause. Kill only after
+              // the checkpoint exists, as in the existing decision-recovery proof.
+              // Killing the in-flight proposal instead is an uncertain-outcome test.
+              await until(async()=>await s.sql(`SELECT count(*) FROM birbcrew_ts.paused_segments WHERE conversation_id='${key.conversationId}' AND request_id='${request.requestId}'`)==="1"||undefined,
+                "durable fourth-turn native pause before worker replacement");
+              await stop(); stop=await s.worker();
+            }
             assert.equal((await temporal.workflow.getHandle(workflowId).describe()).runId,before,"Pending fourth turn prevents rollover");
             if(cancel) await command("cancel-pending",request);
             else await command("decide",decision(card,"approve"));
@@ -150,6 +158,7 @@ if (process.argv[2] === "offline-replay") {
         // An accepted successor in the same generation must receive a durable rejection
         // when its pending predecessor is cancelled, not disappear with the workflow.
         for (const engine of ["claude","codex","pi"] as Engine[]) {
+          console.log(`Checking ${engine} accepted-successor cancellation disposition`);
           const member=await create(engine,"fixture.approval.v1");
           const key=await member.open();
           const predecessor={...key,requestId:randomUUID()};
@@ -194,7 +203,7 @@ if (process.argv[2] === "offline-replay") {
       const safe = raw.replace(/Bearer\s+[^\s"',}]+/gi,"Bearer [REDACTED]")
         .replace(/(authorization["']?\s*[:=]\s*)[^\r\n]+/gi,"$1[REDACTED]");
       await writeFile(join(output,name),safe,{mode:0o600});
-      console.error(`${name} (last40 lines):\n${safe.split("\n").slice(-40).join("\n")}`);
+      console.error(`${name} (last120 lines):\n${safe.split("\n").slice(-120).join("\n")}`);
     }
     console.error(`Rollover failed; bounded diagnostic logs retained in ${output}`);
     throw error;
