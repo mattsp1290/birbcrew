@@ -1,3 +1,5 @@
+import { appendFile } from "node:fs/promises";
+import { streamGate, waitForGate } from "../stream-gate.mts";
 import { once } from "node:events";
 import { createServer, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
@@ -45,7 +47,24 @@ export async function startProvider(onFailure = () => {}) {
       const lastUser = input.findLastIndex(i => i.role === "user");
       const output = input.slice(lastUser + 1).findLast(i => i.type === "function_call_output") ??
         (prompt === "continue" ? input.findLast(i => i.type === "function_call_output") : undefined);
-      if ((prompt?.startsWith("record ") || prompt === "choose") && !output) {
+      if (output && process.env.BIRBCREW_PROOF_CODEX_REQUESTS) {
+        // Record only fixture UUIDs and fixed outcome markers, never provider requests.
+        const serialized = JSON.stringify(output.output);
+        const ids = serialized.match(/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}/gi) ?? [];
+        const outcomes = ["denied","aborted","inspect","test"].filter(kind => serialized.includes(kind));
+        await appendFile(process.env.BIRBCREW_PROOF_CODEX_REQUESTS,JSON.stringify({callId:output.call_id,ids,outcomes}) + "\n",{mode:0o600});
+      }
+      const gate = streamGate(prompt);
+      if (gate) {
+        for (const [index,text] of ["first"," second"].entries()) {
+          const item = {type:"message",id:"msg_" + randomUUID(),role:"assistant",
+            phase:index ? "final_answer" : "commentary",content:[{type:"output_text",text}]};
+          send(response,"response.output_item.added",{output_index:index,item:{...item,content:[]}});
+          send(response,"response.output_text.delta",{output_index:index,item_id:item.id,content_index:0,delta:text});
+          await waitForGate(gate + (index ? ".second" : ".first"));
+          send(response,"response.output_item.done",{output_index:index,item});
+        }
+      } else if ((prompt?.startsWith("record ") || prompt === "choose") && !output) {
         const ordinary = prompt === "choose";
         const operation = ordinary ? randomUUID() : prompt.slice(7);
         const catalog = input.filter(i => i.role === "developer" && i.type === "message").flatMap(i => {
