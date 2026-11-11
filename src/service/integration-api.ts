@@ -33,11 +33,11 @@ export interface RequestReceipt {
 /** Public contract adapter; no SDK or Temporal internals are exposed to HTTP consumers. */
 export class IntegrationApi {
   readonly store: MemberStore;
-  readonly members: Pick<MemberClient, "accept" | "cancelPending">;
+  readonly members: Pick<MemberClient, "accept" | "cancelPending" | "requestStatus">;
   private readonly delivering = new Set<string>();
   private scanning = false;
 
-  constructor(store: MemberStore, members: Pick<MemberClient, "accept" | "cancelPending">) {
+  constructor(store: MemberStore, members: Pick<MemberClient, "accept" | "cancelPending" | "requestStatus">) {
     this.store = store;
     this.members = members;
   }
@@ -52,6 +52,9 @@ export class IntegrationApi {
 
   async status(input: unknown): Promise<RequestReceipt> {
     const key = keySchema.parse(input);
+    // Reconcile an accepted/no-turn receipt against a terminal logical workflow.
+    // This observes Temporal only: it never starts a workflow or dispatches inference.
+    await this.members.requestStatus(key);
     const { rows: [row] } = await this.store.pool.query<{
       admission: string; reason: string | null; phase: string | null; reply: string | null;
       receipt_id: string | null; delivered_at: Date | null; stopped: boolean; waiting: boolean;
