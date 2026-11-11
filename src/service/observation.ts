@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { applyChild, insertToolResult, type ChildChange, type ObservedChild } from "./child-observation.ts";
+import { applyChild, endChildStep, insertToolResult, type ChildChange, type ObservedChild } from "./child-observation.ts";
 import { EventType as E, type Event, type Message } from "@ag-ui/core";
 import type { Pool, PoolClient } from "pg";
 import type { Approval, ToolOutcome } from "./approvals.ts";
@@ -78,6 +78,7 @@ function logicalKey(change: Change) {
     case "text": return "text/" + change.messageId + "/" + change.index;
     case "toolValue": return change.kind + "/" + change.publicId;
     case "toolPreview": return "toolPreview/" + change.publicId;
+    case "childResumed":
     case "childStarted":
     case "childEnded": return change.kind + "/" + change.childId;
     case "call": return "call/" + change.approval.approvalId;
@@ -135,6 +136,7 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
       commitPreamble();
       frames.push(...applyChild(state.children ??= [], messages, change));
       break;
+    case "childResumed":
     case "childStarted":
       frames.push(...applyChild(state.children ??= [], messages, change));
       break;
@@ -197,6 +199,10 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
       }
       frames.push({ type: E.TOOL_CALL_END, toolCallId: approvalId, ...attribution });
       if (invocationId === requestId) finishStep();
+      else {
+        const child = state.children?.find(c => c.childId === invocationId);
+        if (child) frames.push(...endChildStep(child));
+      }
       break;
     }
     case "answered":
@@ -246,7 +252,7 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
         if (child.requestId !== change.requestId || (child.phase !== "ready" && child.phase !== "running")) continue;
         if (child.phase === "running") {
           finishText(child.childId);
-          frames.push({ type: E.SUBAGENT_ERROR, subagentRunId: child.childId,
+          frames.push(...endChildStep(child), { type: E.SUBAGENT_ERROR, subagentRunId: child.childId,
             code: "cleanup_unconfirmed", message: "Child task interrupted" });
         }
         child.phase = "uncertain";
@@ -256,7 +262,16 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
       state.pendingApprovals = [];
       break;
   }
-  if (change.kind !== "resume" && change.kind !== "answered" && change.kind !== "cancelled") {
+  // A finalized snapshot omits live messages and would remove them from HttpAgent.
+  const hasPartialMessage = snapshot.openText || Object.keys(snapshot.childText).length || Object.keys(snapshot.openTools).length;
+  if (!hasPartialMessage && change.kind !== "resume" && change.kind !== "answered" && change.kind !== "cancelled") {
+    if ((change.kind === "childEnded" || change.kind === "failed") && state.children?.some(c => c.requestId === change.requestId) &&
+      state.children.every(c => c.requestId !== change.requestId || (c.phase !== "ready" && c.phase !== "running"))) {
+      // HttpAgent updates existing IDs in place. Drop this delegation’s provisional ordering
+      // before replaying its canonical history, now that every sibling stream has closed.
+      const delegation = messages.findIndex(m => m.id === change.requestId + "/delegation");
+      if (delegation >= 0) frames.push({ type: E.MESSAGES_SNAPSHOT, messages: messages.slice(0, delegation + 1) });
+    }
     frames.push({ type: E.MESSAGES_SNAPSHOT, messages });
   }
   frames.push({ type: E.STATE_SNAPSHOT, snapshot: state });

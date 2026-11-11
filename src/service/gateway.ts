@@ -79,6 +79,7 @@ async function observe(
     for (const child of snapshot.state.children ?? []) {
       if (child.phase !== "running") continue;
       await send(childOpener(child));
+      if (child.openStep) await send({ type: E.STEP_STARTED, stepName: child.openStep, subagentRunId: child.childId });
       const text = snapshot.childText[child.childId];
       if (text) {
         await send({ type: E.TEXT_MESSAGE_START, messageId: text.id, role: "assistant", subagentRunId: child.childId });

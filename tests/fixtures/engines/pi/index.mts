@@ -86,6 +86,14 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
     stream.push({ type: "done", reason: "toolUse", message });
     return stream;
   }
+  const silentGate = latest?.startsWith("silent ") && streamGate(latest.slice(7));
+  if (silentGate) {
+    stream.push({ type: "start", partial: fauxAssistantMessage("") });
+    void waitForGate(silentGate).then(() => {
+      stream.push({ type: "done", reason: "stop", message: fauxAssistantMessage("step complete", { responseId: randomUUID() }) });
+    }, () => fail("error"));
+    return stream;
+  }
   const gate = streamGate(latest);
   if (gate) {
     const first = fauxAssistantMessage("first");

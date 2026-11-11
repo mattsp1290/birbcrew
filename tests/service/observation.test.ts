@@ -450,6 +450,11 @@ test("two HttpAgents restore child text while its sibling awaits approval", { ti
   const { approvalId, invocationId, version } = paused.state.pendingApprovals[0];
   await host.post(path + "/human", { memberId, requestId, approvalId, invocationId, version, choice: "deny" });
   await until(async () => first.events.some(e => e.type === "SUBAGENT_FINISHED" && e.subagentRunId === invocationId) || undefined);
+  for (const reader of [first, second]) {
+    await until(async () => reader.events.some(e => e.type === "STATE_SNAPSHOT" &&
+      (e.snapshot as {children?: {childId: string; phase: string}[]}).children?.some(c => c.childId === invocationId && c.phase === "completed")) || undefined);
+    assert.ok(reader.agent.messages.some(m => m.id === paused.childText[childId].id && m.content === "first"));
+  }
   await writeFile(join(process.env.BIRBCREW_PROOF_STREAM_DIR!, gate), "release");
   const terminal = await until(async () => {
     const snapshot = await (await host.api(path)).json();
@@ -615,3 +620,39 @@ for (const interruption of ["streaming", "pending", "unconfirmed"] as const) {
     assert.equal((await host.db.query("SELECT 1 FROM birbcrew_ts.work_items WHERE conversation_id=$1 AND approval_id=$2", [conversationId,sibling.approval_id])).rowCount, 1);
   });
 }
+
+test("two HttpAgents keep a silent child step open across a sibling decision", { timeout: 90_000 }, async t => {
+  const host = await service(t);
+  const requestId = randomUUID(), conversationId = randomUUID(), path = "/conversations/" + conversationId;
+  const {memberId} = await host.post("/members", {requestId:randomUUID(), engine:"pi", profile:"fixture.crew.v1"});
+  await host.post("/conversations", {conversationId, memberId});
+  const first = host.attach(conversationId);
+  await until(async () => first.events.some(e => e.type === "STATE_SNAPSHOT") || undefined);
+  await host.post(path + "/inputs", {requestId, text: "delegate " + JSON.stringify([
+    {role:"analyst", task:"silent stream " + requestId}, {role:"recorder", task:"record assigned checkpoint"}
+  ])});
+  const paused = await until(async () => {
+    const s = await (await host.api(path)).json();
+    return s.state.pendingApprovals.length && s.state.children?.some((c: {openStep?: string}) => c.openStep) ? s : undefined;
+  });
+  const child = paused.state.children.find((c: {role:string}) => c.role === "analyst");
+  assert.ok(child.openStep);
+  assert.deepEqual(paused.childText, {});
+  const second = host.attach(conversationId);
+  await until(async () => second.events.some(e => e.type === "STEP_STARTED" && e.stepName === child.openStep) || undefined);
+  const {approvalId, invocationId, version} = paused.state.pendingApprovals[0];
+  await host.post(path + "/human", {requestId, memberId, approvalId, invocationId, version, choice:"deny"});
+  await until(async () => second.events.some(e => e.type === "SUBAGENT_FINISHED" && e.subagentRunId === invocationId) || undefined);
+  await writeFile(join(process.env.BIRBCREW_PROOF_STREAM_DIR!, requestId), "release");
+  const end = await until(async () => {
+    const s = await (await host.api(path)).json();
+    return s.state.phase === "idle" && [first, second].every(r => r.agent.messages.length === s.messages.length) ? s : undefined;
+  });
+  for (const reader of [first, second]) {
+    const lifecycle = reader.events.filter(e => e.subagentRunId === child.childId &&
+      (e.type.startsWith("SUBAGENT_") || e.type.startsWith("STEP_")));
+    assert.deepEqual(lifecycle.map(e => e.type), ["SUBAGENT_STARTED","STEP_STARTED","STEP_FINISHED","SUBAGENT_FINISHED"]);
+    assert.equal(lifecycle[2].stepName, child.openStep);
+    assert.deepEqual(reader.agent.messages, end.messages);
+  }
+});

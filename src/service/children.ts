@@ -149,7 +149,7 @@ export class ChildStore {
       const admitted = await db.query<{ generation: string }>(`UPDATE birbcrew_ts.pi_children SET generation=gen_random_uuid(),
         workflow_run_id=$2,activity_id=$3,attempt=$4,phase=$5 WHERE child_id=$1 RETURNING generation`,
         [key.childId, exec.workflowRunId, exec.activityId, exec.attempt, resume ? "resuming" : "running"]);
-      if (!resume) await publishObservation(db,key.conversationId,{kind:"childStarted",requestId:key.requestId,childId:key.childId});
+      await publishObservation(db, key.conversationId, { kind: resume ? "childResumed" : "childStarted", requestId: key.requestId, childId: key.childId });
       return { kind: "start", generation: admitted.rows[0].generation, task: row.task };
     });
   }

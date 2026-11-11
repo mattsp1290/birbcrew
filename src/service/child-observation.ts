@@ -6,11 +6,13 @@ interface ChildSummary {
 }
 export interface ObservedChild extends ChildSummary {
   requestId: string;
+  openStep?: string;
   phase: "ready" | "running" | "completed" | "failed" | "cancelled" | "uncertain";
 }
 export type ChildChange =
   | { kind: "delegation"; requestId: string; children: ChildSummary[] }
   | { kind: "childStarted"; requestId: string; childId: string }
+  | { kind: "childResumed"; requestId: string; childId: string }
   | { kind: "childEnded"; requestId: string; childId: string; outcome: "completed" | "failed" | "cancelled"; text?: string };
 
 function callId(childId: string) { return childId + "/delegate"; }
@@ -32,6 +34,13 @@ export function childOpener(child: ObservedChild): SubagentStartedEvent {
   };
 }
 
+export function endChildStep(child: ObservedChild): Event[] {
+  if (!child.openStep) return [];
+  const stepName = child.openStep;
+  delete child.openStep;
+  return [{ type: E.STEP_FINISHED, stepName, subagentRunId: child.childId }];
+}
+
 export function applyChild(children: ObservedChild[], messages: Message[], change: ChildChange, streamedMessageId?: string): Event[] {
   const frames: Event[] = [];
   if (change.kind === "delegation") {
@@ -50,9 +59,12 @@ export function applyChild(children: ObservedChild[], messages: Message[], chang
   const child = children.find(entry => entry.childId === change.childId && entry.requestId === change.requestId);
   if (!child) throw new Error("Missing public Pi delegation");
   const subagentRunId = child.childId;
-  if (change.kind === "childStarted") {
+  if (change.kind === "childStarted" || change.kind === "childResumed") {
     child.phase = "running";
-    return [childOpener(child)];
+    child.openStep = child.childId + (change.kind === "childStarted" ? "/initial" : "/continue");
+    if (change.kind === "childStarted") frames.push(childOpener(child));
+    frames.push({ type: E.STEP_STARTED, stepName: child.openStep, subagentRunId });
+    return frames;
   }
   if (child.phase === "running") {
     if (change.outcome === "completed") {
@@ -63,9 +75,9 @@ export function applyChild(children: ObservedChild[], messages: Message[], chang
           { type: E.TEXT_MESSAGE_CONTENT, messageId, delta: change.text, subagentRunId },
           { type: E.TEXT_MESSAGE_END, messageId, subagentRunId });
       }
-      frames.push({ type: E.SUBAGENT_FINISHED, subagentRunId });
+      frames.push(...endChildStep(child), { type: E.SUBAGENT_FINISHED, subagentRunId });
     } else {
-      frames.push({
+      frames.push(...endChildStep(child), {
         type: E.SUBAGENT_ERROR, subagentRunId, code: change.outcome, message:
           change.outcome === "cancelled" ? "Child task cancelled" : "Child task failed"
       });
