@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { open, realpath } from "node:fs/promises";
-import { isAbsolute, relative } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
@@ -26,6 +27,17 @@ export const codexApproval = account.extend({
   provider: z.literal("openai-api"), approved_sdk_use: z.literal(true),
   model: z.string().regex(/^gpt-[a-z0-9.-]+$/).max(90),
 });
+
+export function codexSubscriptionHome(env: NodeJS.ProcessEnv) {
+  return env.BIRBCREW_CODEX_AUTH_HOME ?? env.CODEX_HOME ?? join(homedir(), ".codex");
+}
+
+export const codexSubscriptionEndpoint = "https://chatgpt.com/backend-api/codex";
+export const codexSubscriptionApproval = codexApproval.extend({
+  provider: z.literal("chatgpt-subscription"),
+  account_id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+});
+export const codexAccountApproval = z.discriminatedUnion("provider", [codexApproval, codexSubscriptionApproval]);
 
 export async function readApproval<T extends { checked_at: string }>(path: string, schema: z.ZodType<T>) {
   if (!isAbsolute(path)) throw new Error("Use an absolute path to the private account attestation");

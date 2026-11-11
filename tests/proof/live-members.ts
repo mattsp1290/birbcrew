@@ -60,7 +60,9 @@ async function journey(account: LiveAccount, services: Services, signal: AbortSi
   verified("two independent observers saw the pending action before any work-item effect");
   const { invocationId, approvalId, version } = approval;
   await post(path + "/human", { requestId, memberId, invocationId, approvalId, version, choice: "approve" });
+  verified("gateway accepted the owner decision");
   const receipt = await until(async () => (await effects()).rows[0]?.receipt_id, signal);
+  verified("approved receipt committed to the work-item ledger");
   const [reply] = await Promise.all([completed(path, reader, receipt), completed(path, second, receipt)]);
   assert.equal((await effects()).rowCount, 1);
   const tool = (await reader.messages()).find((message) => message.role === "tool" && message.toolCallId === approvalId);
@@ -121,6 +123,11 @@ async function journey(account: LiveAccount, services: Services, signal: AbortSi
     ...(account.engine === "pi" && { delegatedChild: true, returnedModelVerified: true }) };
 }
 
+class UpstreamResponseError extends Error {
+  readonly status: number;
+  constructor(status: number) { super("Unexpected upstream response"); this.status = status; }
+}
+
 export async function verifyLive(account: LiveAccount, signal: AbortSignal, controlledTransport?: typeof fetch, verified: (gate: string) => void = () => {}, onAttempt: (count: number) => void = () => {}) {
   const cleanup: (() => Promise<unknown>)[] = [];
   const source = await sourceFingerprint();
@@ -136,10 +143,14 @@ export async function verifyLive(account: LiveAccount, signal: AbortSignal, cont
     const stats = relay.stats();
     assert.ok(stats.requests > 0 && stats.requests <= account.budget && !stats.rejected);
     const lock = await readFile(join(root, "package-lock.json"));
-    result = { status: "VERIFIED", scope: controlledTransport ? "controlled rehearsal" : "approved API journey", liveProviderVerified: !controlledTransport, engine: account.engine, model: account.model,
+    result = { status: "VERIFIED", scope: controlledTransport ? "controlled rehearsal" : account.auth === "chatgpt-subscription" ? "approved subscription journey" : "approved API journey", liveProviderVerified: !controlledTransport, engine: account.engine, model: account.model,
       auth: account.auth, origin: account.origin, requests: stats.requests, maxRequests: account.budget,
       node: process.version, architecture: process.arch, packages, lockSha256: sha(lock),
       workerContainerReplaced: true, ...outcome };
+  } catch (error) {
+    const status = relay.stats().failedUpstreamStatus;
+    if (status !== undefined) throw new UpstreamResponseError(status);
+    throw error;
   } finally {
     let failed = false;
     for (const close of [() => relay.close(), ...cleanup.reverse()]) { try { await close(); } catch { failed = true; } }
@@ -166,8 +177,9 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     const report = await verifyLive(account, AbortSignal.any([controller.signal, AbortSignal.timeout(10 * 60_000)]), undefined,
       (gate) => verifiedGates.push(gate), (count) => { attemptedRequests = count; });
     console.log(JSON.stringify({ ...report, verifiedGates }));
-  } catch {
-    console.error(JSON.stringify({ status: "NOT VERIFIED", stage, verifiedGates, attemptedRequests }));
+  } catch (error) {
+    console.error(JSON.stringify({ status: "NOT VERIFIED", stage, verifiedGates, attemptedRequests,
+      ...(error instanceof UpstreamResponseError && { upstreamStatus: error.status }) }));
     process.exitCode = 1;
   }
 }

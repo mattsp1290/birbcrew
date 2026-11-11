@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { codexExecutable } from "./codex-executable.ts";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { Codex, type McpToolCallItem } from "@openai/codex-sdk";
 import { z } from "zod";
+import { codexSubscriptionEndpoint } from "./accounts.ts";
 
 const uuid = z.uuid();
 const hash = (data: Buffer | string) => createHash("sha256").update(data).digest("hex");
@@ -27,6 +28,7 @@ interface CodexInput {
 export interface CodexProfile {
   ownerId: string; memberId: string; stateDir: string; model: string; apiKey?: string; baseUrl?: string;
   authorize?: () => Promise<void>;
+  subscription?: () => Promise<{ accessToken: string; accountId: string }>;
 }
 
 const loopback = (raw: string) => {
@@ -36,14 +38,6 @@ const loopback = (raw: string) => {
   }
   return url;
 };
-const require = createRequire(import.meta.url);
-function executable() {
-  const arch = process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : undefined;
-  if (process.platform !== "linux" || !arch) throw new Error("Codex member requires Linux arm64 or x64");
-  const pkg = dirname(require.resolve("@openai/codex-linux-" + process.arch + "/package.json"));
-  return join(pkg, "vendor", arch + "-unknown-linux-musl", "bin", "codex");
-}
-
 async function nativeHistory(home: string, scratch: string, nativeId: string, known?: string) {
   // The CLI places rollout files in sessions/YYYY/MM/DD.
   const filePattern = /^sessions\/\d{4}\/\d{2}\/\d{2}\/rollout-[\dT-]+-([0-9a-f-]{36})\.jsonl$/;
@@ -84,8 +78,9 @@ export async function runCodexTurn(input: CodexInput, profile: CodexProfile): Pr
   const ownerDigest = hash(profile.ownerId);
   if (!isAbsolute(profile.stateDir) || !profile.model || !input.text || Buffer.byteLength(input.text) > 16_384) throw new Error("Invalid Codex member input");
   const provider = profile.baseUrl ? loopback(profile.baseUrl) : undefined;
-  const approved = profile.apiKey !== undefined || profile.authorize !== undefined;
-  if ((approved && (!profile.apiKey || !profile.authorize)) || (!approved && !provider)) {
+  const approved = profile.authorize !== undefined;
+  const credentialCount = Number(profile.apiKey !== undefined) + Number(profile.subscription !== undefined);
+  if (credentialCount !== Number(approved) || profile.apiKey === "" || (!approved && !provider)) {
     throw new Error("Approved Codex account required");
   }
   const endpoint = input.mcp && loopback(input.mcp.url);
@@ -117,17 +112,25 @@ export async function runCodexTurn(input: CodexInput, profile: CodexProfile): Pr
     throw new Error("Unexpected Codex configuration in native storage");
   }
   await profile.authorize?.();
+  const subscription = await profile.subscription?.();
+  if (profile.subscription && (!subscription?.accessToken || !subscription.accountId)) throw new Error("Missing Codex subscription identity");
   input.signal.throwIfAborted();
   const sdk = new Codex({
     codexPathOverride: fileURLToPath(new URL("../../.proof/bin/member-launch", import.meta.url)),
     env: {
-      HOME: home, CODEX_HOME: home, PATH: "", TMPDIR: home, BIRBCREW_NATIVE_BINARY: executable(),
+      HOME: home, CODEX_HOME: home, PATH: "", TMPDIR: home, BIRBCREW_NATIVE_BINARY: codexExecutable(),
       BIRBCREW_NATIVE_PARENT: String(process.pid), BIRBCREW_NATIVE_WORKSPACE: scratch,
       BIRBCREW_NATIVE_PROVIDER_PORT: provider?.port ?? "443",
+      ...(subscription && { BIRBCREW_CODEX_BEARER: subscription.accessToken, BIRBCREW_CODEX_ACCOUNT: subscription.accountId }),
       ...(input.mcp && endpoint && { BIRBCREW_NATIVE_MCP_PORT: endpoint.port, BIRBCREW_MCP_AUTH: input.mcp.token }),
     },
-    ...(approved && { apiKey: profile.apiKey, baseUrl: provider?.href ?? "https://api.openai.com/v1" }),
+    ...(profile.apiKey && { apiKey: profile.apiKey, baseUrl: provider?.href ?? "https://api.openai.com/v1" }),
     config: {
+      ...(subscription && { model_provider: "birbcrew_subscription", model_providers: { birbcrew_subscription: {
+        name: "ChatGPT subscription", base_url: provider?.href.replace(/\/$/, "") ?? codexSubscriptionEndpoint,
+        wire_api: "responses", env_key: "BIRBCREW_CODEX_BEARER", env_http_headers: { "ChatGPT-Account-Id": "BIRBCREW_CODEX_ACCOUNT" },
+        requires_openai_auth: false, supports_websockets: false, request_max_retries: 0, stream_max_retries: 0,
+      } } }),
       ...(!approved && provider && { model_provider: "fixture", model_providers: { fixture: { name: "BirbCrew local fixture",
         base_url: provider.href.replace(/\/$/, ""), wire_api: "responses", requires_openai_auth: false,
         supports_websockets: false, request_max_retries: 0, stream_max_retries: 0 } } }),

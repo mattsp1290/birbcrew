@@ -63,6 +63,35 @@ async function localhost(t: TestContext) {
   return { calls, policy, transport, leaked: () => leaked };
 }
 
+test("Codex subscription members bind the approved workspace and reread credentials across turns", async t => {
+  const id = randomUUID();
+  const approval = { ...account(), provider: "chatgpt-subscription", model: "gpt-5.4", approved_sdk_use: true, account_id: id };
+  const path = await attestation(t, approval);
+  const env = { BIRBCREW_CODEX_ATTESTATION: path, BIRBCREW_CODEX_AUTH_HOME: "/trusted/codex", BIRBCREW_CODEX_API_KEY: "unused-api-key" };
+  let accesses = 0;
+  const members = await loadLiveProfiles(env, fetch, async (home, expected) => {
+    assert.equal(home, "/trusted/codex");
+    assert.equal(expected, id);
+    return { accountId: id, accessToken: "synthetic-" + ++accesses };
+  });
+  const name = "chatgpt-gpt-5.4";
+  assert.deepEqual([...members.keys()].sort(), [name + ".approval.v1", name + ".next-step.v1", name + ".v1"]);
+  const member = members.get(name + ".approval.v1");
+  assert.equal(member?.accountId, id);
+  const profile = member?.codex;
+  assert.ok(profile?.authorize && profile.subscription);
+  assert.equal(profile.apiKey, undefined);
+  assert.equal(accesses, 0);
+  for (const n of [1, 2]) {
+    await profile.authorize();
+    assert.equal((await profile.subscription()).accessToken, "synthetic-" + n);
+  }
+  await writeFile(path, JSON.stringify({ ...approval, account_id: randomUUID() }));
+  await assert.rejects(profile.authorize(), /changed/);
+  await writeFile(path, JSON.stringify({ ...approval, provider: "openai-api" }));
+  await assert.rejects(profile.authorize(), /changed/);
+});
+
 test("live profiles require separate keys, eligible accounts and a current owner decision", async (t) => {
   const env = { OPENCODE_API_KEY: "alternate", ANTHROPIC_API_KEY: "other" };
   assert.equal((await loadLiveProfiles(env)).size, 0);

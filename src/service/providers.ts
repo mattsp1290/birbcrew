@@ -1,4 +1,5 @@
-import { claudeApproval, codexApproval, credential, goApproval, goEndpoint, goModel, readApproval, userAgent } from "./accounts.ts";
+import { readCodexSubscription } from "./codex-subscription.ts";
+import { claudeApproval, codexAccountApproval, codexSubscriptionHome, credential, goApproval, goEndpoint, goModel, readApproval, userAgent } from "./accounts.ts";
 import { createProvider, InMemoryCredentialStore, InMemoryModelsStore, type StreamOptions } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { OPENCODE_GO_MODELS } from "@earendil-works/pi-ai/providers/opencode-go.models";
@@ -79,7 +80,7 @@ async function configureGo(key: string, path: string, accountPath: string, trans
   return { model, modelRuntime, prepare };
 }
 
-export async function loadLiveProfiles(env: NodeJS.ProcessEnv, transport: typeof fetch = fetch) {
+export async function loadLiveProfiles(env: NodeJS.ProcessEnv, transport: typeof fetch = fetch, subscriptionCredential = readCodexSubscription) {
   const configured = new Map<string, MemberProfile>();
   const piPath = env.BIRBCREW_PI_ATTESTATION;
   if (piPath) {
@@ -105,13 +106,24 @@ export async function loadLiveProfiles(env: NodeJS.ProcessEnv, transport: typeof
   }
   const codexPath = env.BIRBCREW_CODEX_ATTESTATION;
   if (codexPath) {
-    const { model, account_path } = await readApproval(codexPath, codexApproval);
+    const approval = await readApproval(codexPath, codexAccountApproval);
+    const { model, account_path } = approval;
     const authorize = async () => {
-      const current = await readApproval(codexPath, codexApproval);
-      if (current.account_path !== account_path || current.model !== model) throw new Error("Codex account or model changed");
+      const current = await readApproval(codexPath, codexAccountApproval);
+      if (current.provider !== approval.provider || current.model !== model || current.account_path !== account_path ||
+          (current.provider === "chatgpt-subscription" && approval.provider === "chatgpt-subscription" &&
+           current.account_id !== approval.account_id)) throw new Error("Codex account or model changed");
     };
-    configured.set(`openai-${model}.v1`, { accountId: account_path,
-      codex: { model, authorize, apiKey: credential(env.BIRBCREW_CODEX_API_KEY, "BIRBCREW_CODEX_API_KEY") } });
+    if (approval.provider === "chatgpt-subscription") {
+      const home = codexSubscriptionHome(env);
+      configured.set(`chatgpt-${model}.v1`, {
+        accountId: approval.account_id,
+        codex: { model, authorize, subscription: () => subscriptionCredential(home, approval.account_id) },
+      });
+    } else {
+      configured.set(`openai-${model}.v1`, { accountId: account_path,
+        codex: { model, authorize, apiKey: credential(env.BIRBCREW_CODEX_API_KEY, "BIRBCREW_CODEX_API_KEY") } });
+    }
   }
   for (const [name, profile] of [...configured]) {
     if (profile.pi) configured.set(name.replace(/\.v1$/, ".crew.v1"), { ...profile, delegateTask: true, protectedTool: "record_work_item" });

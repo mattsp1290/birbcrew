@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID, createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, truncate, writeFile } from "node:fs/promises";
 import { createServer, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,6 +48,68 @@ const request = z.object({ tools: z.array(z.looseObject({ type: z.string(), name
 function send(res: ServerResponse, type: string, value: object) {
   res.write("event: " + type + "\ndata: " + JSON.stringify({ type, ...value }) + "\n\n");
 }
+
+test("Codex uses per-turn subscription credentials for the same native thread without storing them", { timeout: 40_000 }, async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), "birb-codex-subscription-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const account = randomUUID(), tokens = [randomUUID(), randomUUID()], marker = randomUUID();
+  const sessions: string[] = [];
+  const server = createServer(async (req, res) => {
+    try {
+      assert.equal(req.method, "POST");
+      assert.equal(req.url, "/scoped/responses");
+      assert.equal(req.headers.authorization, "Bearer " + tokens[sessions.length]);
+      assert.equal(req.headers["chatgpt-account-id"], account);
+      const session = req.headers["session-id"];
+      assert.ok(typeof session === "string");
+      assert.equal(req.headers["thread-id"], session);
+      assert.equal(req.headers.originator, "codex_sdk_ts");
+      assert.match(req.headers["user-agent"] ?? "", /^codex_sdk_ts\//);
+      sessions.push(session);
+      const children = (await readFile(`/proc/self/task/${process.pid}/children`, "utf8")).trim().split(/\s+/);
+      assert.ok(children.length && children[0]);
+      for (const child of children) {
+        const args = await readFile(`/proc/${child}/cmdline`);
+        assert.ok(tokens.every(token => !args.includes(token)), "Subscription credential exposed in native argv");
+      }
+      const body = z.object({
+        store: z.literal(false), stream: z.literal(true), model: z.literal("gpt-5.4"), input: z.array(z.unknown()).min(1),
+      }).parse(await json(req));
+      assert.ok(JSON.stringify(body.input).includes(marker));
+      assert.ok(JSON.stringify(body.input).includes("You are a BirbCrew coworker."));
+      const id = "resp_" + randomUUID();
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      send(res, "response.created", { response: { id } });
+      send(res, "response.output_item.done", { item: { type: "message", id: "msg_" + randomUUID(),
+        role: "assistant", phase: "final_answer", content: [{type: "output_text", text: marker}] } });
+      send(res, "response.completed", { response: { id, usage: {input_tokens: 1, output_tokens: 1, total_tokens: 2} } });
+      res.end();
+    } catch (error) { res.destroy(); t.diagnostic(error instanceof Error ? error.message : "Bad subscription request"); }
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => { server.closeAllConnections(); return new Promise<void>(done => server.close(() => done())); });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  let tokenIndex = 0;
+  const profile = { ownerId: randomUUID(), memberId: randomUUID(), stateDir, model: "gpt-5.4",
+    baseUrl: "http://127.0.0.1:" + address.port + "/scoped", authorize: async () => {},
+    subscription: async () => ({ accessToken: tokens[tokenIndex++], accountId: account }) };
+  const input = { threadId: randomUUID(), runId: randomUUID(), text: "Remember " + marker, checkpoint: null, signal: t.signal };
+  await assert.rejects(runCodexTurn(input, { ...profile, apiKey: "unrelated-key" }), /approved.*required/i);
+  const first = await runCodexTurn(input, profile);
+  const second = await runCodexTurn({ ...input, runId: randomUUID(), text: "Recall the marker", checkpoint: first.checkpoint }, profile);
+  assert.equal(second.text, marker);
+  assert.equal(first.checkpoint.state.nativeId, second.checkpoint.state.nativeId);
+  assert.deepEqual(sessions, [first.checkpoint.state.nativeId, second.checkpoint.state.nativeId]);
+  assert.equal(tokenIndex, 2);
+  for (const file of await readdir(stateDir, {recursive: true, withFileTypes: true})) {
+    if (!file.isFile()) continue;
+    assert.notEqual(file.name, "auth.json");
+    const contents = await readFile(join(file.parentPath, file.name));
+    assert.ok(tokens.every(token => !contents.includes(token)), "Subscription credential persisted in " + file.name);
+  }
+});
 
 test("actual Codex image reads are confined to the conversation on first invocation and resume", { timeout: 55_000 }, async t => {
   const stateDir = await mkdtemp(join(tmpdir(), "birb-codex-isolation-"));
