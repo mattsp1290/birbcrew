@@ -1,3 +1,4 @@
+import { interruptLiveLocked } from "./codex-calls.ts";
 import { captureProjectNotes } from "./project-notes.ts";
 import { requestNativeStop } from "./native-admission.ts";
 import { textProjection } from "./text-stream.ts";
@@ -183,6 +184,7 @@ export class MemberStore {
       }
       await db.query("UPDATE birbcrew_ts.native_launches SET recovery_closed=true WHERE conversation_id=$1 AND request_id=$2",
         [key.conversationId, key.requestId]);
+      if (conversation.engine === "codex") await interruptLiveLocked(db, key);
       await publishObservation(db, key.conversationId, { kind: "failed", requestId: key.requestId });
       return null;
     });
@@ -390,13 +392,14 @@ export class MemberStore {
     const key = claimSchema.parse(input);
     await requestNativeStop(this.pool, key, { token: key.token });
     await this.transaction(async (db) => {
-      await conversationFor(db, key, true);
+      const conversation = await conversationFor(db, key, true);
       const result = await db.query(
         `UPDATE birbcrew_ts.turns SET phase = 'uncertain'
           WHERE conversation_id = $1 AND request_id = $2 AND token = $3 AND phase IN ('started', 'uncertain')`,
         [key.conversationId, key.requestId, key.token],
       );
       if (!result.rowCount) throw new MemberStoreError("stale");
+      if (conversation.engine === "codex") await interruptLiveLocked(db, key, key.token);
       await publishObservation(db, key.conversationId, { kind: "failed", requestId: key.requestId });
     });
   }

@@ -8,10 +8,19 @@ import { MemberStoreError, type Conversation } from "./domain.ts";
 
 const retainedEvents = 256;
 
-type PublicApproval = Omit<Approval, "argumentDigest" | "ownerId" | "nativeCallId"> & { choices: typeof toolChoices.record_work_item };
+type PublicApproval = Omit<Approval, "argumentDigest" | "ownerId" | "nativeCallId"> & { expiresAt?: string; choices: typeof toolChoices.record_work_item };
 type PublicQuestion = Omit<PublicApproval, "choices"> & { choices: typeof toolChoices.choose_next_step };
 type Phase = "idle" | "running" | "waiting" | "complete" | "failed";
+interface ClosedCall {
+  requestId: string;
+  approvalId: string;
+  effect: "none" | "committed" | "unknown";
+  delivery: "confirmed" | "unknown";
+  receiptId?: string;
+}
 type Projection = {
+  interruptedCalls?: ClosedCall[];
+  liveOperations?: (Omit<ClosedCall,"effect"> & {effect:"pending" | ClosedCall["effect"]})[];
   conversationId: string;
   memberId: string;
   engine: Conversation["engine"];
@@ -27,7 +36,9 @@ type Change = ChildChange
   | { kind: "input" | "reply"; requestId: string; text: string }
   | { kind: "toolValue"; invocationId: string; publicId: string; requestId: string }
   | { kind: "toolPreview"; invocationId: string; publicId: string }
-  | { kind: "call"; approval: Approval }
+  | { kind: "call"; approval: Approval; expiresAt?: string }
+  | ({ kind: "liveClosed" } & ClosedCall)
+  | { kind: "liveDelivered"; requestId: string; approvalId: string }
   | { kind: "answered" | "resume"; approvalId: string }
   | { kind: "cancelled"; requestId: string }
   | { kind: "result"; approvalId: string; outcome: ToolOutcome }
@@ -87,6 +98,8 @@ function logicalKey(change: Change) {
     case "call": return "call/" + change.approval.approvalId;
     case "answered":
     case "resume":
+    case "liveClosed":
+    case "liveDelivered":
     case "result": return change.kind + "/" + change.approvalId;
     default: return change.kind + "/" + change.requestId;
   }
@@ -179,7 +192,7 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
       const { memberId, conversationId, requestId, invocationId, approvalId, version, policyVersion,
         toolName, summary } = change.approval;
       commitPreamble(invocationId === requestId ? undefined : invocationId);
-      const card = { memberId, conversationId, requestId, invocationId, approvalId, version, policyVersion, toolName, summary };
+      const card = { ...(change.expiresAt && {expiresAt:change.expiresAt}), memberId, conversationId, requestId, invocationId, approvalId, version, policyVersion, toolName, summary };
       if (toolName === "choose_next_step") (state.pendingQuestions ??= []).push({ ...card, choices: toolChoices.choose_next_step });
       else state.pendingApprovals.push({ ...card, choices: toolChoices.record_work_item });
       state.phase = "waiting";
@@ -202,11 +215,39 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
           { type: E.TOOL_CALL_ARGS, toolCallId: approvalId, ...attribution, delta: args });
       }
       frames.push({ type: E.TOOL_CALL_END, toolCallId: approvalId, ...attribution });
+      if (change.expiresAt) {
+        (state.liveOperations ??= []).push({requestId,approvalId,effect:"pending",delivery:"unknown"});
+        break;
+      }
       if (invocationId === requestId) finishStep();
       else {
         const child = state.children?.find(c => c.childId === invocationId);
         if (child) frames.push(...endChildStep(child));
       }
+      break;
+    }
+    case "liveDelivered": {
+      const op = state.liveOperations?.find(o => o.approvalId === change.approvalId);
+      if (op) op.delivery = "confirmed";
+      break;
+    }
+    case "liveClosed": {
+      const {kind, ...record} = change;
+      (state.interruptedCalls ??= []).push(record);
+      const operation = state.liveOperations?.find(o => o.approvalId === record.approvalId);
+      if (operation) Object.assign(operation,record);
+      state.pendingApprovals = state.pendingApprovals.filter(p => p.approvalId !== record.approvalId);
+      if (state.pendingQuestions) state.pendingQuestions = state.pendingQuestions.filter(p => p.approvalId !== record.approvalId);
+      const content = record.effect === "none"
+        ? "The native call was interrupted before any work item was recorded. Submit a new request in a new conversation with this member for fresh approval."
+        : record.effect === "committed"
+          ? "The work item was recorded. View the existing receipt " + record.receiptId + "."
+          : "The effect of this call is uncertain. Wait for reconciliation before requesting another write.";
+      const messageId = record.approvalId + "/interrupted";
+      messages.push({id:messageId,role:"assistant",content});
+      frames.push({type:E.TEXT_MESSAGE_START,role:"assistant",messageId},
+        {type:E.TEXT_MESSAGE_CONTENT,messageId,delta:content},{type:E.TEXT_MESSAGE_END,messageId});
+      state.phase = "running";
       break;
     }
     case "answered":
@@ -223,6 +264,11 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
       startStep(change.approvalId + "/continue");
       break;
     case "result": {
+      const operation = state.liveOperations?.find(o => o.approvalId === change.approvalId);
+      if (operation) {
+        operation.effect = change.outcome.kind === "recorded" ? "committed" : "none";
+        if (change.outcome.kind === "recorded") operation.receiptId = change.outcome.receipt.receiptId;
+      }
       const id = change.approvalId + "/result";
       const content = change.outcome.kind === "answered" ? change.outcome.choice : JSON.stringify(change.outcome.kind === "recorded" ?
         { kind: "recorded", receiptId: change.outcome.receipt.receiptId } : { kind: change.outcome.kind });

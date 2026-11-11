@@ -4,7 +4,7 @@ import {
 } from "@temporalio/workflow";
 import { acceptsChoice } from "./deferral.ts";
 import { submitSchema, type Conversation, type TurnRequest } from "./domain.ts";
-import type { Approval, Decision } from "./approvals.ts";
+import type { Approval, Decision, Choice } from "./approvals.ts";
 import type { ChildKey, ChildStore } from "./children.ts";
 import type { MemberActivities, Resume } from "./activities.ts";
 
@@ -70,6 +70,18 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   let previous = Promise.resolve();
   let failed = false;
 
+  const liveCalls = new Map<string,string>();
+  const commands = proxyActivities<{
+    decideLive(input: Decision): Promise<Choice>;
+    cancelLive(input: Pick<Approval,"ownerId"|"memberId"|"conversationId"|"requestId">): Promise<void>;
+  }>({taskQueue:memberTaskQueue,startToCloseTimeout:"10 seconds",scheduleToCloseTimeout:"20 seconds",
+    retry:{maximumAttempts:3}});
+  setHandler(defineSignal<[{requestId:string;approvalId:string;invocationId:string}]>("liveProposal"), card => {
+    if (conversation.engine === "codex" && turns.has(card.requestId) && card.requestId === card.invocationId) {
+      liveCalls.set(card.requestId,card.approvalId);
+    }
+  });
+
   let pending: Approval | undefined;
   let answered = false;
   let batch: { requestId: string; children: ChildKey[]; scope: CancellationScope } | undefined;
@@ -92,6 +104,14 @@ export async function memberConversation(conversation: Conversation): Promise<vo
 
   setHandler(defineUpdate<string, [Decision]>("decide"), async (value) => {
     if (value.ownerId !== conversation.ownerId) throw ApplicationFailure.nonRetryable("Conversation not found");
+    if (conversation.engine === "codex") {
+      const advertised = liveCalls.get(value.requestId);
+      if (!turns.has(value.requestId) || (advertised && advertised !== value.approvalId)) {
+        throw ApplicationFailure.nonRetryable("Unknown live call");
+      }
+      // A committed proposal can reach the gateway before its Temporal signal arrives.
+      return commands.decideLive(value);
+    }
     await waitForPublishedCall(value.requestId);
     const child = batch?.requestId === value.requestId && batch.children.find(({ childId }) => childId === value.invocationId);
     if (child) {
@@ -108,6 +128,12 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   setHandler(defineUpdate<void, [{ ownerId: string; conversationId: string; requestId: string }]>("cancelPending"),
     async (value) => {
       if (value.ownerId !== conversation.ownerId) throw ApplicationFailure.nonRetryable("Conversation not found");
+      if (conversation.engine === "codex") {
+        if (!turns.has(value.requestId) || value.conversationId !== conversation.conversationId) {
+          throw ApplicationFailure.nonRetryable("Unknown live turn");
+        }
+        return commands.cancelLive({...value,memberId:conversation.memberId});
+      }
       await waitForPublishedCall(value.requestId);
       const active = batch;
       if (active && active.requestId === value.requestId && value.conversationId === conversation.conversationId) {
@@ -145,6 +171,7 @@ export async function memberConversation(conversation: Conversation): Promise<vo
 
   async function run(request: TurnRequest) {
     const first = await segment(request);
+    liveCalls.delete(request.requestId);
     if (first.kind === "complete") return first.text;
     if (first.kind === "delegated") {
       const scope = new CancellationScope();

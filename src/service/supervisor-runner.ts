@@ -1,3 +1,4 @@
+import { runLiveTool } from "./codex-live.ts";
 import { trustedProjectContext } from "./project-notes.ts";
 import { withNativeAdmission } from "./native-admission.ts";
 import type { Launch } from "./supervisor.ts";
@@ -37,7 +38,10 @@ process.once("message", async (command: AdmittedTurn) => {
       const driver = memberProfiles(profiles, stateDir, process.pid).get(member.profile)?.[member.engine];
       if (!driver) throw new Error("Unsupported member profile");
       const projectContext = command.childProfile ? undefined : await trustedProjectContext(pool, member);
-      reply = await withNativeAdmission(pool,command.launch,AbortSignal.any([controller.signal,AbortSignal.timeout(170_000)]), signal => driver({
+      const profile = profiles.get(member.profile);
+      const tool = profile?.protectedTool ?? profile?.humanTool;
+      reply = await withNativeAdmission(pool,command.launch,AbortSignal.any([controller.signal,AbortSignal.timeout(170_000)]), signal => {
+        const input: DriverInput = {
         ...(projectContext && { projectContext }),
         ...(command.childProfile && {childProfile: command.childProfile}),
         ...(command.childResults && {childResults: command.childResults}),
@@ -45,7 +49,11 @@ process.once("message", async (command: AdmittedTurn) => {
         onToolArgs: (toolArgs, matchedOperation) => process.send?.({ toolArgs, matchedOperation }),
         onText: (delta) => { process.send?.({ delta }); },
         checkpoint: command.checkpoint, continuation: command.continuation, signal,
-      }, member));
+        };
+        return member.engine === "codex" && tool
+          ? runLiveTool(pool, command.launch, member, tool, input, value => driver(value, member))
+          : driver(input, member);
+      });
     } finally {
       await close?.();
     }
