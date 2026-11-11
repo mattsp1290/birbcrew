@@ -67,7 +67,7 @@ async function observe(
   }
   async function finish(phase: unknown) {
     if (phase === "failed") await send({ type: E.RUN_ERROR, code: "MEMBER_FAILED", message: "Member conversation failed" });
-    else if (phase === "complete") await send({ type: E.RUN_FINISHED, threadId, runId });
+    else if (phase === "complete" || phase === "cancelled") await send({ type: E.RUN_FINISHED, threadId, runId });
     else return false;
     return true;
   }

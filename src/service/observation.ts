@@ -10,7 +10,7 @@ const retainedEvents = 256;
 
 type PublicApproval = Omit<Approval, "argumentDigest" | "ownerId" | "nativeCallId"> & { expiresAt?: string; choices: typeof toolChoices.record_work_item };
 type PublicQuestion = Omit<PublicApproval, "choices"> & { choices: typeof toolChoices.choose_next_step };
-type Phase = "idle" | "running" | "waiting" | "complete" | "failed";
+type Phase = "idle" | "running" | "waiting" | "complete" | "cancelled" | "failed";
 interface ClosedCall {
   requestId: string;
   approvalId: string;
@@ -34,7 +34,8 @@ type Projection = {
 
 type Change = ChildChange
   | { kind: "nativeItem"; requestId: string; index: number; text: string }
-  | { kind: "input" | "reply"; requestId: string; text: string }
+  | { kind: "input"; requestId: string; text: string }
+  | { kind: "reply"; requestId: string; text: string; cancelled?: boolean }
   | { kind: "toolValue"; invocationId: string; publicId: string; requestId: string }
   | { kind: "toolPreview"; invocationId: string; publicId: string }
   | { kind: "call"; approval: Approval; expiresAt?: string }
@@ -44,7 +45,7 @@ type Change = ChildChange
   | { kind: "cancelled"; requestId: string }
   | { kind: "result"; approvalId: string; outcome: ToolOutcome }
   | { kind: "text"; childId?: string; messageId: string; index: number; delta: string }
-  | { kind: "failed"; requestId: string };
+  | { kind: "failed" | "stopped"; requestId: string };
 
 type OpenText = { id: string; prefix: string; count: number };
 
@@ -295,7 +296,7 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
       if (items.length) {
         if (items.map(m => m.content).join("") !== change.text) throw new MemberStoreError("conflict");
         finishStep();
-        state.phase = messages.filter(m => m.role === "user").length >= 4 ? "complete" : "idle";
+        state.phase = change.cancelled ? "cancelled" : messages.filter(m => m.role === "user").length >= 4 ? "complete" : "idle";
         break;
       }
       const initialId = change.requestId + "/assistant";
@@ -309,9 +310,10 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
       }
       messages.push({ id, role: "assistant", content: change.text });
       finishStep();
-      state.phase = messages.filter((m) => m.role === "user").length >= 4 ? "complete" : "idle";
+      state.phase = change.cancelled ? "cancelled" : messages.filter((m) => m.role === "user").length >= 4 ? "complete" : "idle";
       break;
     }
+    case "stopped":
     case "failed":
       for (const tool of Object.values(snapshot.openTools)) {
         frames.push({ type: E.TOOL_CALL_END, toolCallId: tool.publicId, ...(tool.subagentRunId && { subagentRunId: tool.subagentRunId }) });
@@ -328,7 +330,7 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
         child.phase = "uncertain";
       }
       finishStep();
-      state.phase = "failed";
+      state.phase = change.kind === "stopped" ? "cancelled" : "failed";
       state.pendingApprovals = [];
       if (state.pendingQuestions) state.pendingQuestions = [];
       break;
@@ -353,7 +355,7 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
 export async function publishObservation(db: PoolClient, id: string, change: Change) {
   const { rows: [snapshot] } = await db.query<StoredSnapshot>(selection + " WHERE c.conversation_id=$1 FOR UPDATE OF c", [id]);
   if (!snapshot) throw new MemberStoreError("not_found");
-  if (!snapshot.complete || snapshot.state.phase === "failed") return;
+  if (!snapshot.complete || snapshot.state.phase === "failed" || snapshot.state.phase === "cancelled") return;
   await db.query(`INSERT INTO birbcrew_ts.public_snapshots (conversation_id,state) VALUES ($1,$2)
     ON CONFLICT DO NOTHING`, [id, JSON.stringify(snapshot.state)]);
   const key = logicalKey(change);

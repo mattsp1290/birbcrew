@@ -393,7 +393,7 @@ test("two HttpAgents close a streaming child and its sibling's protected call on
   await host.post(path + "/cancel", { requestId });
   const snapshot = await until(async () => {
     const state = await (await host.api(path)).json();
-    return state.state.phase === "idle" && [first, second].every(r => r.agent.messages.length === state.messages.length) ? state : undefined;
+    return state.state.phase === "cancelled" && [first, second].every(r => r.agent.messages.length === state.messages.length) ? state : undefined;
   });
   for (const reader of [first, second]) {
     assert.equal(reader.events.filter(e => e.type === "SUBAGENT_ERROR" && e.code === "cancelled").length, 2);

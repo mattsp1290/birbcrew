@@ -69,10 +69,12 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   const turns = new Map<string, { text: string; result: Promise<string> }>();
   let previous = Promise.resolve();
   let failed = false;
+  let cancelled = false;
 
   const liveCalls = new Map<string,string>();
   const commands = proxyActivities<{
     decideLive(input: Decision): Promise<Choice>;
+    cancelGenerating(input: Pick<TurnRequest,"ownerId"|"conversationId"|"requestId">): Promise<boolean>;
     cancelLive(input: Pick<Approval,"ownerId"|"memberId"|"conversationId"|"requestId">): Promise<void>;
   }>({taskQueue:memberTaskQueue,startToCloseTimeout:"10 seconds",scheduleToCloseTimeout:"20 seconds",
     retry:{maximumAttempts:3}});
@@ -132,18 +134,27 @@ export async function memberConversation(conversation: Conversation): Promise<vo
         if (!turns.has(value.requestId) || value.conversationId !== conversation.conversationId) {
           throw ApplicationFailure.nonRetryable("Unknown live turn");
         }
-        return commands.cancelLive({...value,memberId:conversation.memberId});
+        await commands.cancelLive({...value,memberId:conversation.memberId});
+        cancelled = true;
+        return;
+      }
+      if (!batch && !pending && turns.has(value.requestId) && value.conversationId === conversation.conversationId &&
+          await commands.cancelGenerating(value)) {
+        cancelled = true;
+        return;
       }
       await waitForPublishedCall(value.requestId);
       const active = batch;
       if (active && active.requestId === value.requestId && value.conversationId === conversation.conversationId) {
         await cancelPending({ ...value, memberId: conversation.memberId });
+        cancelled = true;
         active.scope.cancel();
         return;
       }
       if (!pending || value.ownerId !== conversation.ownerId || value.conversationId !== conversation.conversationId ||
           value.requestId !== pending.requestId) throw ApplicationFailure.nonRetryable("No matching pending turn");
       await cancelPending(pending);
+      cancelled = true;
       answered = true;
     });
 
@@ -221,7 +232,7 @@ export async function memberConversation(conversation: Conversation): Promise<vo
       if (existing.text !== request.text) throw ApplicationFailure.nonRetryable("Request payload conflict");
       return request;
     }
-    if (failed || turns.size >= 4) throw ApplicationFailure.nonRetryable("Conversation closed to new turns");
+    if (failed || cancelled || turns.size >= 4) throw ApplicationFailure.nonRetryable("Conversation closed to new turns");
     return request;
   }
 
@@ -230,7 +241,7 @@ export async function memberConversation(conversation: Conversation): Promise<vo
     const existing = turns.get(request.requestId);
     if (existing) return existing.result;
     const result = previous.then(async () => {
-      if (failed) throw ApplicationFailure.nonRetryable("Previous turn failed");
+      if (failed || cancelled) throw ApplicationFailure.nonRetryable("Conversation closed");
       return run(request);
     });
     turns.set(request.requestId, { text: request.text, result });
@@ -238,6 +249,6 @@ export async function memberConversation(conversation: Conversation): Promise<vo
     return result;
   }, { validator: validate });
 
-  await condition(() => (failed || turns.size === 4) && allHandlersFinished());
+  await condition(() => (failed || cancelled || turns.size === 4) && allHandlersFinished());
   if (failed) throw ApplicationFailure.nonRetryable("Member conversation failed");
 }

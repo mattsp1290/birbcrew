@@ -102,7 +102,7 @@ for (const action of ["kill","cancel","expiry"] as const) {
     const late = host.attach(conversationId);
     await late.done;
     const end = await state(host,path);
-    assert.equal(end.state.phase,"failed");
+    assert.equal(end.state.phase,action === "cancel" ? "cancelled" : "failed");
     assert.deepEqual(end.state.pendingApprovals,[]);
     assert.deepEqual(await countWrites(host,conversationId),[]);
     assert.equal(end.state.interruptedCalls[0].effect,"none");

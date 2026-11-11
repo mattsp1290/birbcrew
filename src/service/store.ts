@@ -146,6 +146,22 @@ export class MemberStore {
     return turn.reply ?? undefined;
   }
 
+  async cancelGenerating(key: Pick<TurnRequest, "ownerId" | "conversationId" | "requestId">) {
+    return this.transaction(async db => {
+      const member = await conversationFor(db,key,true);
+      const args = [key.conversationId,key.requestId];
+      const {rows:[turn]} = await db.query<{token:string;phase:string}>(
+        "SELECT token,phase FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",args);
+      if (!turn || turn.phase !== "started") throw new MemberStoreError("conflict");
+      if (await savedProposal(db,member,key.requestId) || (await childrenFor(db,member,key.requestId)).length) return false;
+      // Stop publication cannot wait for the SDK's shared grant on the turn row.
+      await db.query("INSERT INTO birbcrew_ts.native_stop_requests VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",[...args,turn.token]);
+      await db.query("INSERT INTO birbcrew_ts.tool_cancellations VALUES ($1,$2) ON CONFLICT DO NOTHING",args);
+      await publishObservation(db,key.conversationId,{kind:"cancelled",requestId:key.requestId});
+      return true;
+    });
+  }
+
   async reconcileTurn(input: z.input<typeof submitSchema>, workflowRunId: string, resuming: boolean, allowRecovery = true) {
     const key = submitSchema.parse(input);
     const digest = createHash("sha256").update(key.text).digest();
@@ -185,7 +201,10 @@ export class MemberStore {
       await db.query("UPDATE birbcrew_ts.native_launches SET recovery_closed=true WHERE conversation_id=$1 AND request_id=$2",
         [key.conversationId, key.requestId]);
       if (conversation.engine === "codex") await interruptLiveLocked(db, key);
-      await publishObservation(db, key.conversationId, { kind: "failed", requestId: key.requestId });
+      const stopped = await db.query(`SELECT 1 FROM birbcrew_ts.tool_cancellations WHERE conversation_id=$1 AND request_id=$2
+        AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.native_launches WHERE conversation_id=$1 AND request_id=$2 AND NOT stopped)`,
+        [key.conversationId,key.requestId]);
+      await publishObservation(db, key.conversationId, { kind: stopped.rowCount ? "stopped" : "failed", requestId:key.requestId });
       return null;
     });
   }
@@ -388,7 +407,9 @@ export class MemberStore {
       );
       if (update.rowCount) {
         const project = await textProjection(db, key.conversationId);
-        await publishObservation(db, key.conversationId, { kind: "reply", requestId: key.requestId, text: project(key.reply, true) });
+        const cancelled = await db.query("SELECT 1 FROM birbcrew_ts.tool_cancellations WHERE conversation_id=$1 AND request_id=$2",
+          [key.conversationId,key.requestId]);
+        await publishObservation(db, key.conversationId, { kind: "reply", requestId: key.requestId, text: project(key.reply, true), cancelled:!!cancelled.rowCount });
         return key.reply;
       }
       const replay = await db.query<{ reply: string }>(
