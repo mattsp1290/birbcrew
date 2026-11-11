@@ -211,8 +211,8 @@ The independent broader consumer suite had one Claude timeout (nine passes, one
 cancelled); no baseline cause was established. Subsequent [Linux CI](https://github.com/mattsp1290/birbcrew/actions/runs/43085082834)
 on `5eb15dc` passed the complete consumer suite (10/10, including Claude) and all
 32 proxy qualification tests. This establishes that run's success, not a diagnosed
-cause for the earlier timeout. A maintained full-service restart scenario remains
-follow-up acceptance.
+cause for the earlier timeout. The maintained scenario below supersedes that portability gap without expanding
+its acceptance scope.
 
 ## Maintained service-restart fixture
 
