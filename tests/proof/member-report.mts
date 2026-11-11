@@ -41,7 +41,12 @@ async function source() {
   }
   for (const root of roots) await collect(root);
   const manifest = [];
-  for (const path of input.sort()) manifest.push({ path, sha256: hash(await readFile(path)) });
+  for (const path of input.sort()) {
+    const bytes = await readFile(path);
+    const normalized = path === "tests/proof/member-report.mts" && /^[a-f0-9]{40}:[a-f0-9]{40}$/.test(archiveStamp)
+      ? bytes.toString("utf8").replace(archiveStamp, "$" + "Format:%H:%T$") : bytes;
+    manifest.push({ path, sha256: hash(normalized) });
+  }
   const sourceSha256 = hash(JSON.stringify(manifest));
   let gitRevision: string | undefined;
   try {
@@ -56,14 +61,14 @@ async function source() {
   if (gitRevision) {
     const status = (await run("git", ["status", "--porcelain", "--untracked-files=all", "--", ...roots, ...files])).stdout.trim();
     if (external && external !== gitRevision) throw new Error("Supplied source revision differs from the checkout");
-    return { revision: gitRevision, state: status ? "modified" : "clean", sourceSha256 };
+    return { revision: gitRevision, state: status ? "modified" : "clean", sourceSha256, manifest };
   }
   if (archive) {
     if (external && archive[1] !== external) throw new Error("Supplied source revision differs from archive");
-    return { revision: archive[1], state: await archiveTreeMatches(archive[2]) ? "git-archive" : "modified", sourceSha256 };
+    return { revision: archive[1], state: await archiveTreeMatches(archive[2]) ? "git-archive" : "modified", sourceSha256, manifest };
   }
   const attested = external && process.env.BIRBCREW_SOURCE_SHA256 === sourceSha256;
-  return { revision: external ?? null, state: attested ? "external-attestation" : "unattributed", sourceSha256 };
+  return { revision: external ?? null, state: attested ? "external-attestation" : "unattributed", sourceSha256, manifest };
 }
 
 export async function fixtureReport(engines: Engine[]) {
@@ -84,15 +89,16 @@ export async function fixtureReport(engines: Engine[]) {
     async finish(passed: boolean) {
       const final = await source();
       const reproducible = JSON.stringify(final) === JSON.stringify(initial) && !["modified", "unattributed"].includes(final.state);
+      const { manifest, ...sourceInfo } = final;
       const report = { mode: "fixture", engines, status: !passed ? "NOT VERIFIED" : reproducible ? "VERIFIED" : "INCONCLUSIVE",
-        processExit: passed && (reproducible || !process.env.BIRBCREW_FIXTURE_EVIDENCE) ? 0 : 1, source: final, stableDuringRun: initial.sourceSha256 === final.sourceSha256,
+        processExit: passed && (reproducible || !process.env.BIRBCREW_FIXTURE_EVIDENCE) ? 0 : 1, source: sourceInfo, stableDuringRun: initial.sourceSha256 === final.sourceSha256,
         node: process.version, architecture: process.arch, temporalCli: "1.10.0", packages,
         nativeLauncherSha256: hash(await readFile(".proof/bin/member-launch")), stages };
       const path = process.env.BIRBCREW_FIXTURE_EVIDENCE;
       if (path) {
         const tmp = path + "." + randomUUID() + ".tmp";
         try {
-          await writeFile(tmp, JSON.stringify(report, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+          await writeFile(tmp, JSON.stringify({ ...report, ...(reproducible && { sourceManifest: manifest }) }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
           await rename(tmp, path);
         } finally { await rm(tmp, { force: true }); }
       }

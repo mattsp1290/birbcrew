@@ -17,6 +17,11 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+// Linux 6.1 headers omit the ABI 3 constant; the runtime kernel version is checked before use.
+#ifndef LANDLOCK_ACCESS_FS_TRUNCATE
+#define LANDLOCK_ACCESS_FS_TRUNCATE (UINT64_C(1) << 14)
+#endif
+
 static void fail(void) { perror("Native member isolation"); _exit(126); }
 static void checked(long value) { if (value < 0) fail(); }
 static unsigned long number(const char *text, unsigned long max) {
