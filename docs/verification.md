@@ -15,7 +15,7 @@ belong to that run.
 
 ### TypeScript fixture verification
 
-Run `scripts/setup --mode fixture` on Linux with Docker, Git, curl, ripgrep,
+Run `scripts/setup --mode fixture` on Linux with Docker, Git, curl,
 sha256sum, a C compiler and Linux development headers. Claude needs Landlock ABI
 3 or newer and Codex needs ABI 4. Install Beans (`bn`) for the project-note
 cases. Setup installs the pinned Node and Temporal executables, both npm
