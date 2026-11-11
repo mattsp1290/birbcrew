@@ -1,5 +1,11 @@
 # Milestone evidence status
 
+## TypeScript members
+
+Claude, Codex and Pi have passed controlled-provider chat, protected approval, denial, ordinary human input, and authenticated observer checks with their native SDKs. The Codex interruption checks cover zero effect, a committed receipt with unknown native delivery, and a confirmed delivery. The live subscription runs and permissions sign-off for the TypeScript implementation are pending.
+
+## Historical Python milestone
+
 All twelve required runtime journeys are verified across the final clean
 deterministic and live reports. The final live run returned glm-5.3-flash through
 the selected Go endpoint after native identity checks, replay, and telemetry.

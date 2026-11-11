@@ -60,10 +60,8 @@ is required before merge, even when all automated proof checks pass.
 
 Run `node tests/proof/replay-traces.mts` from the checkout against disposable
 PostgreSQL and Temporal instances using `BIRBCREW_DATABASE_URL` and
-`BIRBCREW_TEMPORAL_ADDRESS`. The probe uses local Claude and Pi providers and
-requires Linux `unshare --user --net`. It replaces the worker during two
-protected calls, completes both conversations and the Pi child, and exports
-their private histories into a temporary directory. It replays them with
+`BIRBCREW_TEMPORAL_ADDRESS`. The probe uses local Claude, Codex and Pi providers and
+requires Linux `unshare --user --net`. It replaces the worker while a Claude and a Pi call await approval. It settles a Codex call on its live connection before the restart. It completes all three conversations and the Pi child, then exports four private histories into a temporary directory. It replays them with
 Temporal’s TypeScript Worker in a separate process with no network interfaces,
 checks that the provider request log and receipt ledger are unchanged, and
 removes the histories when it exits. To retain the redacted report with span
