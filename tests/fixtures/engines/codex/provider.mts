@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { json } from "node:stream/consumers";
 import { z } from "zod";
 
-const providerInput = z.object({ input: z.array(z.looseObject({
+const providerInput = z.object({ tools: z.array(z.looseObject({type:z.string(),name:z.string().optional()})).default([]), input: z.array(z.looseObject({
   role: z.string().optional(), type: z.string(), call_id: z.string().optional(), output: z.unknown().optional(),
   content: z.unknown().optional(),
 })) });
@@ -16,13 +16,15 @@ function send(response: ServerResponse, type: string, value: Record<string, unkn
 }
 
 export async function startProvider(onFailure = () => {}) {
+  const toolSurfaces: z.infer<typeof providerInput>["tools"][] = [];
   const requests: InputItem[][] = [];
   const server = createServer(async (request, response) => {
     try {
       if (request.method !== "POST" || request.url !== "/responses") {
         response.writeHead(404).end(); return;
       }
-      const {input} = providerInput.parse(await json(request));
+      const {input,tools} = providerInput.parse(await json(request));
+      toolSurfaces.push(tools);
       requests.push(input);
       const prompts = input.filter(i => i.role === "user").flatMap(i => {
         const parts = textParts.safeParse(i.content);
@@ -41,8 +43,10 @@ export async function startProvider(onFailure = () => {}) {
       const output = input.findLast(i => i.type === "function_call_output");
       if (prompt?.startsWith("record ") && !output) {
         const operation = prompt.slice(7);
+        const namespace = tools.find(tool => tool.name?.startsWith("mcp__"))?.name;
+        if (!namespace) throw new Error("Fixture MCP namespace missing");
         send(response, "response.output_item.done", { item: {
-          type:"function_call", call_id:"call_" + operation, namespace:"mcp__fixture",
+          type:"function_call", call_id:"call_" + operation, namespace,
           name:"record_work_item", arguments:JSON.stringify({operation_id:operation, note:"private fixture note"})
         } });
       } else {
@@ -67,7 +71,7 @@ export async function startProvider(onFailure = () => {}) {
   await once(server, "listening");
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Local provider failed to bind");
-  return {url:"http://127.0.0.1:" + address.port, requests, async close() {
+  return {url:"http://127.0.0.1:" + address.port, requests, toolSurfaces, async close() {
     const closed = once(server, "close");
     server.close(); server.closeAllConnections(); await closed;
   }};
