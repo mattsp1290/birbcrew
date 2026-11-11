@@ -137,7 +137,7 @@ export async function startProxyRelay(config: ProxyRelayConfig) {
       try {
         if (contentType.toLowerCase().startsWith("text/event-stream")) {
           response.writeHead(upstream.status, { "content-type": "text/event-stream", "cache-control": "no-store" });
-          await proxySse(reader, response, protocol);
+          await proxySse(reader, response, protocol, controller.signal);
         } else {
           const json = await proxyJson(reader);
           response.writeHead(upstream.status, { "content-type": "application/json", "cache-control": "no-store" });

@@ -274,3 +274,27 @@ test("successful SSE remains incremental beyond the per-event limit", async () =
     assert.doesNotMatch(text, /proxy_error/);
   } finally { await relay.close(); await upstream.close(); }
 });
+
+test("relay deadline interrupts downstream SSE backpressure", { timeout: 2000 }, async () => {
+  const { EventEmitter } = await import("node:events");
+  const { proxySse } = await import("../src/service/proxy-response.ts");
+  const downstream = Object.assign(new EventEmitter(), {
+    destroyed: false, writableEnded: false,
+    write() { return false; }, // a socket that never drains
+    destroy() { this.destroyed = true; },
+    end() { this.writableEnded = true; },
+  });
+  const reader = new ReadableStream<Uint8Array>({ start(controller) {
+    controller.enqueue(Buffer.from('data: {"text":"safe"}\n\n'));
+    controller.close();
+  } }).getReader();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 50);
+  try { await proxySse(reader, downstream as unknown as import("node:http").ServerResponse, "openai-responses", controller.signal); }
+  finally { clearTimeout(timer); }
+  assert.equal(downstream.destroyed, true);
+  assert.equal(downstream.listenerCount("drain"), 0);
+  assert.equal(downstream.listenerCount("close"), 0);
+  assert.equal(downstream.listenerCount("error"), 0);
+  await reader.cancel();
+});

@@ -19,14 +19,17 @@ function genericFrame(protocol: ProxyProtocol) {
   if (protocol === "openai-responses") return `event: error\ndata: ${JSON.stringify({ type: "error", code: "proxy_error", message })}\n\n`;
   return `data: ${JSON.stringify({ error: { type: "proxy_error", message } })}\n\n`;
 }
-async function write(response: ServerResponse, value: string) {
+async function write(response: ServerResponse, value: string, signal: AbortSignal) {
+  signal.throwIfAborted();
   if (response.destroyed) throw new Error("Proxy disconnected");
   if (response.write(value)) return;
   await new Promise<void>((resolve, reject) => {
-    const cleanup = () => { response.off("drain", drained); response.off("close", disconnected); response.off("error", disconnected); };
+    const cleanup = () => { response.off("drain", drained); response.off("close", disconnected); response.off("error", disconnected); signal.removeEventListener("abort", disconnected); };
     const drained = () => { cleanup(); resolve(); };
     const disconnected = () => { cleanup(); reject(new Error("Proxy disconnected")); };
     response.once("drain", drained); response.once("close", disconnected); response.once("error", disconnected);
+    signal.addEventListener("abort", disconnected, { once: true });
+    if (signal.aborted) disconnected();
   });
 }
 
@@ -47,7 +50,7 @@ export async function proxyJson(reader: ReadableStreamDefaultReader<Uint8Array>)
 }
 
 /** Release only complete, validated SSE events. Do not accumulate the whole stream. */
-export async function proxySse(reader: ReadableStreamDefaultReader<Uint8Array>, response: ServerResponse, protocol: ProxyProtocol) {
+export async function proxySse(reader: ReadableStreamDefaultReader<Uint8Array>, response: ServerResponse, protocol: ProxyProtocol, signal: AbortSignal) {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let pending = "", lines: string[] = [], size = 0;
   const line = async (value: string) => {
@@ -68,7 +71,7 @@ export async function proxySse(reader: ReadableStreamDefaultReader<Uint8Array>, 
     if (data.length) {
       if (payload !== "[DONE]" && protocolError(JSON.parse(payload), event)) throw new Error("Proxy protocol error");
       // Drop comments and non-protocol fields rather than carrying diagnostics in them.
-      await write(response, (event ? `event: ${event}\n` : "") + data.map(value => `data: ${value}\n`).join("") + "\n");
+      await write(response, (event ? `event: ${event}\n` : "") + data.map(value => `data: ${value}\n`).join("") + "\n", signal);
     }
     lines = []; size = 0;
   };
@@ -97,8 +100,9 @@ export async function proxySse(reader: ReadableStreamDefaultReader<Uint8Array>, 
     if (pending || lines.length) throw new Error("Incomplete proxy event");
     response.end();
   } catch {
+    if (signal.aborted) { response.destroy(); return; }
     if (!response.destroyed && !response.writableEnded) {
-      await write(response, genericFrame(protocol));
+      await write(response, genericFrame(protocol), signal);
       response.end();
     }
   }
