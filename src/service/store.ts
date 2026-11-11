@@ -74,7 +74,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"]] as const;
+      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [20, "020-admission-reconciliation.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -126,6 +126,102 @@ export class MemberStore {
     return conversationFor(this.pool, conversationKey.parse(key), false);
   }
 
+  async requestAdmission(input: z.input<typeof submitSchema>): Promise<{phase:"accepted"|"rejected";reason:string|null}|undefined> {
+    const key=submitSchema.parse(input);
+    const {rows:[row]}=await this.pool.query<{phase:"accepted"|"rejected";reason:string|null;prompt_digest:Buffer}>(`
+      SELECT a.phase,a.reason,a.prompt_digest FROM birbcrew_ts.request_admissions a
+      JOIN birbcrew_ts.conversations c USING(conversation_id)
+      WHERE c.owner_id=$1 AND a.conversation_id=$2 AND a.request_id=$3`,[key.ownerId,key.conversationId,key.requestId]);
+    if(!row)return undefined;
+    if(!row.prompt_digest.equals(createHash("sha256").update(key.text).digest()))throw new MemberStoreError("conflict");
+    return {phase:row.phase,reason:row.reason};
+  }
+
+  async recordAcceptance(input: z.input<typeof submitSchema>): Promise<void> {
+    const key=submitSchema.parse(input);
+    const digest=createHash("sha256").update(key.text).digest();
+    return this.transaction(async db=>{
+      await conversationFor(db,key,true);
+      const {rows:[prior]}=await db.query<{phase:"accepted"|"rejected";reason:string|null;prompt_digest:Buffer}>(
+        "SELECT phase,reason,prompt_digest FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
+      if(prior){
+        if(!prior.prompt_digest.equals(digest))throw new MemberStoreError("conflict");
+        if(prior.phase==="rejected")throw new MemberStoreError("request_rejected");
+        return;
+      }
+      const {rows:[existingTurn]}=await db.query<{prompt_digest:Buffer}>(
+        "SELECT prompt_digest FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
+      if(existingTurn) {
+        if(!existingTurn.prompt_digest.equals(digest))throw new MemberStoreError("conflict");
+        await db.query("INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest) VALUES($1,$2,$3)",
+          [key.conversationId,key.requestId,digest]);
+        return;
+      }
+      const {rows:[budget]}=await db.query<{limit:number;used:number}>(`SELECT turn_limit AS "limit",
+        (SELECT count(*) FROM (SELECT request_id FROM birbcrew_ts.request_admissions WHERE conversation_id=$1
+         UNION SELECT request_id FROM birbcrew_ts.turns WHERE conversation_id=$1) ids)::integer AS used
+        FROM birbcrew_ts.conversations WHERE conversation_id=$1`,[key.conversationId]);
+      if(budget.used>=budget.limit)throw new MemberStoreError("input_limit");
+      await db.query("INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest) VALUES($1,$2,$3)",
+        [key.conversationId,key.requestId,digest]);
+      return;
+    });
+  }
+
+  async rejectAccepted(input: z.input<typeof submitSchema>, reason:"predecessor_failed"|"predecessor_cancelled"): Promise<void> {
+    const key=submitSchema.parse(input);
+    if(reason!=="predecessor_failed"&&reason!=="predecessor_cancelled")throw new MemberStoreError("conflict");
+    await this.transaction(async db=>{
+      await conversationFor(db,key,true);
+      const result=await db.query(`UPDATE birbcrew_ts.request_admissions a SET phase='rejected',reason=$4
+        WHERE conversation_id=$1 AND request_id=$2 AND prompt_digest=$3
+        AND (phase='accepted' OR reason=$4)
+        AND NOT EXISTS(SELECT 1 FROM birbcrew_ts.turns t WHERE t.conversation_id=a.conversation_id AND t.request_id=a.request_id)`,
+        [key.conversationId,key.requestId,createHash("sha256").update(key.text).digest(),reason]);
+      if(!result.rowCount)throw new MemberStoreError("conflict");
+    });
+  }
+
+  // Caller must have either an admission activity failure (with original text)
+  // or a confirmed terminal logical workflow. Never infer this from a timeout.
+  async rejectUnstartedAdmission(input: z.input<typeof submitSchema> | {ownerId:string;conversationId:string;requestId:string}): Promise<void> {
+    const parsed=submitSchema.safeParse(input);
+    const key=parsed.success?parsed.data:claimSchema.omit({token:true}).parse(input);
+    const digest=parsed.success?createHash("sha256").update(parsed.data.text).digest():null;
+    await this.transaction(async db=>{
+      await conversationFor(db,key,true);
+      await db.query(`UPDATE birbcrew_ts.request_admissions a SET phase='rejected',reason='admission_unconfirmed'
+        WHERE conversation_id=$1 AND request_id=$2 AND phase='accepted'
+        AND ($3::bytea IS NULL OR prompt_digest=$3)
+        AND NOT EXISTS(SELECT 1 FROM birbcrew_ts.turns t WHERE t.conversation_id=a.conversation_id AND t.request_id=a.request_id)`,
+        [key.conversationId,key.requestId,digest]);
+    });
+  }
+
+  async requestStatus(input: {ownerId:string;conversationId:string;requestId:string}) {
+    const key=claimSchema.omit({token:true}).parse(input);
+    await conversationFor(this.pool,key,false);
+    const {rows:[row]}=await this.pool.query(`SELECT a.phase AS admission,a.reason,t.phase,t.reply
+      FROM birbcrew_ts.request_admissions a FULL JOIN birbcrew_ts.turns t USING(conversation_id,request_id)
+      WHERE COALESCE(a.conversation_id,t.conversation_id)=$1 AND COALESCE(a.request_id,t.request_id)=$2`,[key.conversationId,key.requestId]);
+    if(!row)throw new MemberStoreError("not_found");
+    return {requestId:key.requestId,phase:row.admission==="rejected"?"rejected":row.phase??"accepted",
+      ...(row.reason?{reason:row.reason}:{}),...(row.phase==="committed"?{reply:row.reply}:{})};
+  }
+
+  async conversationProgress(key: ConversationKey): Promise<{ turns: number; terminal: boolean; limit: number }> {
+    const parsed = conversationKey.parse(key);
+    const { rows: [row] } = await this.pool.query<{turns:number;terminal:boolean;limit:number}>(`
+      SELECT count(t.request_id)::integer AS turns, c.turn_limit AS "limit",
+        (count(t.request_id) >= c.turn_limit OR bool_or(t.phase='uncertain') OR
+         EXISTS (SELECT 1 FROM birbcrew_ts.tool_cancellations x WHERE x.conversation_id=c.conversation_id)) AS terminal
+      FROM birbcrew_ts.conversations c LEFT JOIN birbcrew_ts.turns t USING(conversation_id)
+      WHERE c.owner_id=$1 AND c.conversation_id=$2 GROUP BY c.conversation_id`,
+      [parsed.ownerId,parsed.conversationId]);
+    if (!row) throw new MemberStoreError("not_found");
+    return {...row, terminal: Boolean(row.terminal)};
+  }
+
   async workflowRunId(key: ConversationKey): Promise<string | undefined> {
     const { rows: [turn] } = await this.pool.query<{ run: string | null }>(
       `SELECT t.workflow_run_id AS run
@@ -138,6 +234,7 @@ export class MemberStore {
 
   async committedReply(input: z.input<typeof submitSchema>): Promise<string | undefined> {
     const key = submitSchema.parse(input);
+    if((await this.requestAdmission(key))?.phase === "rejected")throw new MemberStoreError("request_rejected");
     const { rows: [turn] } = await this.pool.query<Pick<TurnRow, "prompt_digest" | "phase" | "reply">>(
       `SELECT t.prompt_digest, t.phase, t.reply
          FROM birbcrew_ts.turns t JOIN birbcrew_ts.conversations c USING (conversation_id)
@@ -176,6 +273,10 @@ export class MemberStore {
     await requestNativeStop(this.pool, key, { workflowRunId });
     return this.transaction(async (db) => {
       const conversation = await conversationFor(db, key, true);
+      const {rows:[admission]}=await db.query<{phase:string;prompt_digest:Buffer}>(
+        "SELECT phase,prompt_digest FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
+      if(admission&&!admission.prompt_digest.equals(digest))throw new MemberStoreError("conflict");
+      if(admission?.phase==="rejected")throw new MemberStoreError("request_rejected");
       const { rows: [turn] } = await db.query<TurnRow>(
         "SELECT reply, phase, prompt_digest, workflow_run_id FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",
         [key.conversationId, key.requestId],
@@ -253,6 +354,10 @@ export class MemberStore {
     });
     return this.transaction(async (db) => {
       const conversation = await conversationFor(db, key, true);
+      const {rows:[admission]}=await db.query<{phase:string;prompt_digest:Buffer}>(
+        "SELECT phase,prompt_digest FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
+      if(admission&&!admission.prompt_digest.equals(digest))throw new MemberStoreError("conflict");
+      if(admission?.phase==="rejected")throw new MemberStoreError("request_rejected");
       const { rows: [turn] } = await db.query<TurnRow>(
         `SELECT phase, prompt_digest, workflow_run_id, activity_id, attempt, reply
            FROM birbcrew_ts.turns WHERE conversation_id = $1 AND request_id = $2`,
@@ -286,7 +391,9 @@ export class MemberStore {
         [key.conversationId],
       );
       if (last && last.phase !== "committed") throw new MemberStoreError("busy");
-      if (last?.position === 4) throw new MemberStoreError("input_limit");
+      const {rows:[budget]} = await db.query<{turn_limit:number}>(
+        "SELECT turn_limit FROM birbcrew_ts.conversations WHERE conversation_id=$1", [key.conversationId]);
+      if ((last?.position ?? 0) >= budget.turn_limit) throw new MemberStoreError("input_limit");
       const { rows: [{ token }] } = await db.query<{ token: string }>(
         `INSERT INTO birbcrew_ts.turns
            (conversation_id, request_id, prompt_digest, position, phase, workflow_run_id, activity_id, attempt)

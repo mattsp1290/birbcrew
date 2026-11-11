@@ -1,3 +1,4 @@
+import { assertNativeJsonBudget, assertTranscriptFileBudget, nativeTranscriptBytes } from "./native-limits.ts";
 import { ToolCallArgumentsStream } from "@earendil-works/pi-ai";
 import { toolPreviewReporter } from "./tool-preview.ts";
 import { spawn } from "node:child_process";
@@ -35,7 +36,9 @@ const controller = new AbortController();
 class ClaudeTurnError extends Error {}
 
 async function digest(sessionId: string, pending?: SessionBinding["pending"]) {
+  await assertTranscriptFileBudget(cwd, sessionId);
   const messages = await getSessionMessages(sessionId, { dir: cwd });
+  assertNativeJsonBudget(messages, nativeTranscriptBytes, "Claude transcript");
   if (messages.at(-1)?.type !== "assistant") throw new ClaudeTurnError("Claude recovery failed: original transcript is missing or incomplete");
   if (pending) {
     const blocks = z.object({ content: z.array(z.object({

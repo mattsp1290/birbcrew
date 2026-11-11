@@ -1,3 +1,5 @@
+import { conversationTurnLimit } from "./limits.ts";
+import { nativeCheckpointBytes, assertNativeJsonBudget } from "./native-limits.ts";
 import { toolPreviewReporter } from "./tool-preview.ts";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -68,7 +70,7 @@ const completedTurn = turnPrefix.extend({
   assistant: assistantMessage,
 });
 const stateSchema = z.strictObject({
-  threadId: z.string(), sessionId: z.uuid(), turns: z.array(completedTurn).max(4), pending: pendingTurn.optional(),
+  threadId: z.string(), sessionId: z.uuid(), turns: z.array(completedTurn).max(conversationTurnLimit), pending: pendingTurn.optional(),
 }).refine((s) => s.turns.length || s.pending, "Pi checkpoint has no native history");
 
 type PiState = z.infer<typeof stateSchema>;
@@ -114,6 +116,7 @@ export async function runPiTurn(input: DriverInput, profile: PiProfile) {
 async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" | DeferredTool | "delegating") {
   input.signal.throwIfAborted();
   const prior = input.checkpoint;
+  if (prior !== null) assertNativeJsonBudget(prior, nativeCheckpointBytes, "Pi checkpoint");
   if (prior !== null && (prior.engine !== "pi" || prior.version !== 1)) throw new Error("Invalid Pi checkpoint");
   const state: PiState = prior === null
     ? { threadId: input.threadId, sessionId: randomUUID(), turns: [] }
@@ -121,7 +124,7 @@ async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" |
   if (state.threadId !== input.threadId || state.turns.some((turn) => turn.runId === input.runId)) {
     throw new Error("Pi checkpoint does not match this turn");
   }
-  if (state.turns.length >= 4) throw new Error("Pi conversation input limit reached");
+  if (state.turns.length >= conversationTurnLimit) throw new Error("Pi conversation input limit reached");
   const pending = state.pending;
   const toolName = mode === "text" ? undefined : mode === "delegating" ?
     (profile.allowRecordWorkItem ? "record_work_item" : undefined) : mode;

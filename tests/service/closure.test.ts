@@ -22,12 +22,14 @@ async function conversation() {
   const { memberId } = await store.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture.v1" });
   const conversationId = randomUUID();
   const binding = { ownerId, memberId, conversationId };
+  await store.openConversation(binding);
+  await pool.query("UPDATE birbcrew_ts.conversations SET turn_limit=4 WHERE conversation_id=$1", [conversationId]);
   await members.open(binding);
   const handle = temporal.workflow.getHandle(`birbcrew-ts/member/${memberId}/conversation/${conversationId}`);
   return { binding, handle, request: (text: string) => ({ ownerId, conversationId, requestId: randomUUID(), text }) };
 }
 
-test("all four Updates and a duplicate drain before completion and replay after closure", { timeout: 45_000 }, async () => {
+test("legacy proof: all four Updates and a duplicate drain before completion and replay after closure", { timeout: 45_000 }, async () => {
   const { binding, handle, request } = await conversation();
   const inputs = Array.from({ length: 4 }, (_, n) => request(`remember ${n}`));
   const replies = await Promise.all([...inputs, inputs[0]].map((input) => members.submit(input)));
