@@ -43,7 +43,8 @@ async function service(t: TestContext, external = false) {
   const db = new Pool({ connectionString: process.env.BIRBCREW_TEST_DATABASE_URL, max: 1 });
   const connection = await Connection.connect({ address: process.env.BIRBCREW_TEMPORAL_ADDRESS });
   t.after(async () => { await connection.close(); await db.end(); });
-  const store = new MemberStore(db), members = new MemberClient(store, new Client({ connection }));
+  const temporal = new Client({ connection });
+  const store = new MemberStore(db), members = new MemberClient(store, temporal);
   await store.migrate();
   const owner = randomUUID(), stranger = randomUUID();
   const tokens = { [createHash("sha256").update(owner).digest("hex")]: randomUUID(),
@@ -104,7 +105,7 @@ async function service(t: TestContext, external = false) {
     t.after(() => agent.abortRun());
     return { agent, done, events };
   }
-  return { api, post, attach, stranger, ownerId: Object.values(tokens)[0], db, async restart() { await server.stop(); server = await start(); } };
+  return { api, post, attach, temporal, stranger, ownerId: Object.values(tokens)[0], db, async restart() { await server.stop(); server = await start(); } };
 }
 
 for (const engine of ["claude", "pi"]) {
@@ -407,6 +408,9 @@ test("two HttpAgents keep both Pi subagents open through separate owner decision
       snapshot : undefined;
   });
   for (const observer of [first, late]) {
+    assert.equal(observer.agent.messages.filter(m => m.id === requestId + "/assistant" &&
+      m.role === "assistant" && m.content === "Assigning tasks.").length,1);
+    assert.equal(observer.agent.messages.filter(m => m.id === requestId + "/resumed-assistant").length,1);
     const starts = observer.events.filter(e => e.type === "SUBAGENT_STARTED");
     const ends = observer.events.filter(e => e.type === "SUBAGENT_FINISHED");
     assert.equal(starts.length, 2);
@@ -541,3 +545,73 @@ test("two HttpAgents restore one child's argument stream while a sibling awaits 
     assert.deepEqual(reader.agent.messages,end.messages);
   }
 });
+
+for (const interruption of ["streaming", "pending", "unconfirmed"] as const) {
+  test(`terminated Pi child workflow with ${interruption} native work`, { timeout: 100_000 }, async t => {
+    const host = await service(t);
+    const { memberId } = await host.post("/members", { requestId: randomUUID(), engine: "pi", profile: "fixture.crew.v1" });
+    const requestId = randomUUID(), conversationId = randomUUID(), path = "/conversations/" + conversationId;
+    await host.post("/conversations", { memberId, conversationId });
+    const reader = host.attach(conversationId);
+    await until(async () => reader.events.some(e => e.type === "STATE_SNAPSHOT") || undefined);
+    const tasks = [interruption === "streaming" ? { role: "analyst", task: "child wait" } :
+      { role: "recorder", task: "record assigned interrupted" }, { role: "recorder", task: "record assigned survivor" }];
+    await host.post(path + "/inputs", { requestId, text: "delegate " + JSON.stringify(tasks) });
+    const children = await until(async () => {
+      const { rows } = await host.db.query<{ child_id: string; generation: string; approval_id: string }>(
+        `SELECT j.child_id, j.generation, j.approval_id FROM birbcrew_ts.pi_children j
+         JOIN birbcrew_ts.native_launches n ON j.child_id=n.child_id AND j.generation=n.token
+         WHERE j.conversation_id=$1 ORDER BY j.ordinal`, [conversationId]);
+      if (rows.length !== 2 || !rows[1].approval_id) return;
+      if (interruption === "streaming" && !reader.events.some(e => e.type === "TEXT_MESSAGE_CONTENT" && e.subagentRunId === rows[0].child_id)) return;
+      if (interruption !== "streaming" && !rows[0].approval_id) return;
+      return rows;
+    });
+    const [lost, sibling] = children;
+    if (interruption === "unconfirmed") {
+      // Withhold the independent stop receipt after the paused runner has already exited.
+      await until(async () => (await host.db.query("SELECT 1 FROM birbcrew_ts.native_launches WHERE token=$1 AND stopped",
+        [lost.generation])).rowCount || undefined);
+      await host.db.query("UPDATE birbcrew_ts.native_launches SET stopped=false WHERE token=$1", [lost.generation]);
+    }
+    await host.temporal.workflow.getHandle("birbcrew-ts/child/" + lost.child_id).terminate("Native cleanup proof");
+    if (interruption === "unconfirmed") {
+      await reader.done;
+      assert.equal(reader.events.at(-1)?.code, "MEMBER_FAILED");
+      const snapshot = await (await host.api(path)).json();
+      assert.equal(snapshot.state.phase, "failed");
+      assert.deepEqual(snapshot.childText, {});
+      assert.deepEqual(snapshot.state.pendingApprovals, []);
+      assert.deepEqual(reader.events.filter(e => e.type === "SUBAGENT_ERROR").map(e => e.code),
+        ["cleanup_unconfirmed", "cleanup_unconfirmed"]);
+      const { rows: [state] } = await host.db.query(`SELECT t.phase, n.stopped,
+        (SELECT count(*) FROM birbcrew_ts.native_stop_requests s WHERE s.token IN ($2,$3)) AS stops
+        FROM birbcrew_ts.turns t JOIN birbcrew_ts.native_launches n USING (conversation_id,request_id)
+        WHERE t.conversation_id=$1 AND n.token=$2`, [conversationId, lost.generation, sibling.generation]);
+      assert.deepEqual(state, {phase:"uncertain", stopped:false, stops:"2"});
+      assert.equal((await host.db.query("SELECT 1 FROM birbcrew_ts.work_items WHERE conversation_id=$1", [conversationId])).rowCount, 0);
+      return;
+    }
+    await until(async () => reader.events.some(e => e.type === "SUBAGENT_ERROR" && e.subagentRunId === lost.child_id) || undefined);
+    const waiting = await (await host.api(path)).json();
+    assert.deepEqual(waiting.state.pendingApprovals.map((a: {approvalId:string}) => a.approvalId), [sibling.approval_id]);
+    const { rows: [stopped] } = await host.db.query(`SELECT j.phase,n.stopped FROM birbcrew_ts.pi_children j
+      JOIN birbcrew_ts.native_launches n ON n.token=j.generation WHERE j.child_id=$1`, [lost.child_id]);
+    assert.deepEqual(stopped, { phase:"failed", stopped:true });
+    if (interruption === "pending") {
+      assert.equal(reader.events.filter(e => e.type === "TOOL_CALL_RESULT" && e.toolCallId === lost.approval_id &&
+        JSON.parse(String(e.content)).kind === "cancelled").length, 1);
+      const late = await host.api(path + "/human", {memberId, requestId, invocationId:lost.child_id, approvalId:lost.approval_id, version:1, choice:"approve"});
+      assert.ok(!late.ok);
+    }
+    await host.post(path + "/human", {memberId, requestId, invocationId:sibling.child_id, approvalId:sibling.approval_id, version:1, choice:"approve"});
+    const terminal = await until(async () => {
+      const snapshot = await (await host.api(path)).json();
+      return snapshot.state.phase === "idle" ? snapshot : undefined;
+    });
+    assert.deepEqual(terminal.childText, {});
+    const reply = JSON.parse(terminal.messages.at(-1).content.slice("delegated ".length));
+    assert.deepEqual(reply.map((item: {kind:string}) => item.kind), ["failed", "completed"]);
+    assert.equal((await host.db.query("SELECT 1 FROM birbcrew_ts.work_items WHERE conversation_id=$1 AND approval_id=$2", [conversationId,sibling.approval_id])).rowCount, 1);
+  });
+}

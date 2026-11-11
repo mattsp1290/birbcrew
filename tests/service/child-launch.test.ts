@@ -83,7 +83,34 @@ test("two Pi supervisors enforce each child's launch generation before and durin
   const settled = Promise.allSettled([submitted]);
   for (let i = 0; i < 120 && !await calls("child wait"); i++) await delay(100);
   assert.equal(await calls("child wait"), 1);
-  await replacement.stop(running);
+  const gateDb = await pool.connect();
+  let revoke;
+  try {
+    await gateDb.query("BEGIN");
+    const { rows: [blocker] } = await gateDb.query("SELECT pg_backend_pid() AS pid FROM birbcrew_ts.pi_children WHERE child_id=$1 FOR SHARE",
+      [active.childId]);
+    revoke = replacement.stop(running);
+    let waiting = false;
+    for (let i = 0; i < 100 && !waiting; i++) {
+      const locked = await pool.query("SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))", [blocker.pid]);
+      waiting = Boolean(locked.rowCount);
+      if (!waiting) await delay(30);
+    }
+    assert.ok(waiting, "Stop is waiting to revoke the child SDK grant");
+    const sibling = await pool.connect();
+    try {
+      await sibling.query("BEGIN");
+      await sibling.query("SET LOCAL lock_timeout='1s'");
+      await sibling.query("SELECT 1 FROM birbcrew_ts.conversations WHERE conversation_id=$1 FOR UPDATE", [active.conversationId]);
+    } finally {
+      await sibling.query("ROLLBACK");
+      sibling.release();
+    }
+  } finally {
+    await gateDb.query("ROLLBACK");
+    gateDb.release();
+    await revoke;
+  }
   await settled;
   await children.reconcile(active, running.execution.workflowRunId, false);
   const { rows: [record] } = await pool.query(`SELECT n.stopped,j.phase FROM birbcrew_ts.native_launches n

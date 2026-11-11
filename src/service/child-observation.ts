@@ -6,7 +6,7 @@ interface ChildSummary {
 }
 export interface ObservedChild extends ChildSummary {
   requestId: string;
-  phase: "ready" | "running" | "completed" | "failed" | "cancelled";
+  phase: "ready" | "running" | "completed" | "failed" | "cancelled" | "uncertain";
 }
 export type ChildChange =
   | { kind: "delegation"; requestId: string; children: ChildSummary[] }

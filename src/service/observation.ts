@@ -238,10 +238,19 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
     }
     case "failed":
       for (const tool of Object.values(snapshot.openTools)) {
-        frames.push({ type: E.TOOL_CALL_END, toolCallId: tool.publicId });
+        frames.push({ type: E.TOOL_CALL_END, toolCallId: tool.publicId, ...(tool.subagentRunId && { subagentRunId: tool.subagentRunId }) });
       }
       snapshot.openTools = {};
       finishText();
+      for (const child of state.children ?? []) {
+        if (child.requestId !== change.requestId || (child.phase !== "ready" && child.phase !== "running")) continue;
+        if (child.phase === "running") {
+          finishText(child.childId);
+          frames.push({ type: E.SUBAGENT_ERROR, subagentRunId: child.childId,
+            code: "cleanup_unconfirmed", message: "Child task interrupted" });
+        }
+        child.phase = "uncertain";
+      }
       finishStep();
       state.phase = "failed";
       state.pendingApprovals = [];
@@ -258,7 +267,7 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
 export async function publishObservation(db: PoolClient, id: string, change: Change) {
   const { rows: [snapshot] } = await db.query<StoredSnapshot>(selection + " WHERE c.conversation_id=$1 FOR UPDATE OF c", [id]);
   if (!snapshot) throw new MemberStoreError("not_found");
-  if (!snapshot.complete) return;
+  if (!snapshot.complete || snapshot.state.phase === "failed") return;
   await db.query(`INSERT INTO birbcrew_ts.public_snapshots (conversation_id,state) VALUES ($1,$2)
     ON CONFLICT DO NOTHING`, [id, JSON.stringify(snapshot.state)]);
   const key = logicalKey(change);

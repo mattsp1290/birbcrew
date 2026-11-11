@@ -16,7 +16,8 @@ export async function runMemberWorker(store: MemberStore, address: string, profi
     const children = new ChildStore(store.pool);
     workers.push(await Worker.create({
       connection, taskQueue: memberTaskQueue,
-      activities: { reconcileTurn: store.reconcileTurn.bind(store), reconcileChild:children.reconcile.bind(children) },
+      activities: { reconcileTurn: store.reconcileTurn.bind(store), reconcileChild:children.reconcile.bind(children),
+        closeExitedChild: children.closeExitedChild.bind(children), quarantineDelegation: children.quarantineDelegation.bind(children) },
       workflowsPath: fileURLToPath(new URL("./workflow.ts", import.meta.url)),
     }));
     supervisor = await startSupervisor(configPath, stateDir);

@@ -61,7 +61,7 @@ export async function inspectChild(db: PoolClient, launch: Launch): Promise<Read
 }
 
 type ChildStopScope = Pick<Launch, "ownerId" | "conversationId" | "requestId"> & { childId: string; memberId?: string; text?: string };
-type ChildStopGrant = { workflowRunId?: string; activityId?: string; token?: string; beforeAttempt?: number; attempt?: number };
+type ChildStopGrant = { workflowRunId?: string; activityId?: string; token?: string; beforeAttempt?: number; attempt?: number; includeWaiting?: boolean };
 
 // The stop must commit before taking an exclusive lock on the row held by the running SDK.
 export async function requestChildStop(pool: Pool | PoolClient, key: ChildStopScope, grant: ChildStopGrant = {}) {
@@ -69,14 +69,14 @@ export async function requestChildStop(pool: Pool | PoolClient, key: ChildStopSc
     SELECT j.conversation_id,j.request_id,j.generation FROM birbcrew_ts.pi_children j
     JOIN birbcrew_ts.conversations c USING(conversation_id)
     WHERE c.owner_id=$1 AND j.conversation_id=$2 AND j.request_id=$3 AND j.child_id=$4
-      AND j.phase IN ('running','resuming') AND j.generation IS NOT NULL
+      AND (j.phase IN ('running','resuming') OR ($12 AND j.phase='waiting')) AND j.generation IS NOT NULL
       AND ($5::text IS NULL OR j.workflow_run_id=$5) AND ($6::text IS NULL OR j.activity_id=$6)
       AND ($7::uuid IS NULL OR j.generation=$7) AND ($8::integer IS NULL OR j.attempt<$8)
       AND ($9::integer IS NULL OR j.attempt=$9) AND ($10::text IS NULL OR j.task=$10)
       AND ($11::uuid IS NULL OR c.member_id=$11)
     ON CONFLICT DO NOTHING`, [key.ownerId, key.conversationId, key.requestId, key.childId,
   grant.workflowRunId ?? null, grant.activityId ?? null, grant.token ?? null, grant.beforeAttempt ?? null,
-  grant.attempt ?? null, key.text ?? null, key.memberId ?? null]);
+  grant.attempt ?? null, key.text ?? null, key.memberId ?? null, grant.includeWaiting ?? false]);
 }
 
 export async function lockChildAdmission(db: PoolClient, launch: Launch) {
@@ -96,6 +96,8 @@ export async function lockChildAdmission(db: PoolClient, launch: Launch) {
 }
 
 export async function revokeChild(db: PoolClient, launch: Launch) {
+  // The SDK can hold this row throughout a model call. Bound the wait without locking its conversation.
+  await db.query("SET LOCAL lock_timeout='8s'");
   const result = await db.query(`UPDATE birbcrew_ts.pi_children j SET launch_revoked=true
     FROM birbcrew_ts.conversations c WHERE c.owner_id=$1 AND c.conversation_id=$2 AND j.conversation_id=c.conversation_id
       AND j.request_id=$3 AND j.child_id=$4 AND j.generation=$5 AND j.workflow_run_id=$6

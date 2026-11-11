@@ -77,9 +77,13 @@ export async function confirmedApproval(db: PoolClient, key: Scope & { invocatio
   return publicApproval(key, row);
 }
 
+const stoppedChildApproval = `SELECT 1 FROM birbcrew_ts.pi_children j WHERE j.child_id=p.invocation_id AND j.approval_id=p.approval_id
+  AND (j.outcome IS NOT NULL OR j.launch_revoked OR EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests s
+    WHERE (s.conversation_id,s.request_id,s.token)=(j.conversation_id,j.request_id,j.generation)))`;
+
 async function findCall(db: PoolClient, key: CallKey) {
-  const { rows: [row] } = await db.query<CallRow>(
-    `SELECT ${columns} FROM birbcrew_ts.protected_calls p WHERE p.conversation_id = $1 AND p.request_id = $2
+  const { rows: [row] } = await db.query<CallRow & { childStopped: boolean }>(
+    `SELECT ${columns}, EXISTS (${stoppedChildApproval}) AS "childStopped" FROM birbcrew_ts.protected_calls p WHERE p.conversation_id = $1 AND p.request_id = $2
      AND p.invocation_id = $3 AND p.native_call_id = $4 AND p.approval_id = $5`,
     [key.conversationId, key.requestId, key.invocationId, key.nativeCallId, key.approvalId],
   );
@@ -214,7 +218,9 @@ export class ApprovalStore {
          JOIN birbcrew_ts.turns t USING (conversation_id, request_id)
          LEFT JOIN birbcrew_ts.tool_cancellations x USING (conversation_id, request_id)
        WHERE p.conversation_id = $1 AND p.decision IS NULL
-         AND t.phase = 'started' AND x.request_id IS NULL ORDER BY p.approval_id`,
+         AND t.phase = 'started' AND x.request_id IS NULL
+         AND NOT EXISTS (${stoppedChildApproval})
+       ORDER BY p.approval_id`,
       [key.conversationId],
     );
     return result.rows.map((row) => publicApproval({ ...key, requestId: row.requestId }, row));
@@ -238,7 +244,7 @@ export class ApprovalStore {
       const call = await findCall(db, key);
       if (call.version !== key.version || call.argumentDigest !== key.argumentDigest) throw new MemberStoreError("conflict");
       if (call.decision === key.choice) return call.decision;
-      if (call.decision || turn.phase !== "started" || await cancelled(db, key)) throw new MemberStoreError("conflict");
+      if (call.decision || turn.phase !== "started" || call.childStopped || await cancelled(db, key)) throw new MemberStoreError("conflict");
       await db.query("UPDATE birbcrew_ts.protected_calls SET decision = $2 WHERE approval_id = $1",
         [key.approvalId, key.choice]);
       await publishObservation(db, key.conversationId, { kind: "answered", approvalId: key.approvalId });
@@ -274,6 +280,13 @@ export class ApprovalStore {
     });
   }
 
+  async closeChildApproval(db: PoolClient, key: Scope & { childId: string }, approvalId: string) {
+    const approval = await confirmedApproval(db, { ...key, invocationId: key.childId, approvalId });
+    const turn = await lockTurn(db, key);
+    await publishObservation(db, key.conversationId, { kind: "answered", approvalId });
+    await this.settleLocked(db, { ...approval, token: turn.token });
+  }
+
   async settleConfirmed(approval: Approval): Promise<ToolOutcome> {
     const { ownerId, memberId, conversationId, requestId, approvalId, invocationId, nativeCallId } = approval;
     const { rows: [turn] } = await this.pool.query<{ token: string }>(
@@ -307,7 +320,7 @@ export class ApprovalStore {
     if (existing.rows[0]?.approval_id === key.approvalId) {
       return finish({ nativeCallId, kind: "recorded", receipt: { receiptId: existing.rows[0].receipt_id, operationId: key.requestId } });
     }
-    if (await cancelled(db, key)) return finish({ nativeCallId, kind: "cancelled" });
+    if (call.childStopped || await cancelled(db, key)) return finish({ nativeCallId, kind: "cancelled" });
     if (call.decision !== "approve") throw new MemberStoreError("conflict");
     if (existing.rows.length) {
       await db.query("UPDATE birbcrew_ts.protected_calls SET budget_exhausted = true WHERE approval_id = $1",

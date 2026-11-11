@@ -22,8 +22,8 @@ function actions(queue: string) {
 }
 
 export async function piChildWorkflow(key: ChildKey, profile: string): Promise<void> {
-  const { executeChildSegment, settleApproval, cancelChild } = actions(activityQueue("pi", profile));
-  const {reconcileChild} = proxyActivities<{reconcileChild:ChildStore["reconcile"]}>({
+  const { executeChildSegment, settleApproval } = actions(activityQueue("pi", profile));
+  const {reconcileChild, closeExitedChild} = proxyActivities<{reconcileChild:ChildStore["reconcile"]; closeExitedChild:ChildStore["closeExitedChild"]}>({
     taskQueue:memberTaskQueue,startToCloseTimeout:"20 seconds",scheduleToCloseTimeout:"2 minutes",
   });
   async function segment(resume?: Resume) {
@@ -45,19 +45,25 @@ export async function piChildWorkflow(key: ChildKey, profile: string): Promise<v
     if (last.kind !== "complete") throw ApplicationFailure.nonRetryable("Repeated child approval");
   } catch (error) {
     if (!isCancellation(error)) throw error;
-    await CancellationScope.nonCancellable(() => cancelChild(key));
+    await CancellationScope.nonCancellable(() => closeExitedChild(key, true));
     throw error;
   }
 }
 
 export async function memberConversation(conversation: Conversation): Promise<void> {
-  const { executeTurn, decideApproval, settleApproval, cancelPending, cancelChild } = actions(activityQueue(conversation.engine, conversation.profile));
+  const { executeTurn, decideApproval, settleApproval, cancelPending } = actions(activityQueue(conversation.engine, conversation.profile));
   const { reconcileTurn } = proxyActivities<Pick<MemberStore, "reconcileTurn">>({
     taskQueue: memberTaskQueue, startToCloseTimeout: "20 seconds",
   });
   const { recoverPending } = proxyActivities<MemberActivities>({
     taskQueue: activityQueue(conversation.engine, conversation.profile),
     startToCloseTimeout: "20 seconds", scheduleToCloseTimeout: "60 seconds", retry: { maximumAttempts: 2 },
+  });
+  const { closeExitedChild } = proxyActivities<Pick<ChildStore, "closeExitedChild">>({
+    taskQueue: memberTaskQueue, startToCloseTimeout: "15 seconds", scheduleToCloseTimeout: "35 seconds",
+  });
+  const { quarantineDelegation } = proxyActivities<Pick<ChildStore, "quarantineDelegation">>({
+    taskQueue: memberTaskQueue, startToCloseTimeout: "15 seconds",
   });
   const turns = new Map<string, { text: string; result: Promise<string> }>();
   let previous = Promise.resolve();
@@ -143,16 +149,21 @@ export async function memberConversation(conversation: Conversation): Promise<vo
       const scope = new CancellationScope();
       batch = { requestId: request.requestId, children: first.children, scope };
       try {
-        const operations = first.children.map(key => scope.run(() => executeChild(piChildWorkflow, {
-          workflowId: `birbcrew-ts/child/${key.childId}`, workflowIdReusePolicy: "REJECT_DUPLICATE",
-          cancellationType: "WAIT_CANCELLATION_COMPLETED", args: [key, conversation.profile],
-        })));
-        const results = await Promise.allSettled(operations);
-        for (const [index, result] of results.entries()) {
-          if (result.status === "fulfilled") continue;
-          if (!isCancellation(result.reason)) throw result.reason;
-          await CancellationScope.nonCancellable(() => cancelChild(first.children[index]));
-        }
+        await Promise.all(first.children.map(async key => {
+          try {
+            await scope.run(() => executeChild(piChildWorkflow, {
+              workflowId: `birbcrew-ts/child/${key.childId}`, workflowIdReusePolicy: "REJECT_DUPLICATE",
+              cancellationType: "WAIT_CANCELLATION_COMPLETED", args: [key, conversation.profile],
+            }));
+          } catch (error) {
+            // Temporal termination bypasses the child's own cancellation handler.
+            await CancellationScope.nonCancellable(() => closeExitedChild(key, isCancellation(error)));
+          }
+        }));
+      } catch (error) {
+        await CancellationScope.nonCancellable(() => quarantineDelegation(conversation, request, workflowInfo().runId));
+        scope.cancel();
+        throw error;
       } finally {
         batch = undefined;
       }

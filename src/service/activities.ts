@@ -60,10 +60,6 @@ export function memberActivities(store: MemberStore, supervisor: Supervisor, pro
       }
       return null;
     },
-    async cancelChild(key: ChildKey) {
-      await children.stopBeforeCancel(key);
-      await children.cancel(key);
-    },
     async executeChildSegment(key: ChildKey, resume?: Resume): Promise<{ kind: "complete" } | { kind: "pending"; approval: Approval }> {
       const ctx = Context.current();
       const execution = ctx.info.workflowExecution;
