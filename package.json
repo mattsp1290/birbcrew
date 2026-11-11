@@ -21,7 +21,7 @@
     "members": "node src/service/cli.ts",
     "test:integration": "scripts/verify-members",
     "test:live": "node tests/proof/live-members.ts",
-    "test:proxy": "node --test tests/proxy-relay.test.ts tests/service/proxy-credential.test.ts tests/service/proxy-members.test.ts",
+    "test:proxy": "node --test tests/proxy-relay.test.ts tests/service/proxy-credential.test.ts tests/service/proxy-members.test.ts tests/service/proxy-scope.test.ts",
     "test:trusted": "node --test tests/service/trusted-*.test.ts"
   },
   "dependencies": {

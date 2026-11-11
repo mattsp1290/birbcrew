@@ -96,8 +96,12 @@ sandbox for untrusted programs; no unrelated PIDs are scanned or signalled.
 
 ## Lifecycle and security boundary
 
-Each importing process starts a relay on a random IPv4 loopback port with a new
-256-bit local token. The native SDK receives only that local token, never the
+Claude/Pi importing processes start a relay on a random IPv4 loopback port with a
+new 256-bit local token. Codex acquires a separate relay/token for each invocation:
+its host `AbortSignal` directly closes that invocation's upstream requests, even
+when the native SDK has not yet disconnected its socket. The driver awaits lease
+cleanup in `finally`; cancelling one turn cannot cancel another concurrent turn.
+Profile shutdown closes all outstanding leases. The native SDK receives only that local token, never the
 upstream credential. Each **actual forwarded HTTP request** invokes the resolver
 and checks expiry immediately before fetch, including SDK-internal tool
 continuations and any compaction requests using the same route. Nothing caches a

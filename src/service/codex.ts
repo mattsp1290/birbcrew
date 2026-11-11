@@ -29,6 +29,7 @@ export interface CodexProfile {
   ownerId: string; memberId: string; stateDir: string; model: string; apiKey?: string; baseUrl?: string;
   authorize?: () => Promise<void>;
   subscription?: () => Promise<{ accessToken: string; accountId: string }>;
+  proxyTransport?: (signal: AbortSignal) => Promise<{ baseUrl: string; apiKey: string; close: () => Promise<void> }>;
 }
 
 const loopback = (raw: string) => {
@@ -73,6 +74,15 @@ async function delivered(item: McpToolCallItem, input: CodexInput) {
 }
 
 export async function runCodexTurn(input: CodexInput, profile: CodexProfile): Promise<{ text: string; checkpoint: CodexCheckpoint }> {
+  if (!profile.proxyTransport) return executeCodexTurn(input, profile);
+  if (profile.subscription) throw new Error("Proxy transport cannot use a subscription");
+  const transport = await profile.proxyTransport(input.signal);
+  try {
+    return await executeCodexTurn(input, { ...profile, baseUrl: transport.baseUrl, apiKey: transport.apiKey, authorize: profile.authorize ?? (async () => {}) });
+  } finally { await transport.close(); }
+}
+
+async function executeCodexTurn(input: CodexInput, profile: CodexProfile): Promise<{ text: string; checkpoint: CodexCheckpoint }> {
   input.signal.throwIfAborted();
   const threadId = uuid.parse(input.threadId), requestId = uuid.parse(input.runId), memberId = uuid.parse(profile.memberId);
   const ownerDigest = hash(profile.ownerId);
