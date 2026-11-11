@@ -216,7 +216,7 @@ test("Codex owner commands progress while both inference slots are occupied", { 
   await host.post(cancel.path + "/cancel", { requestId: cancel.requestId });
   const interrupted = await until(async () => {
     const s = await cancel.snapshot();
-    return s.state.phase === "failed" ? s : undefined;
+    return s.state.phase === "cancelled" ? s : undefined;
   });
   assert.deepEqual(interrupted.state.interruptedCalls, [{ requestId: cancel.requestId, approvalId: thirdCard.approvalId, effect: "none", delivery: "unknown" }]);
   assert.equal((await last.answer(fourthCard, "deny")).decision, "deny");

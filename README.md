@@ -1,7 +1,6 @@
 # Birbcrew
 
-A local proof of a durable coding coworker conversation using Python, Pydantic AI,
-Temporal, PostgreSQL, and AG-UI.
+BirbCrew runs durable Claude, Codex and Pi coding coworkers through their TypeScript SDKs. Temporal orders turns and human decisions. PostgreSQL stores the conversation and its AG-UI history. The original Python proof remains available.
 
 Run `scripts/setup`, then `scripts/verify`. The verifier starts disposable local
 services, generates credentials, uses an isolated Beans fixture, drives two
@@ -13,7 +12,7 @@ ownership and limits. [The first milestone](docs/first-milestone.md) defines the
 acceptance contract. Authentication and permissions require human review before
 merge. This repository does not provide production authentication or deployment.
 
-### Verify the Claude and Pi adapters
+### Verify the three SDK integrations
 
 On Linux with Docker, run `scripts/verify-adapters`. It installs the locked
 production dependencies in a fresh consumer, then runs the official AG-UI HTTP
@@ -22,15 +21,14 @@ independent conversations, reports a provider failure, and cancels a streaming
 reply when the client disconnects. The model responses are scripted locally.
 
 For local development, use Node 22.23.3 and run `npm ci`, `npm run typecheck`,
-and `npm test`. The TypeScript fixtures exercise the adapter packages ahead of
-their integration with the BirbCrew service. Package pins and rebuild
+and `npm test`. The TypeScript fixtures exercise all three integrations with real SDKs and local model responses. Package pins and rebuild
 instructions are in [the adapter reference](vendor/ag-ui/README.md).
 
-### Run durable Claude and Pi members
+### Run durable Claude, Codex and Pi members
 
 A member's SDK and execution profile are fixed at spawn. The TypeScript worker
 uses Temporal to order turns and PostgreSQL to store the member, each
-conversation's native checkpoint, and its committed replies. Claude also needs
+conversation's native checkpoint, and its committed replies. Claude and Codex also need
 the same private state directory when a worker is replaced.
 
 Run `npm ci` and `npm run test:integration` on Linux with Node 22.23.3, Docker,
@@ -64,7 +62,7 @@ echo '{"ownerId":"local","memberId":"<member UUID>","conversationId":"c31bb038-d
 echo '{"ownerId":"local","conversationId":"c31bb038-d19e-46bc-a76d-a12526156a0e","requestId":"d25a62d7-b003-43fb-a8a7-20ba04887508","text":"remember cedar"}' | npm run --silent members -- turn
 ```
 
-Use `"engine":"claude"` at spawn to select Claude. In a fixture conversation,
+Use `"engine":"claude"` or `"engine":"codex"` at spawn to select another SDK. In a fixture conversation,
 send `recall` with a fresh request UUID to retrieve the remembered value. Reuse
 the original request UUID and text to recover its recorded reply after a lost
 acknowledgement. Each conversation admits four distinct requests. If a worker
@@ -77,7 +75,7 @@ mapping owner IDs to a source, for example
 `{"local":{"root":"/tmp/birbcrew-local","project":"release","actor":"coworker"}}`.
 Use a temporary installation containing a clean `hub` Git checkout on `main`
 with no remotes. BirbCrew captures up to two Beans memories when the conversation
-opens. Both engines use that private snapshot on later turns and tool resumes,
+opens. The root member uses that private snapshot on later turns and tool resumes,
 even if the original hub is removed.
 
 Use the [HTTP gateway guide](docs/member-gateway.md) to submit turns, decide
