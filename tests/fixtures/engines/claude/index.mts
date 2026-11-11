@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -14,13 +15,18 @@ import { defer, finalize } from "rxjs";
 const model = "claude-sonnet-4-6";
 
 const providerRequest = z.object({
+  tools: z.array(z.object({ name: z.string() })).default([]),
   messages: z.array(z.object({
     role: z.enum(["assistant", "user"]),
     content: z.union([z.string(), z.array(z.object({ type: z.string(), text: z.string().optional() }))]),
   })),
 });
 
-async function respond(request: IncomingMessage, response: ServerResponse, onProviderFailure: () => void) {
+type ObserveRequest = (request: { prompt?: string; tools: string[] }) => void;
+
+async function respond(
+  request: IncomingMessage, response: ServerResponse, onProviderFailure: () => void, observe?: ObserveRequest,
+) {
   const path = new URL(request.url ?? "/", "http://localhost").pathname;
   if (path === "/v1/messages/count_tokens") {
     response.writeHead(200, { "content-type": "application/json" }).end('{"input_tokens":10}');
@@ -31,11 +37,12 @@ async function respond(request: IncomingMessage, response: ServerResponse, onPro
     return;
   }
 
-  const { messages } = providerRequest.parse(await json(request));
+  const { messages, tools } = providerRequest.parse(await json(request));
   const prompts = messages.filter((message) => message.role === "user").flatMap(({ content }) =>
     typeof content === "string" ? [content] : content.flatMap((part) => part.type === "text" && part.text ? [part.text] : []),
   );
   const prompt = prompts.at(-1);
+  observe?.({ prompt, tools: tools.map((tool) => tool.name) });
   const remembered = prompts.findLast((text) => text.startsWith("remember "))?.slice(9);
   let reply;
   if (prompt?.startsWith("remember ")) reply = `stored ${remembered}`;
@@ -67,16 +74,35 @@ async function respond(request: IncomingMessage, response: ServerResponse, onPro
   response.end();
 }
 
-export async function createFixture(onProviderFailure: () => void) {
-  const cwd = await mkdtemp(join(tmpdir(), "birb-claude-"));
+export async function startClaudeFixtureProvider(onProviderFailure = () => {}, observe?: ObserveRequest) {
   const server = createServer((req, res) => {
-    respond(req, res, onProviderFailure).catch(() => res.destroy());
+    respond(req, res, onProviderFailure, observe).catch(() => res.destroy());
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Expected a localhost TCP port");
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    async close() {
+      const closed = once(server, "close");
+      server.close();
+      server.closeAllConnections();
+      await closed;
+    },
+  };
+}
+
+export async function createFixture(onProviderFailure: () => void) {
+  const cwd = await mkdtemp(join(tmpdir(), "birb-claude-"));
+  const provider = await startClaudeFixtureProvider(onProviderFailure);
+  const exits: Promise<void>[] = [];
   const options: Options = {
+    spawnClaudeCodeProcess({ command, args, env, signal }) {
+      const cli = spawn(command, args, { cwd, env, signal, stdio: ["pipe", "pipe", "ignore"] });
+      exits.push(new Promise((resolve) => cli.once("close", () => resolve())));
+      return cli;
+    },
     cwd,
     model,
     tools: [],
@@ -89,7 +115,7 @@ export async function createFixture(onProviderFailure: () => void) {
       CLAUDE_CONFIG_DIR: join(cwd, "config"),
       ANTHROPIC_API_KEY: "synthetic",
       ANTHROPIC_AUTH_TOKEN: "",
-      ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`,
+      ANTHROPIC_BASE_URL: provider.url,
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
       DISABLE_TELEMETRY: "1",
     },
@@ -116,10 +142,8 @@ export async function createFixture(onProviderFailure: () => void) {
       });
     },
     async close() {
-      const closed = once(server, "close");
-      server.close();
-      server.closeAllConnections();
-      await closed;
+      await Promise.all(exits);
+      await provider.close();
       await rm(cwd, { recursive: true, force: true });
     },
   };

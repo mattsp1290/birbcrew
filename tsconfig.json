@@ -7,7 +7,22 @@
     "erasableSyntaxOnly": true,
     "resolveJsonModule": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ],
+    "allowImportingTsExtensions": true,
+    "lib": [
+      "ES2023",
+      "ESNext.String",
+      "DOM"
+    ]
   },
-  "include": ["tests/fixtures/engines/**/*.mts", "tests/fixtures/engines/**/*.ts"]
+  "include": [
+    "tests/fixtures/engines/**/*.mts",
+    "tests/fixtures/engines/**/*.ts",
+    "src/service/**/*.ts",
+    "tests/service/**/*.ts",
+    "tests/proof/**/*.ts",
+    "tests/proof/**/*.mts"
+  ]
 }

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { BaseEvent, RunAgentInput } from "@ag-ui/core";
 import { createTranslator, toAguiMessages } from "@ag-ui/pi";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -5,14 +6,18 @@ import {
   type Context,
   contentText,
   createAssistantMessageEventStream,
+  createProvider,
+  InMemoryCredentialStore,
+  type ProviderStreams,
   fauxAssistantMessage,
   fauxProvider,
 } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Observable } from "rxjs";
 
-const model = fauxProvider().getModel();
+const model = fauxProvider({ api: "birbcrew-fixture" }).getModel();
 
-function scriptedStream(context: Context, signal: AbortSignal | undefined, onProviderFailure: () => void) {
+function scriptedStream(context: Context, signal: AbortSignal | undefined, onProviderFailure?: () => void) {
   const prompts = context.messages
     .filter((message) => message.role === "user")
     .map((message) => contentText(message.content));
@@ -27,7 +32,7 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
   }
 
   if (latest === "fail") {
-    onProviderFailure();
+    onProviderFailure?.();
     fail("error");
     return stream;
   }
@@ -37,7 +42,7 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
   else if (latest === "wait") text = "waiting";
   else throw new Error("Unexpected Pi fixture prompt");
 
-  const message = fauxAssistantMessage(text);
+  const message = fauxAssistantMessage(text, { responseId: randomUUID() });
   stream.push({ type: "start", partial: fauxAssistantMessage("") });
   stream.push({ type: "text_delta", contentIndex: 0, partial: message, delta: text });
   if (latest === "wait") {
@@ -123,4 +128,22 @@ export async function createFixture(onProviderFailure: () => void) {
       sessions.clear();
     },
   };
+}
+
+export async function createPiFixtureOptions(
+  observe?: (context: Context, options?: { sessionId?: string }) => void,
+) {
+  const modelRuntime = await ModelRuntime.create({
+    credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false,
+  });
+  const stream: ProviderStreams["stream"] = (_model, context, options) => {
+    observe?.(context, options);
+    return scriptedStream(context, options?.signal);
+  };
+  modelRuntime.registerNativeProvider(createProvider({
+    id: model.provider, models: [model],
+    auth: { apiKey: { name: "BirbCrew fixture", resolve: async () => ({ auth: {} }) } },
+    api: { stream, streamSimple: stream },
+  }));
+  return { model, modelRuntime };
 }
