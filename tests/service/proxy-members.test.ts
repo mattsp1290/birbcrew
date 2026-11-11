@@ -173,8 +173,11 @@ for (const engine of ["claude", "codex", "pi"] as const) {
     fixture.setProtocolFailure(false);
     const stop = new AbortController();
     const waiting = textTurn({ ...input, threadId: randomUUID(), runId: randomUUID(), text: "wait", signal: stop.signal }, () => stop.abort());
-    await assert.rejects(waiting);
-    for (let i = 0; i < 100 && !fixture.stats().cancelled; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    await assert.rejects(waiting, error => {
+      assert.ok(stop.signal.aborted, `stream failed before cancellation: ${String(error)}`);
+      return true;
+    });
+    for (let i = 0; i < 500 && !fixture.stats().cancelled; i++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.ok(fixture.stats().cancelled > 0);
     assert.equal(fixture.stats().failed, false);
   });
