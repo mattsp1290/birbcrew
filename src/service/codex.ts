@@ -131,6 +131,11 @@ export async function runCodexTurn(input: CodexInput, profile: CodexProfile): Pr
         wire_api: "responses", env_key: "BIRBCREW_CODEX_BEARER", env_http_headers: { "ChatGPT-Account-Id": "BIRBCREW_CODEX_ACCOUNT" },
         requires_openai_auth: false, supports_websockets: false, request_max_retries: 0, stream_max_retries: 0,
       } } }),
+      ...(profile.apiKey && provider && { model_provider: "birbcrew_proxy", model_providers: { birbcrew_proxy: {
+        name: "Operator proxy relay", base_url: provider.href.replace(/\/$/, ""),
+        wire_api: "responses", env_key: "CODEX_API_KEY", requires_openai_auth: false,
+        supports_websockets: false, request_max_retries: 0, stream_max_retries: 0,
+      } } }),
       ...(!approved && provider && { model_provider: "fixture", model_providers: { fixture: { name: "BirbCrew local fixture",
         base_url: provider.href.replace(/\/$/, ""), wire_api: "responses", requires_openai_auth: false,
         supports_websockets: false, request_max_retries: 0, stream_max_retries: 0 } } }),

@@ -24,6 +24,13 @@ For local development, use Node 22.23.3 and run `npm ci`, `npm run typecheck`,
 and `npm test`. The TypeScript fixtures exercise all three integrations with real SDKs and local model responses. Package pins and rebuild
 instructions are in [the adapter reference](vendor/ag-ui/README.md).
 
+### Use an operator-controlled AI proxy
+
+See [AI proxy profiles](docs/ai-proxy-profiles.md) for explicit Claude Messages,
+Codex Responses and Pi Chat Completions routes, request-scoped credential renewal,
+and offline/live validation instructions. Run `npm run test:proxy` after building
+the native launcher; the tests require Linux Landlock support.
+
 ### Run durable Claude, Codex and Pi members
 
 A member's SDK and execution profile are fixed at spawn. The TypeScript worker

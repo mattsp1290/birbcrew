@@ -20,7 +20,8 @@
     "gateway": "node src/service/gateway.ts",
     "members": "node src/service/cli.ts",
     "test:integration": "scripts/verify-members",
-    "test:live": "node tests/proof/live-members.ts"
+    "test:live": "node tests/proof/live-members.ts",
+    "test:proxy": "node --test tests/proxy-relay.test.ts tests/service/proxy-credential.test.ts tests/service/proxy-members.test.ts"
   },
   "dependencies": {
     "@ag-ui/claude-agent-sdk": "file:vendor/ag-ui/claude-agent-sdk-0.0.8.tgz",
