@@ -29,7 +29,8 @@
     "test:recovery:native": "node tests/proof/recovery-native.mts",
     "test:rollover": "node tests/proof/rollover.mts",
     "test:api": "node --test tests/service/integration-api.test.ts",
-    "test:api:service": "node tests/proof/integration-api.mts"
+    "test:api:service": "node tests/proof/integration-api.mts",
+    "test:recovery:coordinated": "node tests/proof/coordinated-recovery.mts"
   },
   "dependencies": {
     "@ag-ui/claude-agent-sdk": "file:vendor/ag-ui/claude-agent-sdk-0.0.8.tgz",

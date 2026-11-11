@@ -92,7 +92,7 @@ npm run recovery -- verify /absolute/operator.ts /private/generation-directory
 npm run recovery -- status /absolute/operator.ts 24
 ```
 
-Create the destination directory with mode 0700 first. `capture` never overwrites
+Create the destination directory with mode 0700 under a pre-provisioned durable backup root first. `capture` never overwrites
 manifest files: interrupted attempts use a fresh destination. The source remains
 held after capture; explicitly `resume` it only if it is not being relocated.
 `status 24` returns exit 2 if no successful backup exists or the latest completed
@@ -122,7 +122,7 @@ capture or explicit `hold-for-restore` seals that transfer permission.
    record; it is not silently marked successful or replayed. Consumer activity
    outside Birbcrew must be stopped by the consumer hook.
 5. Operator snapshots all state, including **stopped** Temporal persistence. The
-   manifest pins the schema and version. Capture flushes artifacts and manifest files, fsyncs the bundle directory,
+   manifest pins the schema and version. Capture flushes artifacts and manifest files, fsyncs the bundle directory and its parent,
    and verifies checksums/the fence before recording success. New domain tables without the barrier are
    rejected, so schema upgrades need recovery integration, not implicit coverage.
 6. Failed/interrupted maintenance stays held, with no success receipt. Fix the
@@ -235,6 +235,8 @@ npm run build
 export BIRBCREW_TEST_DATABASE_URL=postgresql://USER:PASSWORD@127.0.0.1:5432/disposable
 npm run test:recovery
 npm run test:recovery:native
+# Also needs Temporal CLI 1.10.0 on PATH (or TEMPORAL_CLI):
+npm run test:recovery:coordinated
 ```
 
 The database suite exercises actual dump/restore to a second database, preserved
@@ -243,7 +245,11 @@ write/native fences, interrupted capture, checksums, version mismatch and source
 clone overlap. The native fixture archives stopped Claude/Codex/Pi session state,
 restores it under a different host root mounted at `/native`, and performs actual
 SDK follow-ups with fresh synthetic proxy credentials. It makes no live requests.
-These are complementary fixtures, not a single full persistent Temporal
+The coordinated proof additionally backs up and restores one actual generation
+across PostgreSQL, stopped Temporal development SQLite, and native archives into
+a second isolated service. It checks all three engines’ completed replay, native
+recall, committed observations and explicit cancellation of unapproved pending
+decisions without effects. This is not persistent production Temporal
 installation disaster-recovery certification. Qualify the deployment's real
 backup hooks, Temporal backend, consumer state and all engine pending-decision
 outcomes before declaring production acceptance. Keep the Beans request open

@@ -4,7 +4,7 @@ on:
     paths:
       - 'src/service/**'
       - 'tests/service/**'
-      - 'tests/proof/recovery-*'
+      - 'tests/proof/**'
       - 'package*.json'
       - 'docs/coordinated-recovery.md'
       - '.github/workflows/recovery-qualification.yml'
@@ -41,3 +41,14 @@ jobs:
           BIRBCREW_RECOVERY_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
       - run: node --test tests/service/store.test.ts
       - run: npm run test:recovery:native
+      - name: Install pinned Temporal CLI
+        run: |
+          mkdir -p .proof/bin
+          archive=temporal_cli_1.10.0_linux_amd64.tar.gz
+          curl -fsSL "https://github.com/temporalio/cli/releases/download/v1.10.0/$archive" -o ".proof/bin/$archive"
+          curl -fsSL https://github.com/temporalio/cli/releases/download/v1.10.0/checksums.txt -o .proof/bin/checksums.txt
+          (cd .proof/bin && grep " $archive$" checksums.txt | sha256sum -c -)
+          tar -xzf ".proof/bin/$archive" -C .proof/bin temporal
+      - run: npm run test:recovery:coordinated
+        env:
+          TEMPORAL_CLI: ${{ github.workspace }}/.proof/bin/temporal

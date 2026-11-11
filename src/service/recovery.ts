@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, open, readFile, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { Client, type Pool } from 'pg';
 import { z } from 'zod';
 import type { RecoveryFence } from './recovery-fence.ts';
@@ -142,7 +142,7 @@ export class InstallationRecovery {
   await readRecoveryManifest(directory);
   // File flush alone does not persist newly created directory entries. Do not
   // authorize transfer or record success until manifest and artifacts are durable.
-  const bundle=await open(directory,'r');try{await bundle.sync();}finally{await bundle.close();}
+  for(const path of [directory,dirname(directory)]) {const bundle=await open(path,'r');try{await bundle.sync();}finally{await bundle.close();}}
   await this.fence.seal(c.installation,c.instance,generation);
   await this.pool.query(`UPDATE birbcrew_ts.recovery_runs SET completed_at=now(),manifest_sha256=$2 WHERE generation=$1`,[generation,checksum]);
   return {generation,sha256:checksum};
