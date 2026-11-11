@@ -1,3 +1,5 @@
+import { ToolCallArgumentsStream } from "@earendil-works/pi-ai";
+import { toolPreviewReporter } from "./tool-preview.ts";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -134,6 +136,8 @@ async function run(command: Command) {
   let finished = false;
   let pendingIds: string[] | undefined;
   let resultCount = 0;
+  let streamingCall: { id: string; bytes: number; args: ToolCallArgumentsStream } | undefined;
+  const reportPreview = toolPreviewReporter(command.runId, (toolArgs, matchedOperation) => process.send?.({ toolArgs, matchedOperation }));
   const textEvent = z.object({ delta: z.string() });
   const terminal = z.object({ outcome: z.object({
     type: z.literal("success"),
@@ -158,8 +162,16 @@ async function run(command: Command) {
       process.send?.({ delta });
     }
     if (event.type === "TOOL_CALL_START") {
-      const { toolCallName } = z.object({ toolCallName: z.string() }).parse(event);
+      const { toolCallName, toolCallId } = z.object({ toolCallName: z.string(), toolCallId: z.string() }).parse(event);
       if (command.mode !== "protected" || toolCallName !== "record_work_item") throw new ClaudeTurnError("Undeclared Claude tool");
+      if (!command.continuation) streamingCall = { id: toolCallId, bytes: 0, args: new ToolCallArgumentsStream() };
+    }
+    if (event.type === "TOOL_CALL_ARGS" && streamingCall) {
+      const { toolCallId, delta } = z.object({ toolCallId: z.string(), delta: z.string() }).parse(event);
+      if (toolCallId !== streamingCall.id) throw new ClaudeTurnError("Mismatched partial call");
+      streamingCall.bytes += Buffer.byteLength(delta);
+      if (streamingCall.bytes > 65536) throw new ClaudeTurnError("Tool arguments exceeded size limit");
+      if (delta) reportPreview(toolCallId, streamingCall.args.append(delta).operation_id);
     }
     if (event.type === "TOOL_CALL_RESULT") {
       if (!command.continuation || z.object({ toolCallId: z.string() }).parse(event).toolCallId !== command.continuation.nativeCallId)

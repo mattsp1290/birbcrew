@@ -125,3 +125,18 @@ test("uncertain native outcome is durable and scoped to its conversation", async
   assert.equal(independent.kind, "start");
   assert.equal(independent.checkpoint, null);
 });
+
+test("a committed stop request fences a late native argument frame", async () => {
+  const key = await newConversation("pi");
+  const request = { ...key, requestId: randomUUID(), text: "record" };
+  const run = { workflowRunId: randomUUID(), activityId: "activity", attempt: 1 };
+  const start = await store.beginTurn(request, run);
+  assert.equal(start.kind, "start");
+  const claim = { ...key, requestId: request.requestId, token: start.token };
+  const ids = [key.conversationId, request.requestId, start.token];
+  await pool.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+    VALUES ($1,$2,$3,$4,$5,1)`, [...ids, run.workflowRunId, run.activityId]);
+  await pool.query("INSERT INTO birbcrew_ts.native_stop_requests (conversation_id,request_id,token) VALUES ($1,$2,$3)", ids);
+  await assert.rejects(store.previewTool(claim, "late-call", true), { code: "stale" });
+  assert.equal((await pool.query("SELECT 1 FROM birbcrew_ts.tool_previews WHERE conversation_id=$1", [key.conversationId])).rowCount, 0);
+});

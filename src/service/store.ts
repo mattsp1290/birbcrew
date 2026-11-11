@@ -66,7 +66,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-        [4, "004-observation.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"]] as const;
+      [4, "004-observation.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -293,6 +293,26 @@ export class MemberStore {
         [approval.approvalId, execution.activityId]);
       await publishObservation(db, key.conversationId, { kind: "resume", approvalId: approval.approvalId });
       return { kind: "start" as const, token, conversation, checkpoint: checkpointSchema.parse(turn.checkpoint) };
+    });
+  }
+
+  async previewTool(claim: Claim, nativeCallId: string, matchedOperation = false) {
+    await this.transaction(async (db) => {
+      await conversationFor(db, { ownerId: claim.ownerId, conversationId: claim.conversationId }, true);
+      const { rows: [preview] } = await db.query<{ public_id: string }>(`INSERT INTO birbcrew_ts.tool_previews AS p
+        (conversation_id,request_id,invocation_id,native_call_id,generation)
+        SELECT t.conversation_id,t.request_id,t.request_id,$4,t.token FROM birbcrew_ts.turns t
+        JOIN birbcrew_ts.native_launches n USING(conversation_id,request_id,token)
+        WHERE t.conversation_id=$1 AND t.request_id=$2 AND t.token=$3 AND t.phase='started' AND NOT n.stopped
+          AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests WHERE conversation_id=$1 AND request_id=$2 AND token=$3)
+        ON CONFLICT (conversation_id,request_id,invocation_id) DO UPDATE SET public_id=p.public_id
+        WHERE p.native_call_id=EXCLUDED.native_call_id AND p.generation=EXCLUDED.generation RETURNING public_id`,
+        [claim.conversationId, claim.requestId, claim.token, nativeCallId]);
+      if (!preview) throw new MemberStoreError("stale");
+      await publishObservation(db, claim.conversationId, { kind: "toolPreview", invocationId: claim.requestId, publicId: preview.public_id });
+      if (matchedOperation) await publishObservation(db, claim.conversationId, {
+        kind: "toolValue", invocationId: claim.requestId, publicId: preview.public_id, requestId: claim.requestId,
+      });
     });
   }
 

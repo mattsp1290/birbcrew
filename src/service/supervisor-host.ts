@@ -121,6 +121,7 @@ async function start(launch: Launch): Promise<PublicSegment> {
   }
 
   let reply: unknown;
+  let preview: Promise<void> | undefined;
   let exited: Promise<boolean> | undefined;
   let confirmed = false;
   let reaped = false;
@@ -140,6 +141,11 @@ async function start(launch: Launch): Promise<PublicSegment> {
       child.on("message", (value) => {
         if (value && typeof value === "object" && "delta" in value && typeof value.delta === "string") {
           stream.push(project(value.delta));
+        } else if (value && typeof value === "object" && "toolArgs" in value && typeof value.toolArgs === "string" && !continuation) {
+          const id = value.toolArgs;
+          const matched = "matchedOperation" in value && value.matchedOperation === true;
+          preview = (preview ?? stream.drain()).then(() => store.previewTool(launch, id, matched));
+          void preview.catch(() => { });
         } else {
           reply = value;
         }
@@ -156,6 +162,7 @@ async function start(launch: Launch): Promise<PublicSegment> {
     confirmed = Boolean(await exited && reply !== undefined);
     stream.push(project("", true));
     await stream.drain();
+    await preview;
     const pid = active.get(launch.token)?.pid;
     reaped = pid !== undefined && await groupStopped(pid);
     if (!confirmed || !reaped) throw new Error("SDK process stopped without a confirmed result");

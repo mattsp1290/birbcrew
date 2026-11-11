@@ -155,13 +155,17 @@ export class ApprovalStore {
         }
         return publicApproval(key, prior);
       }
+      const { rows: [preview] } = await db.query<{ public_id: string; native_call_id: string; generation: string }>(
+        "SELECT public_id,native_call_id,generation FROM birbcrew_ts.tool_previews WHERE conversation_id=$1 AND request_id=$2 AND invocation_id=$3",
+        ids.slice(0, 3));
+      if (preview && (preview.native_call_id !== key.nativeCallId || preview.generation !== key.token)) throw new MemberStoreError("stale");
       const inserted = await db.query<CallRow>(
         `INSERT INTO birbcrew_ts.protected_calls AS p
          (conversation_id, request_id, invocation_id, native_call_id, tool_name, arguments, argument_digest,
-          policy_version, decision_version)
-         SELECT $1, $2, $3, $4, $5, $6, $7, 1, 1
+          policy_version, decision_version, approval_id)
+         SELECT $1, $2, $3, $4, $5, $6, $7, 1, 1, COALESCE($8::uuid,gen_random_uuid())
          WHERE (SELECT count(*) FROM birbcrew_ts.protected_calls WHERE conversation_id = $1 AND request_id = $2) < 16
-         RETURNING ${columns}`, [...ids, key.toolName, key.arguments, digest],
+         RETURNING ${columns}`, [...ids, key.toolName, key.arguments, digest, preview?.public_id ?? null],
       );
       if (!inserted.rows.length) throw new MemberStoreError("input_limit");
       const row = inserted.rows[0];

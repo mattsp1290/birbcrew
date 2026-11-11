@@ -13,7 +13,7 @@ import { z } from "zod";
 import { decisionSchema } from "./approvals.ts";
 import { MemberClient } from "./client.ts";
 import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from "./domain.ts";
-import { readEvents, readSnapshot, type PublicSnapshot } from "./observation.ts";
+import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
 import { MemberStore } from "./store.ts";
 
 const credentials = z.record(z.string().regex(/^[0-9a-f]{64}$/), z.string().min(1));
@@ -79,6 +79,9 @@ async function observe(
       const { id, prefix } = snapshot.openText;
       await send({ type: E.TEXT_MESSAGE_START, role: "assistant", messageId: id });
       await send({ type: E.TEXT_MESSAGE_CONTENT, messageId: id, delta: prefix });
+    }
+    for (const tool of Object.values(snapshot.openTools)) {
+      for (const event of toolBootstrap(tool)) await send(event);
     }
     if (await finish(snapshot.state.phase)) return;
     while (!stop.signal.aborted) {

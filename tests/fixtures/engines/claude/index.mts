@@ -61,7 +61,7 @@ async function respond(
     if (outcome.nativeCallId !== toolResult.tool_use_id) throw new Error("Mismatched provider result");
     reply = outcome.kind === "recorded" ? "recorded " + outcome.receipt.receiptId : outcome.kind;
   } else if (prompt?.startsWith("record ") && tools.some((t) => t.name === "mcp__ag_ui__record_work_item")) {
-    tool = { id: "toolu_" + randomUUID(), input: { operation_id: prompt.slice(7), note: "private fixture note" } };
+    tool = { id: "toolu_" + randomUUID(), input: { operation_id: prompt.replace(/^record (?:stream )?/, ""), note: "private fixture note" } };
   } else if (streamGate(prompt)) reply = "first";
   else if (prompt?.startsWith("remember ")) reply = `stored ${remembered}`;
   else if (prompt === "recall") reply = `recalled ${remembered ?? "none"}`;
@@ -85,8 +85,19 @@ async function respond(
   });
   send("content_block_start", { index: 0, content_block: tool ?
     { type: "tool_use", id: tool.id, name: "mcp__ag_ui__record_work_item", input: {} } : { type: "text", text: "" } });
-  send("content_block_delta", { index: 0, delta: tool ?
-    { type: "input_json_delta", partial_json: JSON.stringify(tool.input) } : { type: "text_delta", text: reply } });
+  const toolGate = tool && streamGate(prompt?.slice(7));
+  if (tool && toolGate) {
+    send("content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: '{"note":"private fixture note",' } });
+    await waitForGate(toolGate + ".value");
+    send("content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: '"operation_id":' + JSON.stringify(tool.input.operation_id) } });
+    await waitForGate(toolGate);
+    send("content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: '}' } });
+  } else {
+    send("content_block_delta", {
+      index: 0, delta: tool ?
+        { type: "input_json_delta", partial_json: JSON.stringify(tool.input) } : { type: "text_delta", text: reply }
+    });
+  }
   if (prompt === "wait") return;
   const gate = streamGate(prompt);
   if (gate) {

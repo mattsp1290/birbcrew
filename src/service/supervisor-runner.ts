@@ -34,6 +34,7 @@ process.once("message", async (command: AdmittedTurn) => {
       if (!driver) throw new Error("Unsupported member profile");
       reply = await withNativeAdmission(pool, command.launch, AbortSignal.any([controller.signal, AbortSignal.timeout(170_000)]), signal => driver({
         threadId: member.conversationId, runId: command.runId, text: command.text,
+        onToolArgs: (toolArgs, matchedOperation) => process.send?.({ toolArgs, matchedOperation }),
         onText: (delta) => process.send?.({ delta }),
         checkpoint: command.checkpoint, continuation: command.continuation, signal,
       }, member));

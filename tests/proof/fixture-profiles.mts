@@ -22,6 +22,6 @@ const chat = profiles.get("fixture.v1")!;
 profiles.set("fixture.approval.v1", { ...chat, protectedTool: "record_work_item" });
 if (process.env.BIRBCREW_PROOF_RECOVERY_PROFILE) {
   profiles.clear();
-  profiles.set(process.env.BIRBCREW_PROOF_RECOVERY_PROFILE, chat);
+  profiles.set(process.env.BIRBCREW_PROOF_RECOVERY_PROFILE, { ...chat, ...(process.env.BIRBCREW_PROOF_PROTECTED && { protectedTool: "record_work_item" as const }) });
 }
 export const close = provider.close;

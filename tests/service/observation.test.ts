@@ -26,6 +26,19 @@ async function until<T>(tryValue: () => Promise<T | undefined>): Promise<T> {
   throw new Error("Timed out awaiting observer state");
 }
 
+function startWorker(t: TestContext, profile: string, engine: string, protectedTool = false) {
+  const child = spawn(process.execPath, ["src/service/cli.ts", "worker", "tests/proof/fixture-profiles.mts"], {
+    env: {
+      ...process.env, BIRBCREW_PROOF_RECOVERY_PROFILE: profile, BIRBCREW_PROOF_ENGINE: engine,
+      ...(protectedTool && { BIRBCREW_PROOF_PROTECTED: "1" })
+    }, stdio: "ignore",
+  });
+  const exited = once(child, "exit");
+  const stop = async () => { child.kill("SIGKILL"); await exited; };
+  t.after(stop);
+  return stop;
+}
+
 async function service(t: TestContext, external = false) {
   const db = new Pool({ connectionString: process.env.BIRBCREW_TEST_DATABASE_URL, max: 1 });
   const connection = await Connection.connect({ address: process.env.BIRBCREW_TEMPORAL_ADDRESS });
@@ -217,15 +230,7 @@ for (const engine of ["claude", "pi"]) {
   test(`${engine} worker loss after a native text delta closes the message and restores the committed history`, { timeout: 120_000 }, async (t) => {
     const host = await service(t, true);
     const profile = "fixture.recovery." + randomUUID();
-    function worker() {
-      const child = spawn(process.execPath, ["src/service/cli.ts", "worker", "tests/proof/fixture-profiles.mts"], {
-        env: { ...process.env, BIRBCREW_PROOF_RECOVERY_PROFILE: profile, BIRBCREW_PROOF_ENGINE: engine }, stdio: "ignore",
-      });
-      const exited = once(child, "exit");
-      const stop = async () => { child.kill("SIGKILL"); await exited; };
-      t.after(stop);
-      return stop;
-    }
+    const worker = () => startWorker(t, profile, engine);
     const stop = worker();
     await until(async () => (await host.db.query("SELECT 1 FROM birbcrew_ts.profiles WHERE engine=$1 AND name=$2", [engine, profile])).rowCount || undefined);
     const member = await host.post("/members", { requestId: randomUUID(), engine, profile });
@@ -304,3 +309,72 @@ test("an overtaken observer receives CURSOR_EXPIRED and can attach at the latest
   assert.deepEqual(fresh.agent.messages, snapshot.messages);
   fresh.agent.abortRun();
 });
+
+for (const engine of ["pi", "claude"]) {
+  for (const crash of [false, true]) {
+    test(`${engine} native argument stream ${crash ? "closes on takeover" : "keeps one public ID through settlement"}`, { timeout: 115_000 }, async t => {
+      const host = await service(t, true);
+      const profile = "fixture.arguments." + randomUUID();
+      const worker = () => startWorker(t, profile, engine, true);
+      const stop = worker();
+      await until(async () => (await host.db.query("SELECT 1 FROM birbcrew_ts.profiles WHERE engine=$1 AND name=$2", [engine, profile])).rowCount || undefined);
+      const { memberId } = await host.post("/members", { engine, profile, requestId: randomUUID() });
+      const cid = randomUUID(), path = "/conversations/" + cid, requestId = randomUUID();
+      await host.post("/conversations", { memberId, conversationId: cid });
+      const first = host.attach(cid);
+      await until(async () => first.events.some(e => e.type === "STATE_SNAPSHOT") || undefined);
+      await host.post(path + "/inputs", { requestId, text: "record stream " + requestId });
+      await until(async () => first.events.some(e => e.type === "TOOL_CALL_ARGS") || undefined);
+      const snapshot = await (await host.api(path)).json();
+      const preview = snapshot.openTools[requestId];
+      assert.equal(preview.prefix, '{"operation_id":');
+      assert.equal(snapshot.state.pendingApprovals.length, 0);
+      const earlyDecision = { memberId, invocationId: requestId, requestId, approvalId: preview.publicId, version: 1, choice: "approve" };
+      assert.equal((await host.api(path + "/human", earlyDecision)).status, 409);
+      await assert.rejects(new MemberStore(host.db).previewTool({
+        ownerId: host.ownerId, conversationId: cid, requestId, token: randomUUID(),
+      }, "stale-native-id"));
+      const second = host.attach(cid);
+      await until(async () => second.events.some(e => e.type === "TOOL_CALL_ARGS") || undefined);
+      await writeFile(join(process.env.BIRBCREW_PROOF_STREAM_DIR!, requestId + ".value"), "");
+      await until(async () => [first, second].every(reader => reader.events.some(e => e.type === "TOOL_CALL_ARGS" && e.delta === JSON.stringify(requestId))) || undefined);
+      const matched = await (await host.api(path)).json();
+      assert.equal(matched.openTools[requestId].prefix, '{"operation_id":' + JSON.stringify(requestId));
+      assert.equal(matched.state.pendingApprovals.length, 0);
+      const native = await host.db.query("SELECT native_call_id FROM birbcrew_ts.tool_previews WHERE conversation_id=$1", [cid]);
+      const nativeId = native.rows[0].native_call_id;
+      assert.notEqual(preview.publicId, nativeId);
+      if (crash) {
+        await stop();
+        worker();
+        await Promise.all([first.done, second.done]);
+      } else {
+        await writeFile(join(process.env.BIRBCREW_PROOF_STREAM_DIR!, requestId), "");
+        const approval = await until(async () => (await (await host.api(path)).json()).state.pendingApprovals[0]);
+        assert.equal(approval.approvalId, preview.publicId);
+        await host.post(path + "/human", { memberId, invocationId: requestId, requestId, approvalId: approval.approvalId, version: approval.version, choice: "approve" });
+        await until(async () => {
+          const snapshot = await (await host.api(path)).json();
+          return snapshot.state.phase === "idle" && [first, second].every(r => r.agent.messages.length === snapshot.messages.length) || undefined;
+        });
+      }
+      const end = await (await host.api(path)).json();
+      assert.deepEqual(end.openTools, {});
+      if (crash) assert.equal(end.state.phase, "failed");
+      const effects = await host.db.query("SELECT note FROM birbcrew_ts.work_items WHERE conversation_id=$1", [cid]);
+      assert.deepEqual(effects.rows, crash ? [] : [{ note: "private fixture note" }]);
+      const rows = await host.db.query("SELECT event FROM birbcrew_ts.public_events WHERE conversation_id=$1", [cid]);
+      for (const reader of [first, second]) {
+        const frames = reader.events.filter(e => e.type.startsWith("TOOL_CALL_"));
+        assert.deepEqual(frames.map(e => e.type), crash ? ["TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_ARGS", "TOOL_CALL_END"] :
+          ["TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_ARGS", "TOOL_CALL_ARGS", "TOOL_CALL_END", "TOOL_CALL_RESULT"]);
+        assert.ok(frames.every(e => e.toolCallId === preview.publicId));
+        if (!crash) assert.deepEqual(JSON.parse(frames.filter(e => e.type === "TOOL_CALL_ARGS").map(e => e.delta).join("")), { operation_id: requestId });
+        const visible = JSON.stringify([rows.rows, reader.events, end]);
+        assert.ok(!visible.includes(nativeId) && !visible.includes("private fixture note"));
+        assert.deepEqual(reader.agent.messages, end.messages);
+        reader.agent.abortRun();
+      }
+    });
+  }
+}

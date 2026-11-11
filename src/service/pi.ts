@@ -1,3 +1,4 @@
+import { toolPreviewReporter } from "./tool-preview.ts";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -163,7 +164,17 @@ async function runSegment(input: DriverInput, profile: PiProfile, protectedTool:
     let bytes = 0;
     translator.start();
     const committedCallIds: string[] = [];
+    const reportPreview = toolPreviewReporter(input.runId, input.onToolArgs);
     const unsubscribe = session.subscribe((event) => {
+      if (tool && !pending && event.type === "message_update") {
+        const chunk = event.assistantMessageEvent;
+        if (chunk.type === "toolcall_delta" && chunk.delta) {
+          const call = chunk.partial.content[chunk.contentIndex];
+          if (call?.type === "toolCall" && call.name === toolName && call.id) {
+            reportPreview(call.id, call.arguments.operation_id);
+          }
+        }
+      }
       if (event.type === "message_end" && event.message.role === "toolResult") return;
       for (const frame of translator.translate(event)) {
         if (frame.type === "TOOL_CALL_END") committedCallIds.push(frame.toolCallId);

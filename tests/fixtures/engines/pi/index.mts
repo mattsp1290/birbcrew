@@ -41,11 +41,26 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
   }
   const last = context.messages.findLast((message) => message.role !== "system");
   if (latest?.startsWith("record ") && last?.role !== "toolResult") {
-    const [, operation_id, ...words] = latest.split(" ");
-    const args: JsonObject = { operation_id, note: words.length ? words.join(" ") : "private fixture note" };
+    const [, operation, ...words] = latest.split(" ");
+    const gate = streamGate(latest.slice(7));
+    const operation_id = gate ? words[0] : operation;
+    const args: JsonObject = { operation_id, note: !gate && words.length ? words.join(" ") : "private fixture note" };
     const call = fauxToolCall("record_work_item", args, { id: "call_" + randomUUID() });
     const message = fauxAssistantMessage([call], { stopReason: "toolUse", responseId: randomUUID() });
     stream.push({ type: "start", partial: fauxAssistantMessage("") });
+    if (gate) {
+      const partial = fauxAssistantMessage([fauxToolCall(call.name, { note: args.note }, { id: call.id })]);
+      stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+      stream.push({ type: "toolcall_delta", contentIndex: 0, partial, delta: '{"note":"private fixture note",' });
+      void waitForGate(gate + ".value").then(async () => {
+        stream.push({ type: "toolcall_delta", contentIndex: 0, partial: message, delta: '"operation_id":' + JSON.stringify(operation_id) });
+        await waitForGate(gate);
+        stream.push({ type: "toolcall_delta", contentIndex: 0, partial: message, delta: "}" });
+        stream.push({ type: "toolcall_end", contentIndex: 0, partial: message, toolCall: call });
+        stream.push({ type: "done", reason: "toolUse", message });
+      }).catch(() => fail("error"));
+      return stream;
+    }
     stream.push({ type: "done", reason: "toolUse", message });
     return stream;
   }
