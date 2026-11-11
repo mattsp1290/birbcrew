@@ -3,13 +3,14 @@ import { join, isAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
-const identity = z.strictObject({ installation: z.uuid(), instance: z.uuid(), generation: z.uuid().nullable(), phase: z.enum(['active','held','restored']) });
+const identity = z.strictObject({ installation: z.uuid(), instance: z.uuid(), generation: z.uuid().nullable(), phase: z.enum(['active','preparing','held','restored']) });
 export type FenceIdentity = z.infer<typeof identity>;
 /** Implement this interface using a linearizable authority shared by both hosts.
  * Never put its state in a recovery bundle or restore it from a snapshot. */
 export interface RecoveryFence {
   initialize(installation: string, instance: string): Promise<void>;
   hold(installation: string, instance: string, generation: string): Promise<void>;
+  seal(installation: string, instance: string, generation: string): Promise<void>;
   verify(installation: string, instance: string, generation: string): Promise<void>;
   transfer(installation: string, source: string, target: string, generation: string): Promise<void>;
   verifyActivation(installation: string, instance: string, generation: string): Promise<void>;
@@ -42,7 +43,10 @@ export class FileRecoveryFence implements RecoveryFence {
     await this.change(old=>{if(old && (old.installation!==installation||old.instance!==instance)) throw new Error('Fence already belongs to another installation');return old??{installation,instance,generation:null,phase:'active'};});
   }
   async hold(installation:string,instance:string,generation:string) {
-    await this.change(old=>{if(!old||old.installation!==installation||old.instance!==instance||(old.phase!=='active'&&old.generation!==generation)) throw new Error('Source is fenced'); return {...old,generation,phase:'held'};});
+    await this.change(old=>{if(!old||old.installation!==installation||old.instance!==instance||(old.phase!=='active'&&old.generation!==generation)) throw new Error('Source is fenced'); return old.phase==='held'?old:{...old,generation,phase:'preparing'};});
+  }
+  async seal(installation:string,instance:string,generation:string) {
+    await this.change(old=>{if(!old||old.installation!==installation||old.instance!==instance||old.generation!==generation||!['preparing','held'].includes(old.phase)) throw new Error('Source preparation mismatch');return {...old,phase:'held'};});
   }
   async verify(installation:string,instance:string,generation:string) {
     await this.change(old=>{if(!old||old.installation!==installation||old.instance!==instance||old.generation!==generation||old.phase==='active') throw new Error('Recovery fence mismatch');return old;});

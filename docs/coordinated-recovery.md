@@ -103,10 +103,15 @@ is not proof that an off-host copy exists.
 
 ## Stable boundary and failure recovery
 
+The authority distinguishes `preparing` from `held`: a crash before database
+freeze/teardown cannot authorize transfer to a restored copy. Only completed
+capture or explicit `hold-for-restore` seals that transfer permission.
+
 1. Initialize the external authority once for the active installation. Never
    initialize a fresh authority from a restored backup to bypass a source fence.
-2. `capture` assigns a generation and holds the source in that authority, then
-   atomically changes its application database to `frozen`.
+2. `capture` durably assigns a generation and atomically changes its application
+   database to `frozen`, then prepares the external authority. A failed authority
+   call leaves the durable generation available for a safe retry.
 3. A statement trigger rejects INSERT/UPDATE/DELETE/TRUNCATE on every domain table.
    The transition waits for already admitted writer transactions to commit.
    All supported native admission lanes check the recovery phase, poll it to
@@ -122,9 +127,9 @@ is not proof that an off-host copy exists.
    rejected, so schema upgrades need recovery integration, not implicit coverage.
 6. Failed/interrupted maintenance stays held, with no success receipt. Fix the
    failing hook and retry in a new directory. Native teardown and backup hooks
-   must be idempotent. If a writer times out during freeze, the external hold may
-   exist while the database remains active: stop services and retry, never call
-   this a snapshot boundary. In-flight external effects may be uncertain.
+   must be idempotent. If a writer times out during freeze, stop services and retry; never call
+   this a snapshot boundary. If authority preparation fails after the database
+   freeze, the database stays held and retry uses its durable generation. In-flight external effects may be uncertain.
 
 The protocol assumes trusted database administrators. Runtime roles must not
 alter/drop triggers, use replication-role bypass, change recovery control rows,
@@ -148,7 +153,8 @@ moving state. Independent restored databases cannot discover arbitrary clones.
    ingress, and isolate it from effect destinations when relocating. A backup
    previously followed by source resume cannot be restored while the authority
    is active. For an older generation, stop the source again and call
-   `freeze(manifest.generation)` through the operator interface before restore;
+   `holdForRestore(manifest.generation, hooks)` (or CLI `hold-for-restore`)
+   through the operator interface before restore;
    reconcile all changes/effects since that recovery point.
 2. Verify the complete trusted bundle. Use supported database restore tooling into
    an isolated, stopped target; restore every artifact from **one** generation.

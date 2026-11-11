@@ -65,6 +65,17 @@ export class InstallationRecovery {
  async capture(directory:string,pins:RecoveryPins,hooks:RecoveryHooks) {return this.operation(()=>this.captureImpl(directory,pins,hooks));}
  async acceptRestore(directory:string,pins:RecoveryPins,targetInstance:string) {return this.operation(()=>this.acceptRestoreImpl(directory,pins,targetInstance));}
  async resume(hooks:Pick<RecoveryHooks,'reconcile'>,manifest:RecoveryManifest|null=null) {return this.operation(()=>this.resumeImpl(hooks,manifest));}
+ private async quiesce(hooks:Pick<RecoveryHooks,'quiesce'>) {
+  await hooks.quiesce();
+  // Independently await all instrumented native admissions, even if an operator
+  // hook accidentally returns before a surviving SDK tears down.
+  const barrier=await this.pool.connect();
+  try {await barrier.query("BEGIN");await barrier.query("SET LOCAL lock_timeout='10s'");await barrier.query("SELECT pg_advisory_xact_lock(hashtextextended('birbcrew.recovery.native',0))");await barrier.query("COMMIT");}
+  catch(e){await barrier.query("ROLLBACK");throw e;}finally{barrier.release();}
+ }
+ async holdForRestore(generation:string,hooks:Pick<RecoveryHooks,'quiesce'>) {
+  return this.operation(async()=>{const actual=await this.freezeImpl(generation);if(actual!==generation) throw new Error('Another generation is held');await this.quiesce(hooks);const {control:c}=await this.status();await this.fence.seal(c.installation,c.instance,actual);return {generation:actual};});
+ }
  async status() {
   const control=(await this.pool.query<Control>(`SELECT installation_id AS installation,instance_id AS instance,phase,generation FROM birbcrew_ts.recovery_control WHERE singleton`)).rows[0];
   if(!control) throw new Error('Recovery schema missing');
@@ -80,7 +91,6 @@ export class InstallationRecovery {
   const {control:c}=await this.status();
   if(c.phase==='restored') throw new Error('Restored installation requires reconciliation');
   const actual=c.generation??generation;
-  await this.fence.hold(c.installation,c.instance,actual);
   const db=await this.pool.connect();
   try {
    await db.query('BEGIN');
@@ -90,6 +100,7 @@ export class InstallationRecovery {
    await db.query('INSERT INTO birbcrew_ts.recovery_runs(generation) VALUES($1) ON CONFLICT DO NOTHING',[actual]);
    await db.query('COMMIT');
   } catch(e) {await db.query('ROLLBACK');throw e;} finally {db.release();}
+  await this.fence.hold(c.installation,c.instance,actual);
   return actual;
  }
  private async inventory() {
@@ -107,12 +118,7 @@ export class InstallationRecovery {
   const generation=await this.freezeImpl();
   const {control:c}=await this.status();
   if((await this.pool.query("SELECT 1 FROM birbcrew_ts.recovery_runs WHERE generation=$1 AND completed_at IS NOT NULL",[generation])).rowCount) throw new Error("Generation already captured; resume then begin a new generation");
-  await hooks.quiesce();
-  // Independently await all instrumented native admissions, even if an operator
-  // hook accidentally returns before a surviving SDK tears down.
-  const barrier=await this.pool.connect();
-  try {await barrier.query("BEGIN");await barrier.query("SET LOCAL lock_timeout='10s'");await barrier.query("SELECT pg_advisory_xact_lock(hashtextextended('birbcrew.recovery.native',0))");await barrier.query("COMMIT");}
-  catch(e){await barrier.query("ROLLBACK");throw e;}finally{barrier.release();}
+  await this.quiesce(hooks);
   await this.fence.verify(c.installation,c.instance,generation);
   const inventory=await this.inventory();
   const schemaVersions=(await this.pool.query<{version:number}>('SELECT version FROM birbcrew_ts.schema_versions ORDER BY version')).rows.map(x=>x.version);
@@ -133,6 +139,7 @@ export class InstallationRecovery {
   await writeFile(join(directory,'manifest.json'),raw,{flag:'wx',mode:0o600,flush:true});
   await writeFile(join(directory,'manifest.sha256'),checksum+'\n',{flag:'wx',mode:0o600,flush:true});
   await readRecoveryManifest(directory);
+  await this.fence.seal(c.installation,c.instance,generation);
   await this.pool.query(`UPDATE birbcrew_ts.recovery_runs SET completed_at=now(),manifest_sha256=$2 WHERE generation=$1`,[generation,checksum]);
   return {generation,sha256:checksum};
  }

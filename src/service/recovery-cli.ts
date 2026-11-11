@@ -9,12 +9,13 @@ export interface RecoveryOperator {
 const [command,modulePath,...args]=process.argv.slice(2);
 let operator:RecoveryOperator|undefined;
 try {
- if(!modulePath||!['initialize-fence','capture','verify','accept-restore','resume','status'].includes(command)) throw new Error('usage');
+ if(!modulePath||!['initialize-fence','hold-for-restore','capture','verify','accept-restore','resume','status'].includes(command)) throw new Error('usage');
  operator=(await import(pathToFileURL(resolve(modulePath)).href)).operator;
  if(!operator||!(operator.recovery instanceof InstallationRecovery)) throw new Error('operator');
  let receipt:unknown;
  switch(command) {
  case 'initialize-fence': await operator.recovery.initializeFence();receipt={status:'initialized'};break;
+ case 'hold-for-restore': if(args.length!==1) throw new Error('usage');receipt=await operator.recovery.holdForRestore(args[0],operator.hooks);break;
  case 'capture': if(args.length!==1) throw new Error('usage');receipt=await operator.recovery.capture(resolve(args[0]),operator.pins,operator.hooks);break;
  case 'verify': if(args.length!==1) throw new Error('usage');{const manifest=await readRecoveryManifest(resolve(args[0]));receipt={status:'verified',generation:manifest.generation};}break;
  case 'accept-restore': if(args.length!==2) throw new Error('usage');receipt=await operator.recovery.acceptRestore(resolve(args[0]),operator.pins,args[1]);break;

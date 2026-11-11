@@ -170,3 +170,15 @@ test('native lifetime barrier waits for surviving lease and held state rejects n
   await native.query('BEGIN');await assert.rejects(acquireRecoveryNativeLease(native),/held/);await native.query('ROLLBACK');
  }finally{native.release();await t.cleanup();}
 });
+
+test('external preparation before DB freeze cannot authorize restore overlap',async()=>{
+ const t=await setup();try {
+  const {control:c}=await t.recovery.status();const generation=randomUUID();
+  await t.fence.hold(c.installation,c.instance,generation); // controller dies before freezing database
+  assert.equal((await t.recovery.status()).control.phase,'active');
+  await assert.rejects(t.fence.transfer(c.installation,c.instance,randomUUID(),generation),/overlap/);
+  await t.recovery.holdForRestore(generation,t.hooks);
+  assert.equal((await t.recovery.status()).control.phase,'frozen');
+  await t.fence.transfer(c.installation,c.instance,randomUUID(),generation);
+ }finally{await t.cleanup();}
+});
