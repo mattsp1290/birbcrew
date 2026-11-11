@@ -1,3 +1,4 @@
+import {acquireRecoveryNativeLease,requireRecoveryActive} from "./recovery-admission.ts";
 /** Trusted backend-only API. Never construct authority from an observer request. */
 import { createHash, randomUUID } from "node:crypto";
 import { Client, type Pool, type PoolClient } from "pg";
@@ -158,6 +159,7 @@ export class TrustedContextStore {
     });
   }
   private async current(db: Pool | PoolClient | Client, claim: TrustedClaim, lock = false) {
+    await requireRecoveryActive(db);
     const s = await this.session(db,{ownerId:claim.ownerId,conversationId:claim.conversationId},lock);
     if (s.phase !== "active" || s.generation !== claim.generation) throw new TrustedContextError("stale");
     const r = await db.query(`SELECT 1 FROM birbcrew_ts.trusted_requests WHERE conversation_id=$1 AND request_id=$2
@@ -177,6 +179,7 @@ export class TrustedContextStore {
     let timer: ReturnType<typeof setInterval> | undefined;
     try {
       await db.query("BEGIN");
+      await acquireRecoveryNativeLease(db);
       await db.query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1,71))",[claim.conversationId]);
       await this.current(db,claim);
       db.on("error",stop); db.on("end",stop);

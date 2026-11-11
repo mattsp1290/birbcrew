@@ -1,3 +1,4 @@
+import {acquireRecoveryNativeLease,requireRecoveryActive} from "./recovery-admission.ts";
 import { lockChildAdmission } from "./supervisor-child.ts";
 import { createHash } from "node:crypto";
 import type { Pool } from "pg";
@@ -59,6 +60,7 @@ export async function withNativeAdmission<T>(
   let polling = false;
   try {
     await db.query("BEGIN");
+    await acquireRecoveryNativeLease(db);
     const engine = launch.childId ? "pi" : (await db.query<{engine:string}>(`SELECT m.engine FROM birbcrew_ts.conversations c
       JOIN birbcrew_ts.members m USING(owner_id,member_id) WHERE c.owner_id=$1 AND c.conversation_id=$2`,
       [launch.ownerId,conversationId])).rows[0]?.engine;
@@ -80,6 +82,7 @@ export async function withNativeAdmission<T>(
       if (polling || bounded.aborted) return;
       polling = true;
       try {
+        await requireRecoveryActive(pool);
         const stopped = await pool.query("SELECT 1 FROM birbcrew_ts.native_stop_requests WHERE conversation_id=$1 AND request_id=$2 AND token=$3", ids);
         if (stopped.rowCount) controller.abort();
       } catch { controller.abort(); }
