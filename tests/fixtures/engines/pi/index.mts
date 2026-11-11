@@ -1,3 +1,4 @@
+import { streamGate, waitForGate } from "../stream-gate.mts";
 import { randomUUID } from "node:crypto";
 import type { BaseEvent, RunAgentInput } from "@ag-ui/core";
 import { createTranslator, toAguiMessages } from "@ag-ui/pi";
@@ -46,6 +47,18 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
     const message = fauxAssistantMessage([call], { stopReason: "toolUse", responseId: randomUUID() });
     stream.push({ type: "start", partial: fauxAssistantMessage("") });
     stream.push({ type: "done", reason: "toolUse", message });
+    return stream;
+  }
+  const gate = streamGate(latest);
+  if (gate) {
+    const first = fauxAssistantMessage("first");
+    const complete = fauxAssistantMessage("first second", { responseId: randomUUID() });
+    stream.push({ type: "start", partial: fauxAssistantMessage("") });
+    stream.push({ type: "text_delta", contentIndex: 0, partial: first, delta: "first" });
+    void waitForGate(gate).then(() => {
+      stream.push({ type: "text_delta", contentIndex: 0, partial: complete, delta: " second" });
+      stream.push({ type: "done", reason: "stop", message: complete });
+    }, () => fail("error"));
     return stream;
   }
   let text: string;

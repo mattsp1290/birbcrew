@@ -70,6 +70,7 @@ def verify(directory, stack):
         "PATH": os.environ["PATH"], "HOME": str(directory), "BIRBCREW_DATABASE_URL": url,
         "BIRBCREW_TEST_DATABASE_URL": url, "BIRBCREW_TEMPORAL_ADDRESS": address,
         "BIRBCREW_STATE_DIR": str(directory / "native"),
+        "BIRBCREW_PROOF_STREAM_DIR": str(directory),
         "BIRBCREW_PROOF_REQUESTS": str(directory / "requests.jsonl"),
     }
     cli = [node, "src/service/cli.ts"]

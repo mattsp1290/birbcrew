@@ -1,4 +1,5 @@
 import { requestNativeStop } from "./native-admission.ts";
+import { textProjection } from "./text-stream.ts";
 import { publishObservation } from "./observation.ts";
 import { savedProposal, type Approval } from "./approvals.ts";
 import { createHash } from "node:crypto";
@@ -65,7 +66,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [7, "007-native-stops.sql"]] as const;
+        [4, "004-observation.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -295,6 +296,17 @@ export class MemberStore {
     });
   }
 
+  async appendText(claim: Claim, messageId: string, index: number, delta: string) {
+    await this.transaction(async (db) => {
+      await conversationFor(db, { ownerId: claim.ownerId, conversationId: claim.conversationId }, true);
+      const active = await db.query(`SELECT 1 FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2
+        AND token=$3 AND phase='started' AND NOT EXISTS (
+          SELECT 1 FROM birbcrew_ts.native_stop_requests WHERE conversation_id=$1 AND request_id=$2 AND token=$3)`, [claim.conversationId, claim.requestId, claim.token]);
+      if (!active.rowCount) throw new MemberStoreError("stale");
+      await publishObservation(db, claim.conversationId, { kind: "text", messageId, index, delta });
+    });
+  }
+
   async commitTurn(input: Claim & { checkpoint: unknown; reply: string }): Promise<string> {
     const key = commitSchema.parse(input);
     return this.transaction(async (db) => {
@@ -306,7 +318,8 @@ export class MemberStore {
           WHERE conversation_id = $1 AND request_id = $2 AND token = $3 AND phase = 'started'`, args,
       );
       if (update.rowCount) {
-        await publishObservation(db, key.conversationId, { kind: "reply", requestId: key.requestId, text: key.reply });
+        const project = await textProjection(db, key.conversationId);
+        await publishObservation(db, key.conversationId, { kind: "reply", requestId: key.requestId, text: project(key.reply, true) });
         return key.reply;
       }
       const replay = await db.query<{ reply: string }>(

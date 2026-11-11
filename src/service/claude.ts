@@ -61,6 +61,7 @@ interface ClaudeProfile {
 interface ClaudeInput {
   threadId: string; runId: string; text: string; checkpoint: unknown; signal: AbortSignal;
   continuation?: z.infer<typeof continuation>;
+  onText?: (delta: string) => void;
 }
 
 export async function runClaudeTurn(input: ClaudeInput, profile: ClaudeProfile) {
@@ -84,7 +85,7 @@ async function executeSegment(
   profile: ClaudeProfile,
   mode: z.infer<typeof claudeCommand>["mode"],
 ): Promise<z.infer<typeof success> | z.infer<typeof pending>> {
-  const { signal, ...turn } = input;
+  const { signal, onText, ...turn } = input;
   signal.throwIfAborted();
   if (mode !== "recover") await profile.authorize?.();
   signal.throwIfAborted();
@@ -143,7 +144,10 @@ async function executeSegment(
       }
     };
     child.once("error", reject);
-    child.once("message", (value) => { result = value; });
+    child.on("message", (value) => {
+      if (value && typeof value === "object" && "delta" in value && typeof value.delta === "string") onText?.(value.delta);
+      else result = value;
+    });
     child.once("exit", (code) => {
       signal.removeEventListener("abort", stop);
       if (signal.aborted) return reject(new Error("Claude turn cancelled"));

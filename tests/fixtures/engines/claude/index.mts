@@ -1,3 +1,4 @@
+import { streamGate, waitForGate } from "../stream-gate.mts";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -61,7 +62,8 @@ async function respond(
     reply = outcome.kind === "recorded" ? "recorded " + outcome.receipt.receiptId : outcome.kind;
   } else if (prompt?.startsWith("record ") && tools.some((t) => t.name === "mcp__ag_ui__record_work_item")) {
     tool = { id: "toolu_" + randomUUID(), input: { operation_id: prompt.slice(7), note: "private fixture note" } };
-  } else if (prompt?.startsWith("remember ")) reply = `stored ${remembered}`;
+  } else if (streamGate(prompt)) reply = "first";
+  else if (prompt?.startsWith("remember ")) reply = `stored ${remembered}`;
   else if (prompt === "recall") reply = `recalled ${remembered ?? "none"}`;
   else if (prompt === "wait") reply = "waiting";
   else {
@@ -86,6 +88,11 @@ async function respond(
   send("content_block_delta", { index: 0, delta: tool ?
     { type: "input_json_delta", partial_json: JSON.stringify(tool.input) } : { type: "text_delta", text: reply } });
   if (prompt === "wait") return;
+  const gate = streamGate(prompt);
+  if (gate) {
+    await waitForGate(gate);
+    send("content_block_delta", { index: 0, delta: { type: "text_delta", text: " second" } });
+  }
   send("content_block_stop", { index: 0 });
   send("message_delta", { delta: { stop_reason: tool ? "tool_use" : "end_turn", stop_sequence: null }, usage: { output_tokens: 10 } });
   send("message_stop", {});

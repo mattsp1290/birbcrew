@@ -7,6 +7,7 @@ import { Pool, type PoolClient } from "pg";
 import { ApprovalStore, savedProposal, recordWorkItemArguments } from "./approvals.ts";
 import type { PublicSegment } from "./activities.ts";
 import { commitSchema, type Conversation, type Checkpoint } from "./domain.ts";
+import { textProjection, textWriter } from "./text-stream.ts";
 import { MemberStore } from "./store.ts";
 import { commandSchema, type Launch } from "./supervisor.ts";
 
@@ -125,6 +126,9 @@ async function start(launch: Launch): Promise<PublicSegment> {
   let reaped = false;
   try {
     const { continuation } = admission;
+    const project = await textProjection(pool, launch.conversationId);
+    const messageId = launch.requestId + (continuation ? "/resumed-assistant" : "/assistant");
+    const stream = textWriter((index, delta) => store.appendText(launch, messageId, index, delta));
     // Recheck under the takeover lock after reservation. Both the fork and its command happen before releasing it.
     const member = await transaction(async (db) => {
       const { phase, checkpoint, reply: previousReply, paused, resuming, ...conversation } = await lockedTurn(db, launch);
@@ -133,7 +137,13 @@ async function start(launch: Launch): Promise<PublicSegment> {
         stdio: ["ignore", "ignore", "ignore", "ipc"], execArgv: [], detached: true,
       });
       active.set(launch.token, child);
-      child.once("message", (value) => { reply = value; });
+      child.on("message", (value) => {
+        if (value && typeof value === "object" && "delta" in value && typeof value.delta === "string") {
+          stream.push(project(value.delta));
+        } else {
+          reply = value;
+        }
+      });
       exited = new Promise<boolean>((resolve) => {
         child.once("error", () => resolve(false));
         child.once("close", (code) => resolve(code === 0));
@@ -144,6 +154,8 @@ async function start(launch: Launch): Promise<PublicSegment> {
       return conversation;
     });
     confirmed = Boolean(await exited && reply !== undefined);
+    stream.push(project("", true));
+    await stream.drain();
     const pid = active.get(launch.token)?.pid;
     reaped = pid !== undefined && await groupStopped(pid);
     if (!confirmed || !reaped) throw new Error("SDK process stopped without a confirmed result");

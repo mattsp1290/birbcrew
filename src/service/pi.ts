@@ -170,7 +170,7 @@ async function runSegment(input: DriverInput, profile: PiProfile, protectedTool:
         if (frame.type !== "TEXT_MESSAGE_CONTENT") continue;
         bytes += Buffer.byteLength(frame.delta);
         if (bytes > 65_536) abort();
-        else text += frame.delta;
+        else { text += frame.delta; input.onText?.(frame.delta); }
       }
     });
     try {

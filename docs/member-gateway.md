@@ -24,7 +24,7 @@ The gateway prints its loopback URL. Send the token as an `Authorization: Bearer
 | POST /conversations | Send `memberId` and a new `conversationId` (UUID). Returns the initial public snapshot. |
 | GET /conversations/{id} | Returns `messages`, `state` and the committed `cursor`. State includes the member, engine, profile, phase and pending approvals. |
 | POST /conversations/{id}/inputs | Send a new `requestId` and `text`. A 202 response acknowledges the input. Retry ambiguous acknowledgements with the same ID and text. |
-| POST /conversations/{id}/human | Copy `memberId`, `requestId`, `invocationId`, `nativeCallId`, `approvalId` and `version` from the pending card. Add `choice` with `approve` or `deny`. |
+| POST /conversations/{id}/human | Copy `memberId`, `requestId`, `invocationId`, `approvalId` and `version` from the pending card. Add `choice` with `approve` or `deny`. |
 | POST /conversations/{id}/cancel | Send the `requestId` of a pending protected call. Acknowledges cancellation. The native continuation can then report the cancelled result. |
 | POST /conversations/{id}/events | Attach a read-only AG-UI observer using the route's conversation ID as its thread ID. |
 
@@ -46,4 +46,4 @@ await agent.runAgent({}, {
 
 An explicit `?after=<cursor>` must match the current snapshot. A stale value returns HTTP 410 before streaming. A live observer that falls more than 256 frames behind receives `RUN_ERROR` with `CURSOR_EXPIRED`. In either case a fresh observer without `after` receives the latest snapshot. Conversations whose turns predate the public event ledger report HTTP 409 `history_unavailable`; their old prompt digests cannot reconstruct their public messages.
 
-The fixture suite exercises two official observers during a protected approval on each engine, gateway restart, argument redaction, cursor expiry and terminal message equality. This gateway currently publishes assistant text at committed replies. Native partial text/tool argument streaming, active-generation cancellation and Pi child runs have separate implementation and proof gates.
+The fixture suite exercises two official observers during a protected approval on each engine, gateway restart, argument redaction, cursor expiry and terminal message equality. During native generation observers receive assistant text as it arrives. A newly attached observer receives the open step and its accumulated text before the next delta. A failed attempt closes the open message and restores the committed history. Native tool argument streaming, active-generation cancellation and Pi child runs have separate implementation and proof gates.

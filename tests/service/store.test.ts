@@ -96,11 +96,16 @@ test("higher Temporal attempt fences an unfinished SDK call and cannot launch a 
   const start = await store.beginTurn(input, execution);
   assert.equal(start.kind, "start");
   const claim = { ...key, requestId, token: start.token };
+  const messageId = requestId + "/assistant";
+  await store.appendText(claim, messageId, 0, "provisional");
+  await store.appendText(claim, messageId, 0, "provisional");
+  await assert.rejects(store.appendText(claim, messageId, 0, "changed"), { code: "conflict" });
   await assert.rejects(store.beginTurn(input, { ...execution, attempt: 1 }), { code: "stale" });
   await assert.rejects(store.beginTurn(input, { ...execution, workflowRunId: randomUUID(), attempt: 3 }), { code: "stale" });
   await assert.rejects(store.beginTurn(input, { ...execution, activityId: "different", attempt: 3 }), { code: "stale" });
   assert.deepEqual(await store.beginTurn(input, { ...execution, attempt: 3 }), { kind: "uncertain" });
   await assert.rejects(store.commitTurn({ ...claim, reply: "late", checkpoint: { version: 1, engine: "claude", state: {} } }), { code: "stale" });
+  await assert.rejects(store.appendText(claim, messageId, 1, "late"), { code: "stale" });
   assert.deepEqual(await store.beginTurn(input, { ...execution, attempt: 4 }), { kind: "uncertain" });
   await assert.rejects(store.beginTurn({ ...input, requestId: randomUUID() }), { code: "busy" });
 });

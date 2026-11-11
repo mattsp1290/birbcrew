@@ -14,6 +14,7 @@ export interface DriverInput {
   text: string;
   checkpoint: Checkpoint | null;
   signal: AbortSignal;
+  onText?: (delta: string) => void;
   continuation?: { nativeCallId: string; result: ToolOutcome };
 }
 

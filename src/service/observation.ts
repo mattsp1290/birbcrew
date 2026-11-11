@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { EventType as E, type Event, type Message } from "@ag-ui/core";
 import type { Pool, PoolClient } from "pg";
 import type { Approval, ToolOutcome } from "./approvals.ts";
@@ -5,7 +6,7 @@ import { MemberStoreError, type Conversation } from "./domain.ts";
 
 const retainedEvents = 256;
 
-type PublicApproval = Omit<Approval, "argumentDigest" | "ownerId"> & { choices: ["approve", "deny"] };
+type PublicApproval = Omit<Approval, "argumentDigest" | "ownerId" | "nativeCallId"> & { choices: ["approve", "deny"] };
 type Phase = "idle" | "running" | "waiting" | "complete" | "failed";
 type Projection = {
   conversationId: string;
@@ -23,17 +24,19 @@ type Change =
   | { kind: "answered" | "resume"; approvalId: string }
   | { kind: "cancelled"; requestId: string }
   | { kind: "result"; approvalId: string; outcome: ToolOutcome }
+  | { kind: "text"; messageId: string; index: number; delta: string }
   | { kind: "failed"; requestId: string };
 
 export interface PublicSnapshot {
   cursor: number;
   state: Projection;
   messages: Message[];
+  openText: { id: string; prefix: string; count: number } | null;
 }
 
 type StoredSnapshot = PublicSnapshot & { complete: boolean };
 
-const selection = `SELECT COALESCE(s.history_complete, true) AS complete, COALESCE(s.cursor, 0) AS cursor, COALESCE(s.messages, '[]'::jsonb) AS messages,
+const selection = `SELECT s.open_text AS "openText", COALESCE(s.history_complete, true) AS complete, COALESCE(s.cursor, 0) AS cursor, COALESCE(s.messages, '[]'::jsonb) AS messages,
   COALESCE(s.state, jsonb_build_object('conversationId', c.conversation_id, 'memberId', m.member_id,
   'engine', m.engine, 'profile', m.profile, 'phase', 'idle', 'openStep', NULL, 'pendingApprovals', '[]'::jsonb)) AS state
   FROM birbcrew_ts.conversations c JOIN birbcrew_ts.members m USING (owner_id, member_id)
@@ -43,11 +46,12 @@ export async function readSnapshot(db: Pool, owner: string, id: string): Promise
   const { rows: [snapshot] } = await db.query<StoredSnapshot>(selection + " WHERE c.owner_id=$1 AND c.conversation_id=$2", [owner, id]);
   if (!snapshot) throw new MemberStoreError("not_found");
   if (!snapshot.complete) throw new MemberStoreError("history_unavailable");
-  return { state: snapshot.state, cursor: snapshot.cursor, messages: snapshot.messages };
+  return { state: snapshot.state, cursor: snapshot.cursor, messages: snapshot.messages, openText: snapshot.openText };
 }
 
 function logicalKey(change: Change) {
   switch (change.kind) {
+    case "text": return "text/" + change.messageId + "/" + change.index;
     case "call": return "call/" + change.approval.approvalId;
     case "answered":
     case "resume":
@@ -56,7 +60,8 @@ function logicalKey(change: Change) {
   }
 }
 
-function apply({ messages, state }: PublicSnapshot, change: Change): Event[] {
+function apply(snapshot: PublicSnapshot, change: Change): Event[] {
+  const { messages, state } = snapshot;
   const frames: Event[] = [];
   function startStep(name: string) {
     state.openStep = name;
@@ -66,16 +71,35 @@ function apply({ messages, state }: PublicSnapshot, change: Change): Event[] {
     if (state.openStep) frames.push({ type: E.STEP_FINISHED, stepName: state.openStep });
     state.openStep = null;
   }
+  function finishText() {
+    if (snapshot.openText) frames.push({ type: E.TEXT_MESSAGE_END, messageId: snapshot.openText.id });
+    snapshot.openText = null;
+  }
   switch (change.kind) {
+    case "text": {
+      if (!snapshot.openText) {
+        snapshot.openText = { id: change.messageId, prefix: "", count: 0 };
+        frames.push({ type: E.TEXT_MESSAGE_START, messageId: change.messageId, role: "assistant" });
+      }
+      const text = snapshot.openText;
+      if (!state.openStep || text.id !== change.messageId || text.count !== change.index) throw new MemberStoreError("stale");
+      if (text.count >= 1024 || !change.delta || change.delta.includes("\0") || !change.delta.isWellFormed() ||
+          Buffer.byteLength(text.prefix) + Buffer.byteLength(change.delta) > 65_536) throw new MemberStoreError("input_limit");
+      text.count++;
+      text.prefix += change.delta;
+      frames.push({ type: E.TEXT_MESSAGE_CONTENT, messageId: text.id, delta: change.delta });
+      return frames;
+    }
     case "input":
       messages.push({ id: change.requestId, role: "user", content: change.text });
       state.phase = "running";
       startStep(change.requestId);
       break;
     case "call": {
-      const { memberId, conversationId, requestId, invocationId, nativeCallId, approvalId, version, policyVersion,
+      const { memberId, conversationId, requestId, invocationId, approvalId, version, policyVersion,
         toolName, summary } = change.approval;
-      state.pendingApprovals.push({ memberId, conversationId, requestId, invocationId, nativeCallId,
+      finishText();
+      state.pendingApprovals.push({ memberId, conversationId, requestId, invocationId,
         approvalId, version, policyVersion, toolName, summary, choices: ["approve", "deny"] });
       state.phase = "waiting";
       const args = JSON.stringify({ operation_id: requestId });
@@ -109,21 +133,27 @@ function apply({ messages, state }: PublicSnapshot, change: Change): Event[] {
       break;
     }
     case "reply": {
-      const id = change.requestId + "/assistant";
+      const id = snapshot.openText?.id ?? change.requestId + "/assistant";
+      if (snapshot.openText) {
+        if (snapshot.openText.prefix !== change.text) throw new MemberStoreError("conflict");
+        finishText();
+      } else {
+        frames.push({ type: E.TEXT_MESSAGE_START, messageId: id, role: "assistant" },
+          { type: E.TEXT_MESSAGE_CONTENT, messageId: id, delta: change.text }, { type: E.TEXT_MESSAGE_END, messageId: id });
+      }
       messages.push({ id, role: "assistant", content: change.text });
-      frames.push({ type: E.TEXT_MESSAGE_START, messageId: id, role: "assistant" },
-        { type: E.TEXT_MESSAGE_CONTENT, messageId: id, delta: change.text }, { type: E.TEXT_MESSAGE_END, messageId: id });
       finishStep();
       state.phase = messages.filter((m) => m.role === "user").length >= 4 ? "complete" : "idle";
       break;
     }
     case "failed":
+      finishText();
       finishStep();
       state.phase = "failed";
       state.pendingApprovals = [];
       break;
   }
-  if (change.kind !== "resume" && change.kind !== "answered" && change.kind !== "cancelled" && change.kind !== "failed") {
+  if (change.kind !== "resume" && change.kind !== "answered" && change.kind !== "cancelled") {
     frames.push({ type: E.MESSAGES_SNAPSHOT, messages });
   }
   frames.push({ type: E.STATE_SNAPSHOT, snapshot: state });
@@ -137,16 +167,30 @@ export async function publishObservation(db: PoolClient, id: string, change: Cha
   if (!snapshot.complete) return;
   await db.query(`INSERT INTO birbcrew_ts.public_snapshots (conversation_id,state) VALUES ($1,$2)
     ON CONFLICT DO NOTHING`, [id, JSON.stringify(snapshot.state)]);
-  const admitted = await db.query(`INSERT INTO birbcrew_ts.public_publications (conversation_id,logical_key)
-    VALUES ($1,$2) ON CONFLICT DO NOTHING`, [id, logicalKey(change)]);
-  if (!admitted.rowCount) return;
+  const key = logicalKey(change);
+  const digest = change.kind === "text" ? createHash("sha256").update(change.delta).digest() : null;
+  const admitted = await db.query(`INSERT INTO birbcrew_ts.public_publications (conversation_id,logical_key,payload_digest)
+    VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [id, key, digest]);
+  if (!admitted.rowCount) {
+    if (digest) {
+      const same = await db.query(`SELECT 1 FROM birbcrew_ts.public_publications
+        WHERE conversation_id=$1 AND logical_key=$2 AND payload_digest=$3`, [id, key, digest]);
+      if (!same.rowCount) throw new MemberStoreError("conflict");
+    }
+    return;
+  }
   const frames = apply(snapshot, change);
   await db.query(`INSERT INTO birbcrew_ts.public_events (conversation_id,cursor,event)
     SELECT $1,$2::integer+ordinality,value FROM jsonb_array_elements($3) WITH ORDINALITY`,
     [id, snapshot.cursor, JSON.stringify(frames)]);
   const cursor = snapshot.cursor + frames.length;
-  await db.query("UPDATE birbcrew_ts.public_snapshots SET cursor=$2,messages=$3,state=$4 WHERE conversation_id=$1",
-    [id, cursor, JSON.stringify(snapshot.messages), JSON.stringify(snapshot.state)]);
+  if (change.kind === "text") {
+    await db.query("UPDATE birbcrew_ts.public_snapshots SET cursor=$2,open_text=$3 WHERE conversation_id=$1",
+      [id, cursor, JSON.stringify(snapshot.openText)]);
+    return;
+  }
+  await db.query("UPDATE birbcrew_ts.public_snapshots SET cursor=$2,messages=$3,state=$4,open_text=$5 WHERE conversation_id=$1",
+    [id, cursor, JSON.stringify(snapshot.messages), JSON.stringify(snapshot.state), snapshot.openText && JSON.stringify(snapshot.openText)]);
   await db.query("DELETE FROM birbcrew_ts.public_events WHERE conversation_id=$1 AND cursor<=$2", [id, cursor - retainedEvents]);
 }
 

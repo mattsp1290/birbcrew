@@ -152,8 +152,10 @@ async function run(command: Command) {
     if (finished) throw new Error("Unexpected event after Claude terminal");
     if (event.type === "RUN_ERROR") throw new ClaudeTurnError("Claude SDK run failed");
     if (event.type === "TEXT_MESSAGE_CONTENT") {
-      text += textEvent.parse(event).delta;
+      const { delta } = textEvent.parse(event);
+      text += delta;
       if (Buffer.byteLength(text) > 65_536) throw new ClaudeTurnError("Claude response exceeded size limit");
+      process.send?.({ delta });
     }
     if (event.type === "TOOL_CALL_START") {
       const { toolCallName } = z.object({ toolCallName: z.string() }).parse(event);

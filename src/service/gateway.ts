@@ -19,7 +19,7 @@ import { MemberStore } from "./store.ts";
 const credentials = z.record(z.string().regex(/^[0-9a-f]{64}$/), z.string().min(1));
 const encoder = new EventEncoder();
 const requestLimit = 128 * 1024;
-const human = decisionSchema.omit({ ownerId: true, conversationId: true, argumentDigest: true });
+const human = decisionSchema.omit({ ownerId: true, conversationId: true, argumentDigest: true, nativeCallId: true });
 
 class HttpError extends Error {
   readonly status: number;
@@ -75,6 +75,11 @@ async function observe(
     await send({ type: E.MESSAGES_SNAPSHOT, messages: snapshot.messages });
     await send({ type: E.STATE_SNAPSHOT, snapshot: snapshot.state }, cursor);
     if (snapshot.state.openStep) await send({ type: E.STEP_STARTED, stepName: snapshot.state.openStep });
+    if (snapshot.openText) {
+      const { id, prefix } = snapshot.openText;
+      await send({ type: E.TEXT_MESSAGE_START, role: "assistant", messageId: id });
+      await send({ type: E.TEXT_MESSAGE_CONTENT, messageId: id, delta: prefix });
+    }
     if (await finish(snapshot.state.phase)) return;
     while (!stop.signal.aborted) {
       const rows = await readEvents(pool, owner, threadId, cursor);
@@ -138,11 +143,12 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       }
       case "human": {
         const key = human.parse(input);
-        const { rows: [call] } = await store.pool.query<{ argument_digest: string }>(
-          "SELECT argument_digest FROM birbcrew_ts.protected_calls WHERE conversation_id=$1 AND approval_id=$2",
-          [conversationId, key.approvalId]);
+        const { rows: [call] } = await store.pool.query<{ argument_digest: string; native_call_id: string }>(
+          `SELECT argument_digest,native_call_id FROM birbcrew_ts.protected_calls JOIN birbcrew_ts.conversations USING (conversation_id)
+           WHERE conversation_id=$1 AND approval_id=$2 AND owner_id=$3`,
+          [conversationId, key.approvalId, ownerId]);
         if (!call) throw new HttpError(409, "unknown_approval");
-        const decision = await members.decide({ ownerId, conversationId, ...key, argumentDigest: call.argument_digest });
+        const decision = await members.decide({ ownerId, conversationId, ...key, nativeCallId: call.native_call_id, argumentDigest: call.argument_digest });
         return json(response, 200, { approvalId: key.approvalId, decision });
       }
       case "events": {
