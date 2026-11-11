@@ -55,3 +55,11 @@ test("unknown accepted-update outcomes are not retried", async () => {
   await assert.rejects(new MemberClient(store,temporal).accept(f.request),error);
   assert.equal(calls,1);
 });
+
+// Pure boundary calculation stays independent of workflow runtime and network calls.
+test("history rollover triggers at finite event cap or Temporal server suggestion", async () => {
+  const { historyRequiresRollover, workflowHistoryEventLimit } = await import("../../src/service/limits.ts");
+  assert.equal(historyRequiresRollover({historyLength:workflowHistoryEventLimit-1,continueAsNewSuggested:false}),false);
+  assert.equal(historyRequiresRollover({historyLength:workflowHistoryEventLimit,continueAsNewSuggested:false}),true);
+  assert.equal(historyRequiresRollover({historyLength:1,continueAsNewSuggested:true}),true);
+});

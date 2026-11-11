@@ -149,6 +149,14 @@ export class MemberStore {
         if(prior.phase==="rejected")throw new MemberStoreError("request_rejected");
         return;
       }
+      const {rows:[existingTurn]}=await db.query<{prompt_digest:Buffer}>(
+        "SELECT prompt_digest FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
+      if(existingTurn) {
+        if(!existingTurn.prompt_digest.equals(digest))throw new MemberStoreError("conflict");
+        await db.query("INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest) VALUES($1,$2,$3)",
+          [key.conversationId,key.requestId,digest]);
+        return;
+      }
       const {rows:[budget]}=await db.query<{limit:number;used:number}>(`SELECT turn_limit AS "limit",
         (SELECT count(*) FROM (SELECT request_id FROM birbcrew_ts.request_admissions WHERE conversation_id=$1
          UNION SELECT request_id FROM birbcrew_ts.turns WHERE conversation_id=$1) ids)::integer AS used
@@ -178,8 +186,8 @@ export class MemberStore {
     const key=claimSchema.omit({token:true}).parse(input);
     await conversationFor(this.pool,key,false);
     const {rows:[row]}=await this.pool.query(`SELECT a.phase AS admission,a.reason,t.phase,t.reply
-      FROM birbcrew_ts.request_admissions a LEFT JOIN birbcrew_ts.turns t USING(conversation_id,request_id)
-      WHERE a.conversation_id=$1 AND a.request_id=$2`,[key.conversationId,key.requestId]);
+      FROM birbcrew_ts.request_admissions a FULL JOIN birbcrew_ts.turns t USING(conversation_id,request_id)
+      WHERE COALESCE(a.conversation_id,t.conversation_id)=$1 AND COALESCE(a.request_id,t.request_id)=$2`,[key.conversationId,key.requestId]);
     if(!row)throw new MemberStoreError("not_found");
     return {requestId:key.requestId,phase:row.admission==="rejected"?"rejected":row.phase??"accepted",
       ...(row.reason?{reason:row.reason}:{}),...(row.phase==="committed"?{reply:row.reply}:{})};
