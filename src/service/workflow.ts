@@ -2,7 +2,7 @@ import {
   allHandlersFinished, ApplicationFailure, CancellationScope, workflowInfo, condition, continueAsNew, patched, defineSignal, defineUpdate,
   executeChild, getExternalWorkflowHandle, isCancellation, proxyActivities, setHandler
 } from "@temporalio/workflow";
-import { workflowGenerationTurnLimit } from "./limits.ts";
+import { workflowGenerationTurnLimit, historyRequiresRollover } from "./limits.ts";
 import { acceptsChoice } from "./deferral.ts";
 import { submitSchema, type Conversation, type TurnRequest } from "./domain.ts";
 import type { Approval, Decision, Choice } from "./approvals.ts";
@@ -57,6 +57,7 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   // Preserve pre-rollover histories: existing proof workflows still close after four turns.
   const rollover = patched("bounded-conversations-v1");
   const generationLimit = rollover ? workflowGenerationTurnLimit : 4;
+  const historyBoundary = () => rollover && historyRequiresRollover(workflowInfo());
   const { conversationProgress, recordAcceptance, rejectAccepted } = proxyActivities<Pick<MemberStore, "conversationProgress" | "recordAcceptance" | "rejectAccepted">>({
     taskQueue: memberTaskQueue, startToCloseTimeout: "20 seconds", scheduleToCloseTimeout: "60 seconds",
   });
@@ -236,6 +237,9 @@ export async function memberConversation(conversation: Conversation): Promise<vo
     if (request.ownerId !== conversation.ownerId || request.conversationId !== conversation.conversationId) {
       throw ApplicationFailure.nonRetryable("Conversation not found");
     }
+    // Do not keep admitting duplicate update handlers into an already-full history.
+    // Decisions/cancellations stay available so pending work can drain safely.
+    if (historyBoundary()) throw ApplicationFailure.nonRetryable("Conversation history is rolling over", "RolloverInProgress");
     const existing = turns.get(request.requestId);
     if (existing) {
       if (existing.text !== request.text) throw ApplicationFailure.nonRetryable("Request payload conflict");
@@ -291,7 +295,7 @@ export async function memberConversation(conversation: Conversation): Promise<vo
     return value.requestId;
   }, { validator: validate });
 
-  await condition(() => (failed || cancelled || turns.size >= generationLimit) && inFlight === 0 && allHandlersFinished());
+  await condition(() => (failed || cancelled || turns.size >= generationLimit || historyBoundary()) && inFlight === 0 && allHandlersFinished());
   if (failed) throw ApplicationFailure.nonRetryable("Member conversation failed");
   if (rollover && !cancelled) {
     const progress = await conversationProgress(conversation);

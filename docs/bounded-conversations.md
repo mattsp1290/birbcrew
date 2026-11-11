@@ -8,7 +8,11 @@ not a new Temporal wrapper for the trusted-context API.
 New conversations retain their logical member/conversation IDs for at most 128
 application turns. Each Temporal execution admits at most 4 distinct request IDs,
 then drains accepted work, Update handlers, approvals and child workflows before
-Continue-As-New. New requests at a full generation receive a typed rejection;
+Continue-As-New. The same drain begins at 2,000 history events or Temporal's
+Continue-As-New recommendation, even with fewer distinct turns. This event
+threshold is a soft drain trigger, not a hard bound while a human decision or
+in-flight handler still needs to finish; pending work is never abandoned merely
+to force a rollover. New requests at a full generation receive a typed rejection;
 the client retries that rejection against the logical workflow ID for up to 30s.
 A busy response is not acceptance. Arbitrary network errors are not retried as
 new work. Native checkpoint identity is retained across generations.
@@ -78,3 +82,22 @@ Live model token windows, paid spend, forced native compaction, arbitrary
 in-flight side-effect recovery and worker-container replacement are not implied
 by this fixture. Codex live approval callbacks are not resumable after native
 process loss; that remains an explicit uncertain outcome, not an automatic retry.
+
+### History-pressure drain boundary
+
+New workflow generations also stop admitting updates when the history reaches
+2,000 events or Temporal recommends Continue-As-New, even if fewer than four
+unique turns arrived. This prevents repeated duplicate submissions from keeping
+an otherwise idle generation alive indefinitely. Known completed requests remain
+readable from the database without addressing Temporal. Other submissions receive
+`RolloverInProgress`; the client retries for at most 30 seconds, then returns busy
+without claiming acceptance.
+
+The event threshold is a **drain trigger, not a hard history-size guarantee**.
+Pending human decisions, active SDK work, child workflows and already-accepted
+updates must finish or be cancelled before rollover. Decision and cancellation
+handlers remain serviceable past the threshold so they can release that work.
+An operator must still rate-limit untrusted traffic and monitor Temporal history
+limits: sustained invalid decision/signal traffic while a decision is pending can
+grow history. The implementation does not discard or falsely complete accepted
+work merely to force a history boundary.
