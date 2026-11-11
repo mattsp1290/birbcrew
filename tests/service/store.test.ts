@@ -225,3 +225,22 @@ test("progress activity projects only exact legacy DTOs without weakening the st
   await assert.rejects(activity({...conversation,engine:"claude"}),{code:"conflict"});
   await assert.rejects(activity({...key,extra:true}),{name:"ZodError"});
 });
+
+test("unconfirmed admission rejection is digest-bound and cannot overwrite begun or committed work",async()=>{
+  const key=await newConversation("pi"),request={...key,requestId:randomUUID(),text:"original"};
+  await store.recordAcceptance(request);
+  await store.rejectUnstartedAdmission({...request,text:"changed"});
+  assert.equal((await store.requestAdmission(request))?.phase,"accepted");
+  await store.rejectUnstartedAdmission(request);
+  assert.deepEqual(await store.requestStatus({...key,requestId:request.requestId}),{requestId:request.requestId,phase:"rejected",reason:"admission_unconfirmed"});
+  await store.rejectUnstartedAdmission(request);
+  await assert.rejects(store.beginTurn(request),{code:"request_rejected"});
+  const active={...key,requestId:randomUUID(),text:"active"};await store.recordAcceptance(active);
+  const started=await store.beginTurn(active);assert.equal(started.kind,"start");
+  await store.rejectUnstartedAdmission(active);
+  assert.equal((await store.requestStatus({...key,requestId:active.requestId})).phase,"started");
+  if(started.kind!=="start")throw new Error("Expected start");
+  await store.commitTurn({...key,requestId:active.requestId,token:started.token,reply:"committed",checkpoint:{version:1,engine:"pi",state:{}}});
+  await store.rejectUnstartedAdmission(active);
+  assert.equal(await store.committedReply(active),"committed");
+});

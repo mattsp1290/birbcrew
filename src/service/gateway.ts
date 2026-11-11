@@ -139,7 +139,7 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       return json(response, 201, await readSnapshot(store.pool, ownerId, input.conversationId));
     }
     const statusPath = /^\/conversations\/([^/]+)\/requests\/([^/]+)$/.exec(path);
-    if (statusPath && request.method === "GET") return json(response,200,await store.requestStatus({
+    if (statusPath && request.method === "GET") return json(response,200,await members.requestStatus({
       ownerId,conversationId:z.uuid().parse(statusPath[1]),requestId:z.uuid().parse(statusPath[2]),
     }));
     const parts = /^\/conversations\/([^/]+)(?:\/(events|inputs|human|cancel))?$/.exec(path);

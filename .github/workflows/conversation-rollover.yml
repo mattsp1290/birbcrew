@@ -33,6 +33,9 @@ jobs:
       - run: node tests/proof/progress-compatibility.mts
         env:
           TEMPORAL_CLI: ${{ github.workspace }}/.proof/bin/temporal
+      - run: node tests/proof/admission-compatibility.mts
+        env:
+          TEMPORAL_CLI: ${{ github.workspace }}/.proof/bin/temporal
       - run: npm run test:rollover
         env:
           TEMPORAL_CLI: ${{ github.workspace }}/.proof/bin/temporal

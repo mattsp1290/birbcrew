@@ -165,3 +165,27 @@ checks the old strict failure, pending activity retry, new narrow dispatch, an
 explicit closed-run reset, and isolated replay of all four captured histories.
 The deterministic turn activity writes real database receipts but invokes no SDK
 or model; the separate unchanged `npm run test:rollover` journey qualifies SDKs.
+
+### Lost admission acknowledgement regression
+
+`node tests/proof/admission-compatibility.mts` tests the real database/Temporal
+boundary where SQL commits an admission but every activity acknowledgement fails.
+The first case exhausts actual Temporal retry/deadline budgets and checks that the
+workflow persists a terminal rejection without invoking any turn activity. The
+second also fails final reconciliation through its retry budget, then checks that
+a fresh client observing the confirmed terminal workflow repairs the retained
+receipt durably. Repeated status, acceptance and submission must never restart the
+workflow or invoke a provider. Both captured failure histories replay with network
+access disabled. The fixture uses the same disposable-service setup and optional
+external-service variables as the progress compatibility regression above.
+
+An exhausted admission acknowledgement is reported as the durable terminal reason
+`admission_unconfirmed`, not as successful execution or an indefinitely accepted
+request. If the workflow cannot write that outcome before closing, status and
+repeat submission reconcile only after observing a terminal *logical* workflow
+and atomically confirming no turn row exists. Running/continued executions are
+never finalized this way; committed or begun work is never overwritten. A
+Temporal lookup failure is surfaced as unavailable after a ten-second deadline,
+not permission to replay. Ownership is checked before the Temporal lookup.
+Migration 20 permits the new reason; migrations 18/19 belong to downstream API
+and backup work and are not prerequisites for this isolated change.

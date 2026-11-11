@@ -130,7 +130,7 @@ if (process.argv[2] === "offline-replay") {
             const workflowId=`birbcrew-ts/member/${member.memberId}/conversation/${key.conversationId}`;
             for(let i=0;i<3;i++) await command("turn",{...key,requestId:randomUUID(),text:"remember boundary"});
             const request={...key,requestId:randomUUID()};
-            const result=command("turn",{...request,text:"record "+request.requestId});
+            const result=command("turn",{...request,text:"record "+request.requestId},engine==="codex"&&cancel);
             void result.catch(()=>{});
             const card=await until(async()=>pendingSchema.parse(await command("pending",key))[0],"fourth turn decision");
             const before=(await temporal.workflow.getHandle(workflowId).describe()).runId;
@@ -150,6 +150,12 @@ if (process.argv[2] === "offline-replay") {
             if(cancel) await command("cancel-pending",request);
             else await command("decide",decision(card,"approve"));
             await result; await queued;
+            if(engine==="codex"&&cancel) {
+              // Codex owns a live callback: cancellation aborts it rather than
+              // fabricating a successful native continuation.
+              assert.equal(await s.sql(`SELECT phase FROM birbcrew_ts.turns WHERE conversation_id='${key.conversationId}' AND request_id='${request.requestId}'`),"uncertain");
+              assert.equal((await readSnapshot(pool,key.ownerId,key.conversationId)).state.phase,"cancelled");
+            }
             assert.equal(await s.sql(`SELECT count(*) FROM birbcrew_ts.work_items WHERE conversation_id='${key.conversationId}'`),cancel?"0":"1");
             assert.deepEqual(await command("pending",key),[]);
             if(!cancel) assert.notEqual((await temporal.workflow.getHandle(workflowId).describe()).runId,before);
@@ -162,7 +168,7 @@ if (process.argv[2] === "offline-replay") {
           const member=await create(engine,"fixture.approval.v1");
           const key=await member.open();
           const predecessor={...key,requestId:randomUUID()};
-          const result=command("turn",{...predecessor,text:"record "+predecessor.requestId});
+          const result=command("turn",{...predecessor,text:"record "+predecessor.requestId},engine==="codex");
           void result.catch(()=>{});
           await until(async()=>pendingSchema.parse(await command("pending",key))[0],"pending predecessor");
           const queued={...key,requestId:randomUUID(),text:"remember NEVER_INFER_"+randomUUID()};
@@ -172,6 +178,10 @@ if (process.argv[2] === "offline-replay") {
             {requestId:queued.requestId,phase:"accepted"});
           await command("cancel-pending",predecessor);
           await result;
+          if(engine==="codex") {
+            assert.equal(await s.sql(`SELECT phase FROM birbcrew_ts.turns WHERE conversation_id='${key.conversationId}' AND request_id='${predecessor.requestId}'`),"uncertain");
+            assert.equal((await readSnapshot(pool,key.ownerId,key.conversationId)).state.phase,"cancelled");
+          }
           await until(async()=>{
             const status=await new MemberStore(pool).requestStatus({...key,requestId:queued.requestId});
             return status.phase==="rejected"?status:undefined;
