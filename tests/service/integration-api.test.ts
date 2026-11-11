@@ -105,6 +105,8 @@ const child = `
   const headers={Authorization:'Bearer '+token,'Content-Type':'application/json'};
   const accepted=await fetch(endpoint+path,{method:'POST',headers,body:JSON.stringify({requestId,text})});
   if(accepted.status!==202) throw new Error('expected accepted: '+accepted.status);
+  const receipt=await accepted.json();
+  if(stage==='after_acceptance' && receipt.status!=='accepted') throw new Error('expected waiting acceptance before kill');
   if(stage==='after_completion') {
     const result=await fetch(endpoint+path+'/'+requestId,{headers});
     if((await result.json()).status!=='completed') throw new Error('expected complete');
@@ -262,4 +264,58 @@ test("failing older cancellation intents cannot starve a later healthy request",
   } finally {
     await pool.query("UPDATE birbcrew_ts.integration_cancellations SET delivered_at=clock_timestamp() WHERE conversation_id=$1", [f.conversationId]);
   }
+});
+
+test("concurrent completion and cancellation preserve one committed result", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  const requestId = randomUUID(), path = `/v1/conversations/${f.conversationId}/requests`;
+  const input = { ownerId: f.ownerId, conversationId: f.conversationId, requestId, text: "concurrent finish" };
+  const accepted = await (await f.api(path, { requestId, text: input.text })).json();
+  assert.equal(accepted.status, "accepted");
+  const [, cancellation] = await Promise.all([
+    f.finish(input),
+    f.api(path + "/" + requestId + "/cancel", {}).then(async response => {
+      assert.equal(response.status, 202);
+      return response.json();
+    }),
+  ]);
+  assert.ok(cancellation.cancellation.receiptId);
+  const result = await (await f.api(path + "/" + requestId)).json();
+  assert.equal(result.status, "completed");
+  assert.equal(result.result.text, "original result: concurrent finish");
+  assert.equal(result.cancellation.receiptId, cancellation.cancellation.receiptId);
+  await new IntegrationApi(store, f.members).flushCancellations();
+  const repeated = await (await f.api(path, { requestId, text: input.text })).json();
+  assert.equal(repeated.status, "completed");
+  assert.deepEqual(repeated.result, result.result);
+  assert.equal(f.counts().effects, 1);
+  assert.equal((await pool.query("SELECT count(*)::integer n FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2", [f.conversationId, requestId])).rows[0].n, 1);
+});
+
+test("legacy committed turn without an admission retains result and cancellation receipt", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  const requestId = randomUUID(), path = `/v1/conversations/${f.conversationId}/requests/${requestId}`;
+  const input = { ownerId: f.ownerId, conversationId: f.conversationId, requestId, text: "legacy accepted before migration" };
+  // An already-running pre-v1 workflow can commit a turn without executing the
+  // new admission activity after migration 17 has finished its backfill.
+  const turn = await store.beginTurn(input, { workflowRunId: randomUUID(), activityId: "legacy-workflow", attempt: 1 });
+  assert.equal(turn.kind, "start"); if (turn.kind !== "start") return;
+  await store.commitTurn({ ownerId: f.ownerId, conversationId: f.conversationId, requestId, token: turn.token,
+    reply: "legacy original result", checkpoint: { version: 1, engine: "pi", state: {} } });
+  assert.equal((await pool.query("SELECT count(*)::integer n FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2", [f.conversationId, requestId])).rows[0].n, 0);
+  const response = await f.api(path); assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.status, "completed");
+  assert.equal(result.result.text, "legacy original result");
+  const before = f.counts();
+  const cancel = await f.api(path + "/cancel", {}); assert.equal(cancel.status, 202);
+  const receipt = await cancel.json();
+  assert.equal(receipt.status, "completed");
+  assert.deepEqual(receipt.result, result.result);
+  assert.ok(receipt.cancellation.receiptId);
+  assert.equal((await pool.query("SELECT count(*)::integer n FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2", [f.conversationId, requestId])).rows[0].n, 1);
+  const repeated = await (await f.api(path + "/cancel", {})).json();
+  assert.equal(repeated.cancellation.receiptId, receipt.cancellation.receiptId);
+  await new IntegrationApi(store, f.members).flushCancellations();
+  assert.deepEqual(f.counts(), before, "legacy result and cancellation reconciliation cannot execute work");
 });
