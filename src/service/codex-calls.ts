@@ -171,7 +171,8 @@ Promise<ToolOutcome | {kind:"pending"|"interrupted"}> {
     const approval = await confirmedApproval(db,{...member,ownerId:launch.ownerId,conversationId:launch.conversationId,
       requestId:launch.requestId,invocationId:launch.requestId,approvalId});
     try {
-      return await ledger.settleLocked(db,{...approval,token:launch.token},true);
+      return await traced("tool.settle",{...launch,engine:"codex",workflowRunId:launch.execution.workflowRunId},
+        () => ledger.settleLocked(db,{...approval,token:launch.token},true));
     } catch (error) {
       if (!(error instanceof MemberStoreError) || error.code !== "stale") throw error;
       await interruptLiveLocked(db,launch,launch.token,approvalId);
