@@ -24,7 +24,9 @@
     "test:proxy": "node --test tests/proxy-relay.test.ts tests/service/proxy-credential.test.ts tests/service/proxy-members.test.ts tests/service/proxy-scope.test.ts",
     "test:trusted": "node --test tests/service/trusted-*.test.ts",
     "test:proxy:restart": "node tests/proof/proxy-restart.mts",
-    "test:rollover": "node tests/proof/rollover.mts"
+    "test:rollover": "node tests/proof/rollover.mts",
+    "test:api": "node --test tests/service/integration-api.test.ts",
+    "test:api:service": "node tests/proof/integration-api.mts"
   },
   "dependencies": {
     "@ag-ui/claude-agent-sdk": "file:vendor/ag-ui/claude-agent-sdk-0.0.8.tgz",
