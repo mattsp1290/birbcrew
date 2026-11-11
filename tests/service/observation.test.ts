@@ -656,3 +656,43 @@ test("two HttpAgents keep a silent child step open across a sibling decision", {
     assert.deepEqual(reader.agent.messages, end.messages);
   }
 });
+
+for (const engine of ["pi", "claude"]) {
+  test(`${engine} observers resolve an ordinary question through the authenticated gateway`, async (t) => {
+    const host = await service(t);
+    const { memberId } = await host.post("/members", { requestId: randomUUID(), engine, profile: "fixture.next-step.v1" });
+    const cid = randomUUID(), requestId = randomUUID(), path = "/conversations/" + cid;
+    await host.post("/conversations", { memberId, conversationId: cid });
+    const first = host.attach(cid);
+    await host.post(path + "/inputs", { requestId, text: "next step" });
+    const card = await until(async () => (await (await host.api(path)).json()).state.pendingQuestions?.[0]);
+    const second = host.attach(cid);
+    for (const observer of [first, second]) {
+      await until(async () => observer.agent.state?.pendingQuestions?.[0] || undefined);
+      assert.deepEqual(observer.agent.state.pendingQuestions, [card]);
+      assert.deepEqual(observer.agent.state.pendingApprovals, []);
+    }
+    assert.equal(card.toolName, "choose_next_step");
+    assert.deepEqual(card.choices, ["inspect", "test"]);
+    assert.ok(!("nativeCallId" in card));
+    const { invocationId, approvalId, version } = card;
+    const answer = { memberId, requestId, invocationId, approvalId, version, choice: "inspect" };
+    assert.equal((await host.api(path + "/human", answer, host.stranger)).status, 404);
+    assert.equal((await host.api(path + "/human", { ...answer, version: version + 1 })).status, 409);
+    assert.equal((await host.api(path + "/human", { ...answer, choice: "approve" })).status, 409);
+    assert.equal((await host.api(path + "/human", { ...answer, choice: "invent" })).status, 400);
+    await host.post(path + "/human", answer);
+    await host.post(path + "/human", answer);
+    assert.equal((await host.api(path + "/human", { ...answer, choice: "test" })).status, 409);
+    for (const observer of [first, second]) {
+      await until(async () => observer.agent.messages.at(-1)?.content === "selected inspect" || undefined);
+      const result = observer.agent.messages.find((entry) => entry.role === "tool");
+      assert.equal(result?.toolCallId, approvalId);
+      assert.equal(result?.content, "inspect");
+      await until(async () => observer.agent.state?.phase === "idle" || undefined);
+      assert.deepEqual(observer.agent.state.pendingQuestions, []);
+    }
+    assert.deepEqual(first.agent.messages, second.agent.messages);
+    assert.equal((await host.db.query("SELECT count(*) AS n FROM birbcrew_ts.work_items WHERE conversation_id=$1", [cid])).rows[0].n, "0");
+  });
+}

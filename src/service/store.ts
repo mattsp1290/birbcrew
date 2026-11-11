@@ -69,7 +69,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"]] as const;
+      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -171,7 +171,7 @@ export class MemberStore {
         if (!resuming && allowRecovery && conversation.engine === "claude") {
           const admitted = await db.query(`SELECT 1 FROM birbcrew_ts.native_launches n
             JOIN birbcrew_ts.turns t USING (conversation_id,request_id,token)
-            JOIN birbcrew_ts.profiles p ON p.name=$3 AND p.engine='claude' AND p.protected_tool='record_work_item'
+            JOIN birbcrew_ts.profiles p ON p.name=$3 AND p.engine='claude' AND (p.protected_tool='record_work_item' OR p.human_tool='choose_next_step')
             WHERE n.conversation_id=$1 AND n.request_id=$2 AND NOT n.recovery_closed`, [key.conversationId, key.requestId, conversation.profile]);
           if (admitted.rowCount) return { kind: "recover" } as const;
         }

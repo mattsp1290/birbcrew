@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from uuid import uuid4
 
-from approval_cases import verify_approvals
+from approval_cases import verify_approvals, verify_next_steps
 from child_cases import verify_children
 from note_cases import verify_notes
 
@@ -160,10 +160,12 @@ def verify(directory, stack):
             return run("docker", "exec", db, "psql", "-U", "postgres", "-d", "birbcrew_ts", "-Atc", statement,
                        capture_output=True).stdout.strip()
         current = verify_approvals(runtime, current, worker, command, wait_until, sql)
+        current = verify_next_steps(runtime, current, worker, command, wait_until, sql)
         current = verify_children(runtime, current, worker, command, wait_until, sql)
         current = verify_notes(runtime, current, worker, command, wait_until, sql, directory, env)
         for override in [{"BIRBCREW_STATE_DIR": str(directory / "wrong-volume")},
-                         {"BIRBCREW_PROOF_ACCOUNT": "another-account"}]:
+                         {"BIRBCREW_PROOF_ACCOUNT": "another-account"},
+                         {"BIRBCREW_PROOF_RECOVERY_PROFILE": "fixture.next-step.v1"}]:
             invalid = subprocess.run([*cli, "worker", "tests/proof/fixture-profiles.mts"],
                                      cwd=ROOT, env={**env, **override}, capture_output=True, text=True, timeout=20)
             assert invalid.returncode and "another account or native state volume" in invalid.stderr

@@ -20,7 +20,7 @@ const providerRequest = z.object({
   tools: z.array(z.object({ name: z.string() })).default([]),
   messages: z.array(z.object({
     role: z.enum(["assistant", "user"]),
-    content: z.union([z.string(), z.array(z.object({ type: z.string(), text: z.string().optional(), tool_use_id: z.string().optional(),
+    content: z.union([z.string(), z.array(z.object({ type: z.string(), id: z.string().optional(), name: z.string().optional(), text: z.string().optional(), tool_use_id: z.string().optional(),
         content: z.unknown().optional(), is_error: z.boolean().optional() }))]),
   })),
 });
@@ -57,16 +57,26 @@ async function respond(
     ...(toolResult ? { result: { id: toolResult.tool_use_id, content: toolResult.content, error: toolResult.is_error } } : {}),
   });
   const remembered = prompts.findLast((text) => text.startsWith("remember "))?.slice(9);
-  let tool: { id: string; input: { operation_id: string; note: string } } | undefined;
+  let tool: { id: string; name: string; input: { operation_id?: string; note?: string } } | undefined;
   let reply = "";
   if (toolResult) {
     const text = typeof toolResult.content === "string" ? toolResult.content :
       z.array(z.object({ text: z.string() })).nonempty().parse(toolResult.content)[0].text;
-    const outcome = JSON.parse(text.split("\n")[0]);
-    if (outcome.nativeCallId !== toolResult.tool_use_id) throw new Error("Mismatched provider result");
-    reply = outcome.kind === "recorded" ? "recorded " + outcome.receipt.receiptId : outcome.kind;
+    const answer = text.split("\n")[0];
+    if (["inspect", "test"].includes(answer)) {
+      const origin = messages.flatMap(({ content }) => typeof content === "string" ? [] : content)
+        .find((part) => part.type === "tool_use" && part.id === toolResult.tool_use_id);
+      if (toolResult.is_error || origin?.name !== "mcp__ag_ui__choose_next_step") throw new Error("Wrong human answer binding");
+      reply = "selected " + answer;
+    } else {
+      const outcome = JSON.parse(answer);
+      if (outcome.nativeCallId !== toolResult.tool_use_id) throw new Error("Mismatched provider result");
+      reply = outcome.kind === "recorded" ? "recorded " + outcome.receipt.receiptId : outcome.kind;
+    }
+  } else if (prompt === "next step" && tools.some((t) => t.name === "mcp__ag_ui__choose_next_step")) {
+    tool = { id: "toolu_" + randomUUID(), name: "mcp__ag_ui__choose_next_step", input: {} };
   } else if (prompt?.startsWith("record ") && tools.some((t) => t.name === "mcp__ag_ui__record_work_item")) {
-    tool = { id: "toolu_" + randomUUID(), input: { operation_id: prompt.replace(/^record (?:stream )?/, ""), note: "private fixture note" } };
+    tool = { id: "toolu_" + randomUUID(), name: "mcp__ag_ui__record_work_item", input: { operation_id: prompt.replace(/^record (?:stream )?/, ""), note: "private fixture note" } };
   } else if (streamGate(prompt)) reply = "first";
   else if (prompt?.startsWith("remember ")) reply = `stored ${remembered}`;
   else if (prompt === "recall") reply = `recalled ${remembered ?? "none"}`;
@@ -89,7 +99,7 @@ async function respond(
     },
   });
   send("content_block_start", { index: 0, content_block: tool ?
-    { type: "tool_use", id: tool.id, name: "mcp__ag_ui__record_work_item", input: {} } : { type: "text", text: "" } });
+    { type: "tool_use", id: tool.id, name: tool.name, input: {} } : { type: "text", text: "" } });
   const toolGate = tool && streamGate(prompt?.slice(7));
   if (tool && toolGate) {
     send("content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: '{"note":"private fixture note",' } });

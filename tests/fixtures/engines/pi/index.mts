@@ -61,13 +61,14 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
     stream.push({type:"done",reason:"toolUse",message});
     return stream;
   }
-  if (latest?.startsWith("record ") && last?.role !== "toolResult") {
+  if ((latest?.startsWith("record ") || latest === "next step") && last?.role !== "toolResult") {
     const [, operation, ...words] = latest.split(" ");
     const gate = streamGate(latest.slice(7));
     const tool = getCurrentTools(context.messages).find(t => t.name === "record_work_item");
     const operation_id = gate ? words[0] : operation === "assigned" ? recordToolSchema.parse(tool?.parameters).properties.operation_id.const : operation;
     const args: JsonObject = { operation_id, note: !gate && words.length ? words.join(" ") : "private fixture note" };
-    const call = fauxToolCall("record_work_item", args, { id: "call_" + randomUUID() });
+    const call = latest === "next step" ? fauxToolCall("choose_next_step", {}, { id: "call_" + randomUUID() }) :
+      fauxToolCall("record_work_item", args, { id: "call_" + randomUUID() });
     const message = fauxAssistantMessage([call], { stopReason: "toolUse", responseId: randomUUID() });
     stream.push({ type: "start", partial: fauxAssistantMessage("") });
     if (gate) {
@@ -111,6 +112,13 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
     const start = context.messages.findLastIndex((m) => m.role === "assistant");
     const outcomes = context.messages.slice(start + 1).filter((m) => m.role === "toolResult");
     text = "delegated " + JSON.stringify(outcomes.map((m) => JSON.parse(contentText(m.content))));
+  } else if (latest === "next step" && last?.role === "toolResult") {
+    const proposal = context.messages.findLast((message) => message.role === "assistant");
+    if (!proposal?.content.some((part) => part.type === "toolCall" && part.id === last.toolCallId && part.name === "choose_next_step")) {
+      throw new Error("Wrong human answer binding");
+    }
+    const answer = contentText(last.content);
+    text = last.isError ? JSON.parse(answer).kind : "selected " + answer;
   } else if (latest?.startsWith("record ") && last?.role === "toolResult") text = "settled " + contentText(last.content);
   else if (latest === "recall") text = "recalled " + (remembered ?? "none");
   else if (latest?.startsWith(prefix)) text = "stored " + latest.slice(prefix.length);

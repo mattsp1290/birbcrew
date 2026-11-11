@@ -137,3 +137,18 @@ test("opposite decisions race to one canonical answer, stale workers cannot prop
   if (choices[0].status === "fulfilled") await assert.rejects(approvals.settle({ ...address(approval), token }), { code: "stale" });
   assert.deepEqual(await writes(scope.conversationId), []);
 });
+
+test("ordinary answers race cancellation under the conversation lock and cannot authorize receipts", async () => {
+  const { scope, proposal, token } = await input("pi");
+  const question = await approvals.propose({ ...proposal, toolName: "choose_next_step", arguments: {} });
+  const key = address(question);
+  await assert.rejects(approvals.decide(decision(question, "approve")), { code: "conflict" });
+  const answer = { ...key, version: question.version, argumentDigest: question.argumentDigest, choice: "inspect" as const };
+  const [resolution, cancellation] = await Promise.allSettled([approvals.decide(answer), approvals.cancelTurn(scope)]);
+  assert.equal([resolution, cancellation].filter((r) => r.status === "fulfilled").length, 1);
+  assert.deepEqual(await approvals.settle({ ...key, token }), resolution.status === "fulfilled" ?
+    { nativeCallId: key.nativeCallId, kind: "answered", choice: "inspect" } : { nativeCallId: key.nativeCallId, kind: "cancelled" });
+  await assert.rejects(pool.query(`INSERT INTO birbcrew_ts.work_items (conversation_id,request_id,approval_id)
+    VALUES ($1,$2,$3)`, [key.conversationId, key.requestId, key.approvalId]), { code: "23503" });
+  assert.equal((await writes(scope.conversationId)).length, 0);
+});

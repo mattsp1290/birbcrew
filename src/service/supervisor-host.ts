@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { Pool, type PoolClient } from "pg";
-import { ApprovalStore, savedProposal, recordWorkItemArguments } from "./approvals.ts";
+import { nativeProposal } from "./deferral.ts";
+import { ApprovalStore, savedProposal } from "./approvals.ts";
 import type { PublicSegment } from "./activities.ts";
 import { inspectChild, requestChildStop, revokeChild, type ReadySegment } from "./supervisor-child.ts";
 import type { ChildOutcome } from "@birbcrew/pi-subagents";
@@ -206,7 +207,7 @@ async function start(launch: Launch): Promise<SegmentResult> {
           model:z.string().min(1),tools:z.array(z.literal("record_work_item")).max(1)}),
       })).min(1).max(2) }),
       z.strictObject({ kind: z.literal("pending"), checkpoint: commitSchema.shape.checkpoint,
-        proposal: z.strictObject({ name: z.literal("record_work_item"), nativeCallId: z.string(), arguments: recordWorkItemArguments }) }),
+        proposal: nativeProposal }),
     ]).parse(reply);
     if (result.kind === "delegated") {
       if (childKey || continuation || member.childResults || member.conversation.engine !== "pi") throw new Error("Unexpected delegation");

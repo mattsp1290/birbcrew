@@ -88,3 +88,17 @@ results in its original call order, even when the second child finishes first.
 Use `members -- cancel-pending` with the parent request ID to cancel active and
 waiting children. The production profile for separately authorized Pi use is
 `pi-go-glm-5.3-flash.crew.v1`.
+
+## Answer a next-step question
+
+Profiles ending in `.next-step.v1` give the member the `choose_next_step`
+tool. For the local fixture, spawn a Claude or Pi member with
+`fixture.next-step.v1`, open a conversation and submit `next step`. The turn
+waits while the worker releases the SDK process. Another worker can continue
+it from the saved native call.
+
+Use the same `members -- pending` and `members -- decide` commands above.
+Copy the pending call's identity fields and set `choice` to `inspect` or
+`test`. The SDK receives that word as the tool result. A repeated answer
+returns the recorded choice. A different answer conflicts. Cancellation
+while waiting returns a cancelled tool result. Neither path creates a work item.

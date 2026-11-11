@@ -64,3 +64,50 @@ def verify_approvals(runtime, running, start_worker, command, wait_until, sql):
     assert sql("SELECT count(*) FROM birbcrew_ts.work_items" + scope) == "2"
     print("Six native calls survived a worker replacement while paused. Only the two approvals wrote a work item.", flush=True)
     return replacement
+
+
+def verify_next_steps(runtime, running, start_worker, command, wait_until, sql):
+    cases = []
+    scope = (" WHERE conversation_id IN (SELECT conversation_id FROM birbcrew_ts.conversations "
+             "JOIN birbcrew_ts.members USING (member_id) WHERE profile='fixture.next-step.v1')")
+    with ThreadPoolExecutor(max_workers=4) as calls:
+        for engine, choice in [("pi", "inspect"), ("claude", "test"), ("pi", "cancel"), ("claude", "cancel")]:
+            owner = str(uuid4())
+            member = command("spawn", {"ownerId": owner, "requestId": str(uuid4()), "engine": engine,
+                                       "profile": "fixture.next-step.v1"})
+            key = {"ownerId": owner, "conversationId": str(uuid4())}
+            command("open", {**key, "memberId": member["memberId"]})
+            request = {**key, "requestId": str(uuid4())}
+            future = calls.submit(command, "turn", {**request, "text": "next step"})
+            cases.append((choice, key, request, future))
+
+        wait_until(lambda: sql("SELECT count(*) FROM birbcrew_ts.native_launches" + scope + " AND stopped") == "4",
+                   "four native question processes stopped")
+        wait_until(lambda: sql("SELECT count(*) FROM birbcrew_ts.paused_segments" + scope) == "4",
+                   "four question checkpoints committed")
+        running.kill()
+        running.wait(timeout=10)
+        replacement = start_worker(runtime)
+        for choice, key, request, future in cases:
+            pending, = command("pending", key)
+            assert pending["toolName"] == "choose_next_step" and pending["choices"] == ["inspect", "test"]
+            fields = ("ownerId", "memberId", "conversationId", "requestId", "nativeCallId", "invocationId",
+                      "approvalId", "version", "argumentDigest")
+            answer = {k: pending[k] for k in fields}
+            if choice == "cancel":
+                assert command("cancel-pending", request) == {"cancelled": True}
+                command("decide", {**answer, "choice": "inspect"}, fail=True)
+                assert future.result(timeout=60) == {"text": "cancelled"}
+            else:
+                command("decide", {**answer, "choice": "approve"}, fail=True)
+                command("decide", {**answer, "choice": choice, "ownerId": "stranger"}, fail=True)
+                command("decide", {**answer, "choice": choice, "nativeCallId": "stale"}, fail=True)
+                assert command("decide", {**answer, "choice": choice}) == {"decision": choice}
+                assert future.result(timeout=60) == {"text": "selected " + choice}
+                assert command("decide", {**answer, "choice": choice}) == {"decision": choice}
+                command("decide", {**answer, "choice": "test" if choice == "inspect" else "inspect"}, fail=True)
+            assert command("pending", key) == []
+    assert sql("SELECT count(*) FROM birbcrew_ts.protected_calls" + scope) == "0"
+    assert sql("SELECT count(*) FROM birbcrew_ts.work_items" + scope) == "0"
+    print("Four ordinary questions survived worker replacement. Both SDKs resumed their exact calls.", flush=True)
+    return replacement

@@ -203,6 +203,11 @@ def verify_children(runtime, current, worker, command, wait_until, sql):
         command("decide", decision(pending, "approve"), fail=True)
         assert items(request) == "0" and not command("pending", key)
 
+        key, request, future = begin(calls, [{"role": role, "task": "next step"} for role in ["analyst", "recorder"]])
+        assert [o["kind"] for o in settled(request, future)] == ["failed", "failed"]
+        assert command("pending", key) == [] and items(request) == "0"
+        assert sql("SELECT count(*) FROM birbcrew_ts.deferred_calls" + scope(request)) == "0"
+
     print(
         "Pi child intents survived replacement before workflow start. Siblings shared one effect "
         "and returned ordered results after denial, failure, and cancellation.",

@@ -142,6 +142,8 @@ export async function loadLiveProfiles(env: NodeJS.ProcessEnv, transport: typeof
   }
   for (const [name, profile] of [...configured]) {
     if (profile.pi) configured.set(name.replace(/\.v1$/, ".crew.v1"), { ...profile, delegateTask: true, protectedTool: "record_work_item" });
+
+    configured.set(name.replace(/\.v1$/, ".next-step.v1"), { ...profile, humanTool: "choose_next_step" });
     configured.set(name.replace(/\.v1$/, ".approval.v1"), { ...profile, protectedTool: "record_work_item" });
   }
   return configured;

@@ -1,6 +1,7 @@
+import { acceptsChoice, emptyToolArguments, nextStep, recordWorkItemArguments, toolNameSchema, type DeferredTool, type ToolOutcome } from "./deferral.ts";
 import { publishObservation } from "./observation.ts";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { MemberStore } from "./store.ts";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { checkpointSchema, MemberStoreError, openSchema, turnKey, type Conversation } from "./domain.ts";
@@ -12,16 +13,14 @@ const callSchema = scopeSchema.extend({
   nativeCallId: z.string().min(1).refine((id) =>
     id.isWellFormed() && !id.includes("\0") && Buffer.byteLength(id) <= 256),
 });
-export const recordWorkItemArguments = z.strictObject({
-  operation_id: uuid,
-  note: z.string().refine((s) => s.isWellFormed() && !s.includes("\0") && Buffer.byteLength(s) <= 4096).optional(),
-});
-const proposalSchema = callSchema.extend({
-  token: uuid, toolName: z.literal("record_work_item"), arguments: recordWorkItemArguments,
-});
+const claim = callSchema.extend({ token: uuid });
+const proposalSchema = z.discriminatedUnion("toolName", [
+  claim.extend({ toolName: z.literal("record_work_item"), arguments: recordWorkItemArguments }),
+  claim.extend({ toolName: z.literal("choose_next_step"), arguments: emptyToolArguments }),
+]);
 const approvalKey = callSchema.extend({ approvalId: uuid });
 export const decisionSchema = approvalKey.extend({
-  argumentDigest: z.string().regex(/^[0-9a-f]{64}$/), version: z.number().int(), choice: z.enum(["approve", "deny"]),
+  argumentDigest: z.string().regex(/^[0-9a-f]{64}$/), version: z.number().int(), choice: z.enum(["approve", "deny", ...nextStep.options]),
 });
 const settleSchema = approvalKey.extend({ token: uuid });
 
@@ -30,17 +29,15 @@ type CallKey = z.infer<typeof approvalKey>;
 export type Decision = z.infer<typeof decisionSchema>;
 export type Choice = z.infer<typeof decisionSchema>["choice"];
 export const approvalSchema = approvalKey.extend({
-  toolName: z.literal("record_work_item"), argumentDigest: decisionSchema.shape.argumentDigest,
-  version: z.literal(1), policyVersion: z.literal(1), summary: z.literal("Record one work item"),
+  toolName: toolNameSchema, argumentDigest: decisionSchema.shape.argumentDigest,
+  version: z.literal(1), policyVersion: z.literal(1), summary: z.enum(["Record one work item", "Choose the next step"]),
 });
 export type Approval = z.infer<typeof approvalSchema>;
-export type ToolOutcome =
-  | { nativeCallId: string; kind: "recorded"; receipt: { receiptId: string; operationId: string } }
-  | { nativeCallId: string; kind: "denied" | "cancelled" | "budget_exhausted" };
+export type { ToolOutcome } from "./deferral.ts";
 
 type CallRow = {
   approvalId: string; invocationId: string; nativeCallId: string; argumentDigest: string;
-  toolName: "record_work_item"; version: 1; policyVersion: 1; decision: Choice | null; budget_exhausted: boolean;
+  toolName: DeferredTool; version: 1; policyVersion: 1; decision: Choice | null; budget_exhausted: boolean;
 };
 const columns = `p.approval_id AS "approvalId", p.invocation_id AS "invocationId", p.native_call_id AS "nativeCallId",
   p.argument_digest AS "argumentDigest", p.tool_name AS "toolName", p.decision_version AS version,
@@ -51,7 +48,7 @@ function publicApproval(scope: Scope, row: CallRow): Approval {
     ownerId: scope.ownerId, memberId: scope.memberId, conversationId: scope.conversationId, requestId: scope.requestId,
     approvalId: row.approvalId, invocationId: row.invocationId, nativeCallId: row.nativeCallId,
     toolName: row.toolName, argumentDigest: row.argumentDigest, version: row.version, policyVersion: row.policyVersion,
-    summary: "Record one work item",
+    summary: row.toolName === "choose_next_step" ? "Choose the next step" : "Record one work item",
   };
 }
 
@@ -71,7 +68,7 @@ async function lockTurn(db: PoolClient, scope: Scope) {
 
 export async function confirmedApproval(db: PoolClient, key: Scope & { invocationId: string; approvalId: string }) {
   const { rows: [row] } = await db.query<CallRow>(
-    `SELECT ${columns} FROM birbcrew_ts.protected_calls p WHERE p.conversation_id=$1 AND p.request_id=$2
+    `SELECT ${columns} FROM birbcrew_ts.deferred_calls p WHERE p.conversation_id=$1 AND p.request_id=$2
      AND p.invocation_id=$3 AND p.approval_id=$4`, [key.conversationId, key.requestId, key.invocationId, key.approvalId]);
   if (!row) throw new MemberStoreError("not_found");
   return publicApproval(key, row);
@@ -83,7 +80,7 @@ const stoppedChildApproval = `SELECT 1 FROM birbcrew_ts.pi_children j WHERE j.ch
 
 async function findCall(db: PoolClient, key: CallKey) {
   const { rows: [row] } = await db.query<CallRow & { childStopped: boolean }>(
-    `SELECT ${columns}, EXISTS (${stoppedChildApproval}) AS "childStopped" FROM birbcrew_ts.protected_calls p WHERE p.conversation_id = $1 AND p.request_id = $2
+    `SELECT ${columns}, EXISTS (${stoppedChildApproval}) AS "childStopped" FROM birbcrew_ts.deferred_calls p WHERE p.conversation_id = $1 AND p.request_id = $2
      AND p.invocation_id = $3 AND p.native_call_id = $4 AND p.approval_id = $5`,
     [key.conversationId, key.requestId, key.invocationId, key.nativeCallId, key.approvalId],
   );
@@ -101,7 +98,7 @@ async function cancelled(db: PoolClient, key: Scope) {
 
 export async function savedProposal(db: PoolClient, conversation: Conversation, requestId: string) {
   const { rows: [row] } = await db.query<CallRow>(
-    `SELECT ${columns} FROM birbcrew_ts.protected_calls p JOIN birbcrew_ts.paused_segments s USING (approval_id)
+    `SELECT ${columns} FROM birbcrew_ts.deferred_calls p JOIN birbcrew_ts.paused_segments s USING (approval_id)
      WHERE p.conversation_id=$1 AND p.request_id=$2`, [conversation.conversationId, requestId],
   );
   return row ? publicApproval({ ...conversation, requestId }, row) : undefined;
@@ -127,24 +124,21 @@ export class ApprovalStore {
   }
 
   async migrate() {
-    const sql = await readFile(new URL("./sql/002-approvals.sql", import.meta.url), "utf8");
-    await this.transaction(async (db) => {
-      await db.query("SELECT pg_advisory_xact_lock(hashtextextended('birbcrew_ts.migration', 0))");
-      await db.query(sql);
-    });
+    await new MemberStore(this.pool).migrate();
   }
 
-  async propose(input: z.input<typeof proposalSchema>, pendingCheckpoint?: unknown, mode?: {recoverStopped:true} | {childGeneration:string}): Promise<Approval> {
+  async propose(input: z.input<typeof claim> & { toolName: DeferredTool; arguments: unknown }, pendingCheckpoint?: unknown, mode?: {recoverStopped:true} | {childGeneration:string}): Promise<Approval> {
     const key = proposalSchema.parse(input);
-    if (key.arguments.operation_id !== key.requestId) throw new MemberStoreError("conflict");
+    if (key.toolName === "record_work_item" && key.arguments.operation_id !== key.requestId) throw new MemberStoreError("conflict");
     const checkpoint = pendingCheckpoint === undefined ? undefined : checkpointSchema.parse(pendingCheckpoint);
-    const digest = createHash("sha256").update(JSON.stringify([key.toolName, key.arguments.operation_id,
-      key.arguments.note ?? null])).digest("hex");
+    const digest = createHash("sha256").update(JSON.stringify(key.toolName === "choose_next_step" ? [key.toolName] :
+      [key.toolName, key.arguments.operation_id, key.arguments.note ?? null])).digest("hex");
     const ids = [key.conversationId, key.requestId, key.invocationId, key.nativeCallId];
     return this.transaction(async (db) => {
       const turn = await lockTurn(db, key);
       const childGeneration = mode && "childGeneration" in mode ? mode.childGeneration : undefined;
       if (childGeneration) {
+        if (key.toolName !== "record_work_item") throw new MemberStoreError("conflict");
         const child = await db.query(`SELECT 1 FROM birbcrew_ts.pi_children
           WHERE child_id=$1 AND conversation_id=$2 AND request_id=$3 AND generation=$4 AND NOT launch_revoked AND phase IN ('running','waiting')
           AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests
@@ -163,7 +157,7 @@ export class ApprovalStore {
       } else if (turn.phase !== "started") throw new MemberStoreError("stale");
       if (await cancelled(db, key)) throw new MemberStoreError("conflict");
       const existing = await db.query<CallRow>(
-        `SELECT ${columns} FROM birbcrew_ts.protected_calls p WHERE p.conversation_id = $1 AND p.request_id = $2
+        `SELECT ${columns} FROM birbcrew_ts.deferred_calls p WHERE p.conversation_id = $1 AND p.request_id = $2
          AND p.invocation_id = $3 AND p.native_call_id = $4`, ids,
       );
       const prior = existing.rows[0];
@@ -183,11 +177,11 @@ export class ApprovalStore {
         ids.slice(0, 3));
       if (preview && (preview.native_call_id !== key.nativeCallId || preview.generation !== key.token)) throw new MemberStoreError("stale");
       const inserted = await db.query<CallRow>(
-        `INSERT INTO birbcrew_ts.protected_calls AS p
+        `INSERT INTO birbcrew_ts.deferred_calls AS p
          (conversation_id, request_id, invocation_id, native_call_id, tool_name, arguments, argument_digest,
           policy_version, decision_version, approval_id)
          SELECT $1, $2, $3, $4, $5, $6, $7, 1, 1, COALESCE($8::uuid,gen_random_uuid())
-         WHERE (SELECT count(*) FROM birbcrew_ts.protected_calls WHERE conversation_id = $1 AND request_id = $2) < 16
+         WHERE (SELECT count(*) FROM birbcrew_ts.deferred_calls WHERE conversation_id = $1 AND request_id = $2) < 16
          RETURNING ${columns}`, [...ids, key.toolName, key.arguments, digest, preview?.public_id ?? null],
       );
       if (!inserted.rows.length) throw new MemberStoreError("input_limit");
@@ -206,7 +200,7 @@ export class ApprovalStore {
     });
   }
 
-  async pending(input: z.input<typeof openSchema>): Promise<Approval[]> {
+  async pending(input: z.input<typeof openSchema>) {
     const key = openSchema.parse(input);
     const conversation = await this.pool.query(
       "SELECT 1 FROM birbcrew_ts.conversations WHERE owner_id = $1 AND member_id = $2 AND conversation_id = $3",
@@ -214,7 +208,7 @@ export class ApprovalStore {
     );
     if (!conversation.rowCount) throw new MemberStoreError("not_found");
     const result = await this.pool.query<CallRow & { requestId: string }>(
-      `SELECT ${columns}, p.request_id AS "requestId" FROM birbcrew_ts.protected_calls p
+      `SELECT ${columns}, p.request_id AS "requestId" FROM birbcrew_ts.deferred_calls p
          JOIN birbcrew_ts.turns t USING (conversation_id, request_id)
          LEFT JOIN birbcrew_ts.tool_cancellations x USING (conversation_id, request_id)
        WHERE p.conversation_id = $1 AND p.decision IS NULL
@@ -223,7 +217,10 @@ export class ApprovalStore {
        ORDER BY p.approval_id`,
       [key.conversationId],
     );
-    return result.rows.map((row) => publicApproval({ ...key, requestId: row.requestId }, row));
+    return result.rows.map((row) => {
+      const call = publicApproval({ ...key, requestId: row.requestId }, row);
+      return row.toolName === "choose_next_step" ? { ...call, choices: nextStep.options } : call;
+    });
   }
 
   async previousDecision(input: Decision): Promise<Choice | null> {
@@ -231,6 +228,7 @@ export class ApprovalStore {
     return this.transaction(async (db) => {
       await lockTurn(db, key);
       const call = await findCall(db, key);
+      if (!acceptsChoice(call.toolName, key.choice)) throw new MemberStoreError("conflict");
       if (call.version !== key.version || call.argumentDigest !== key.argumentDigest ||
           (call.decision && call.decision !== key.choice)) throw new MemberStoreError("conflict");
       return call.decision;
@@ -242,10 +240,11 @@ export class ApprovalStore {
     return this.transaction(async (db) => {
       const turn = await lockTurn(db, key);
       const call = await findCall(db, key);
+      if (!acceptsChoice(call.toolName, key.choice)) throw new MemberStoreError("conflict");
       if (call.version !== key.version || call.argumentDigest !== key.argumentDigest) throw new MemberStoreError("conflict");
       if (call.decision === key.choice) return call.decision;
       if (call.decision || turn.phase !== "started" || call.childStopped || await cancelled(db, key)) throw new MemberStoreError("conflict");
-      await db.query("UPDATE birbcrew_ts.protected_calls SET decision = $2 WHERE approval_id = $1",
+      await db.query("UPDATE birbcrew_ts.deferred_calls SET decision = $2 WHERE approval_id = $1",
         [key.approvalId, key.choice]);
       await publishObservation(db, key.conversationId, { kind: "answered", approvalId: key.approvalId });
       return key.choice;
@@ -266,11 +265,15 @@ export class ApprovalStore {
       const turn = await lockTurn(db, key);
       if (await cancelled(db, key)) return;
       if (turn.phase !== "started") throw new MemberStoreError("conflict");
+      const answered = await db.query(`SELECT 1 FROM birbcrew_ts.deferred_calls
+        WHERE conversation_id=$1 AND request_id=$2 AND tool_name='choose_next_step' AND decision IS NOT NULL`,
+        [key.conversationId, key.requestId]);
+      if (answered.rowCount) throw new MemberStoreError("conflict");
       await db.query("INSERT INTO birbcrew_ts.tool_cancellations (conversation_id, request_id) VALUES ($1,$2)",
         [key.conversationId, key.requestId]);
       await publishObservation(db, key.conversationId, { kind: "cancelled", requestId: key.requestId });
       const {rows} = await db.query<CallRow>(`SELECT ${columns}
-        FROM birbcrew_ts.protected_calls p JOIN birbcrew_ts.pi_children j USING (approval_id)
+        FROM birbcrew_ts.deferred_calls p JOIN birbcrew_ts.pi_children j USING (approval_id)
         WHERE p.conversation_id=$1 AND p.request_id=$2 AND j.phase IN ('waiting','resuming')`,
         [key.conversationId,key.requestId]);
       for (const call of rows) {
@@ -311,6 +314,11 @@ export class ApprovalStore {
       await publishObservation(db, key.conversationId, { kind: "result", approvalId: key.approvalId, outcome });
       return outcome;
     }
+    if (call.toolName === "choose_next_step") {
+      if (call.decision === "inspect" || call.decision === "test") return finish({ nativeCallId, kind: "answered", choice: call.decision });
+      if (await cancelled(db, key)) return finish({ nativeCallId, kind: "cancelled" });
+      throw new MemberStoreError("conflict");
+    }
     if (call.budget_exhausted) return finish({ nativeCallId, kind: "budget_exhausted" });
     if (call.decision === "deny") return finish({ nativeCallId, kind: "denied" });
     const existing = await db.query<{ approval_id: string; receipt_id: string }>(
@@ -323,14 +331,14 @@ export class ApprovalStore {
     if (call.childStopped || await cancelled(db, key)) return finish({ nativeCallId, kind: "cancelled" });
     if (call.decision !== "approve") throw new MemberStoreError("conflict");
     if (existing.rows.length) {
-      await db.query("UPDATE birbcrew_ts.protected_calls SET budget_exhausted = true WHERE approval_id = $1",
+      await db.query("UPDATE birbcrew_ts.deferred_calls SET budget_exhausted = true WHERE approval_id = $1",
         [key.approvalId]);
       return finish({ nativeCallId, kind: "budget_exhausted" });
     }
     if (turn.phase !== "started") throw new MemberStoreError("stale");
     const inserted = await db.query<{ receipt_id: string }>(
       `INSERT INTO birbcrew_ts.work_items (conversation_id, request_id, approval_id, note)
-       SELECT conversation_id, request_id, approval_id, arguments->>'note' FROM birbcrew_ts.protected_calls
+       SELECT conversation_id, request_id, approval_id, arguments->>'note' FROM birbcrew_ts.deferred_calls
        WHERE approval_id = $1 AND decision = 'approve' RETURNING receipt_id`, [key.approvalId],
     );
     return finish({ nativeCallId, kind: "recorded", receipt: { receiptId: inserted.rows[0].receipt_id, operationId: key.requestId } });

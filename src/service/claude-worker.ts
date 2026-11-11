@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import type { RunAgentInput } from "@ag-ui/core";
-import { recordWorkItemArguments } from "./approvals.ts";
+import { nativeProposal, nativeResult } from "./deferral.ts";
 import { createHash } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { ClaudeAgentAdapter, type SessionBinding } from "@ag-ui/claude-agent-sdk";
@@ -12,12 +12,16 @@ import { getSessionMessages, type Options } from "@anthropic-ai/claude-agent-sdk
 import { z } from "zod";
 import { claudeCheckpoint, claudeCommand } from "./claude.ts";
 
-const tools: RunAgentInput["tools"] = [{
+const recordTools: RunAgentInput["tools"] = [{
   name: "record_work_item", description: "Record one work item after the owner approves.",
   parameters: {
     type: "object", properties: { operation_id: { type: "string" }, note: { type: "string" } },
     required: ["operation_id"], additionalProperties: false,
   },
+}];
+const nextStepTools: RunAgentInput["tools"] = [{
+  name: "choose_next_step", description: "Ask the owner whether to inspect or test next.",
+  parameters: { type: "object", properties: {}, additionalProperties: false },
 }];
 type Command = z.infer<typeof claudeCommand>;
 type Binding = z.infer<typeof claudeCheckpoint>["state"]["binding"];
@@ -65,16 +69,17 @@ async function checkpointFor(command: Command, binding: Binding) {
 
 async function confirmedProposal(command: Command, binding: Binding) {
   const call = binding.pending;
-  if (binding.unsupportedPendingTools?.length || call?.name !== "mcp__ag_ui__record_work_item" ||
+  const tools = command.tool === "choose_next_step" ? nextStepTools : recordTools;
+  if (binding.unsupportedPendingTools?.length || !call || call.name !== "mcp__ag_ui__" + command.tool ||
       !isDeepStrictEqual(binding.frontendTools, tools)) throw new ClaudeTurnError("Claude deferral was not confirmed");
-  const args = recordWorkItemArguments.parse(call.input);
-  if (args.operation_id !== command.runId) throw new ClaudeTurnError("Claude tool operation mismatch");
-  return { kind: "pending", proposal: { nativeCallId: call.id, name: "record_work_item", arguments: args },
+  const proposal = nativeProposal.parse({ nativeCallId: call.id, name: command.tool, arguments: call.input });
+  if (proposal.name === "record_work_item" && proposal.arguments.operation_id !== command.runId) throw new ClaudeTurnError("Claude tool operation mismatch");
+  return { kind: "pending", proposal,
     checkpoint: await checkpointFor(command, binding) };
 }
 
 async function run(command: Command) {
-  const profile = command.mode === "chat" ? "claude-chat-v1" : "claude-record-v1";
+  const profile = command.mode === "chat" ? "claude-chat-v1" : command.tool === "choose_next_step" ? "claude-next-step-v1" : "claude-record-v1";
   let binding: Binding | undefined = command.checkpoint?.state.binding;
   if (command.mode === "recover") {
     const { binding: confirmed, ...intent } = storedBinding.parse(JSON.parse(await readFile("binding.json", "utf8")));
@@ -148,11 +153,11 @@ async function run(command: Command) {
     threadId: command.threadId, runId: command.runId,
     messages: command.continuation ? [{
       role: "tool", id: command.runId + ":result", toolCallId: command.continuation.nativeCallId,
-      content: JSON.stringify(command.continuation.result),
-      ...(command.continuation.result.kind === "recorded" ? {} : { error: command.continuation.result.kind }),
+      content: nativeResult(command.continuation.result),
+      ...(["recorded", "answered"].includes(command.continuation.result.kind) ? {} : { error: command.continuation.result.kind }),
     }] : [{ role: "user", id: command.runId, content: command.text }],
-    tools: command.mode === "protected" ? tools : [], state: null, forwardedProps: {},
-    context: command.mode === "protected" ? [{ description: "Work item operation_id for this input", value: command.runId }] : [],
+    tools: command.tool === "choose_next_step" ? nextStepTools : command.tool === "record_work_item" ? recordTools : [], state: null, forwardedProps: {},
+    context: command.tool === "record_work_item" ? [{ description: "Work item operation_id for this input", value: command.runId }] : [],
   }).forEach((event) => {
     if (finished) throw new Error("Unexpected event after Claude terminal");
     if (event.type === "RUN_ERROR") throw new ClaudeTurnError("Claude SDK run failed");
@@ -164,8 +169,8 @@ async function run(command: Command) {
     }
     if (event.type === "TOOL_CALL_START") {
       const { toolCallName, toolCallId } = z.object({ toolCallName: z.string(), toolCallId: z.string() }).parse(event);
-      if (command.mode !== "protected" || toolCallName !== "record_work_item") throw new ClaudeTurnError("Undeclared Claude tool");
-      if (!command.continuation) streamingCall = { id: toolCallId, bytes: 0, args: new ToolCallArgumentsStream() };
+      if (command.mode !== "protected" || toolCallName !== command.tool) throw new ClaudeTurnError("Undeclared Claude tool");
+      if (!command.continuation && command.tool === "record_work_item") streamingCall = { id: toolCallId, bytes: 0, args: new ToolCallArgumentsStream() };
     }
     if (event.type === "TOOL_CALL_ARGS" && streamingCall) {
       const { toolCallId, delta } = z.object({ toolCallId: z.string(), delta: z.string() }).parse(event);

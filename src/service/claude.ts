@@ -1,3 +1,4 @@
+import { matchesTool, nativeProposal, outcomeSchema, toolNameSchema, type DeferredTool } from "./deferral.ts";
 import { fork } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
@@ -14,10 +15,7 @@ const binding = z.strictObject({
 });
 const nativeCallId = call.shape.id;
 const continuation = z.strictObject({
-  nativeCallId, result: z.discriminatedUnion("kind", [
-    z.strictObject({ nativeCallId, kind: z.literal("recorded"), receipt: z.strictObject({ receiptId: z.uuid(), operationId: z.uuid() }) }),
-    z.strictObject({ nativeCallId, kind: z.enum(["denied", "cancelled", "budget_exhausted"]) }),
-  ]),
+  nativeCallId, result: outcomeSchema,
 });
 
 export const claudeCheckpoint = z.strictObject({
@@ -39,12 +37,13 @@ export const claudeCommand = z.strictObject({
   checkpoint: claudeCheckpoint.nullable(),
   projectContext: z.string().max(262_144).optional(),
   mode: z.enum(["chat", "protected", "recover"]),
+  tool: toolNameSchema.optional(),
   continuation: continuation.optional(),
 });
 
 const success = z.strictObject({ kind: z.literal("complete"), text: z.string().min(1).max(65_536), checkpoint: claudeCheckpoint });
 const pending = z.strictObject({ kind: z.literal("pending"), checkpoint: claudeCheckpoint,
-  proposal: z.strictObject({ nativeCallId, name: z.literal("record_work_item"), arguments: z.record(z.string(), z.json()) }),
+  proposal: nativeProposal,
 });
 const response = z.union([success, pending, z.strictObject({ error: z.string() })]);
 
@@ -73,12 +72,12 @@ export async function runClaudeTurn(input: ClaudeInput, profile: ClaudeProfile) 
   return { text: result.text, checkpoint: result.checkpoint };
 }
 
-export function runClaudeSegment(input: ClaudeInput, profile: ClaudeProfile) {
-  return executeSegment(input, profile, "protected");
+export function runClaudeSegment(input: ClaudeInput, profile: ClaudeProfile, tool: DeferredTool = "record_work_item") {
+  return executeSegment(input, profile, "protected", tool);
 }
 
-export async function recoverClaudeProposal(input: ClaudeInput, profile: ClaudeProfile) {
-  const recovered = await executeSegment(input, profile, "recover");
+export async function recoverClaudeProposal(input: ClaudeInput, profile: ClaudeProfile, tool: DeferredTool = "record_work_item") {
+  const recovered = await executeSegment(input, profile, "recover", tool);
   if (recovered.kind !== "pending") throw new Error("No confirmed Claude proposal");
   return recovered;
 }
@@ -87,18 +86,20 @@ async function executeSegment(
   input: ClaudeInput,
   profile: ClaudeProfile,
   mode: z.infer<typeof claudeCommand>["mode"],
+  tool?: DeferredTool,
 ): Promise<z.infer<typeof success> | z.infer<typeof pending>> {
   const { signal, onText, onToolArgs, ...turn } = input;
   signal.throwIfAborted();
   if (mode !== "recover") await profile.authorize?.();
   signal.throwIfAborted();
-  const command = claudeCommand.parse({ ...turn, model: profile.model, mode });
+  const command = claudeCommand.parse({ ...turn, model: profile.model, mode, tool });
   const savedCall = command.checkpoint?.state.binding.pending;
   if (command.continuation || savedCall) {
     const answer = command.continuation;
     if (mode !== "protected" || !savedCall || !answer || savedCall.id !== answer.nativeCallId ||
-        savedCall.id !== answer.result.nativeCallId || savedCall.input.operation_id !== command.runId ||
-        (answer.result.kind === "recorded" && answer.result.receipt.operationId !== command.runId)) {
+        savedCall.id !== answer.result.nativeCallId || savedCall.name !== "mcp__ag_ui__" + tool ||
+        !tool || !matchesTool(tool, answer.result, command.runId) ||
+        (tool === "record_work_item" && savedCall.input.operation_id !== command.runId)) {
       throw new Error("Claude continuation does not match its pending tool call");
     }
   }

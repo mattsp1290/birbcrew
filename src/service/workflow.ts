@@ -2,6 +2,7 @@ import {
   allHandlersFinished, ApplicationFailure, CancellationScope, workflowInfo, condition, defineSignal, defineUpdate,
   executeChild, getExternalWorkflowHandle, isCancellation, proxyActivities, setHandler
 } from "@temporalio/workflow";
+import { acceptsChoice } from "./deferral.ts";
 import { submitSchema, type Conversation, type TurnRequest } from "./domain.ts";
 import type { Approval, Decision } from "./approvals.ts";
 import type { ChildKey, ChildStore } from "./children.ts";
@@ -81,7 +82,7 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   }
 
   function matches(value: Decision) {
-    return pending && ["approve", "deny"].includes(value.choice) &&
+    return pending && acceptsChoice(pending.toolName, value.choice) &&
       value.ownerId === pending.ownerId && value.memberId === pending.memberId &&
       value.conversationId === pending.conversationId && value.requestId === pending.requestId &&
       value.invocationId === pending.invocationId && value.nativeCallId === pending.nativeCallId &&

@@ -1,3 +1,5 @@
+import { nativeProposal } from "./deferral.ts";
+import type { z } from "zod";
 import type { Supervisor } from "./supervisor.ts";
 import type { MemberProfile } from "./profiles.ts";
 import { recoverClaudeProposal } from "./claude.ts";
@@ -6,7 +8,7 @@ import type { Delegation, ChildOutcome } from "@birbcrew/pi-subagents";
 import { ChildStore, type ChildKey } from "./children.ts";
 import { Context } from "@temporalio/activity";
 import { ApplicationFailure } from "@temporalio/client";
-import { ApprovalStore, recordWorkItemArguments, type Approval, type Decision, type ToolOutcome } from "./approvals.ts";
+import { ApprovalStore, type Approval, type Decision, type ToolOutcome } from "./approvals.ts";
 import { MemberStoreError, type Checkpoint, type Conversation, type TurnRequest } from "./domain.ts";
 import type { MemberStore } from "./store.ts";
 
@@ -27,7 +29,7 @@ export interface DriverInput {
 export type DriverResult =
   | { kind: "complete"; text: string; checkpoint: unknown }
   | { kind: "delegated"; proposals: Delegation[]; checkpoint: unknown }
-  | { kind: "pending"; proposal: { nativeCallId: string; name: "record_work_item"; arguments: unknown }; checkpoint: unknown };
+  | { kind: "pending"; proposal: z.infer<typeof nativeProposal>; checkpoint: unknown };
 export type TurnDriver = (input: DriverInput, member: Conversation) => Promise<DriverResult>;
 export type MemberProfiles = ReadonlyMap<string, Readonly<Partial<Record<Conversation["engine"], TurnDriver>>>>;
 export type PublicSegment = { kind: "complete"; text: string } | { kind: "pending"; approval: Approval } | { kind: "delegated"; children: ChildKey[] };
@@ -49,14 +51,14 @@ export function memberActivities(store: MemberStore, supervisor: Supervisor, pro
         }
         const { conversation: member, token, checkpoint } = recovery;
         const profile = profiles.get(member.profile);
-        if (!profile?.claude || profile.protectedTool !== "record_work_item") return null;
+        const tool = profile?.protectedTool ?? profile?.humanTool;
+        if (!profile?.claude || !tool) return null;
         const result = await recoverClaudeProposal({
           threadId: request.conversationId, runId: request.requestId, text: request.text, checkpoint, signal,
-        }, { ...profile.claude, ownerId: member.ownerId, memberId: member.memberId, stateDir });
+        }, { ...profile.claude, ownerId: member.ownerId, memberId: member.memberId, stateDir }, tool);
         const approval = await ledger.propose({ ownerId: request.ownerId, conversationId: request.conversationId,
           requestId: request.requestId, memberId: member.memberId, token, invocationId: request.requestId,
-          nativeCallId: result.proposal.nativeCallId, toolName: result.proposal.name,
-          arguments: recordWorkItemArguments.parse(result.proposal.arguments) }, result.checkpoint, {recoverStopped:true});
+          nativeCallId: result.proposal.nativeCallId, toolName: result.proposal.name, arguments: result.proposal.arguments }, result.checkpoint, {recoverStopped:true});
         return { kind: "pending", approval };
       }
       return null;
@@ -102,7 +104,12 @@ export function memberActivities(store: MemberStore, supervisor: Supervisor, pro
     },
     async cancelPending(approval: Pick<Approval, "ownerId" | "memberId" | "conversationId" | "requestId">) {
       const { ownerId, memberId, conversationId, requestId } = approval;
-      await ledger.cancelTurn({ ownerId, memberId, conversationId, requestId });
+      try {
+        await ledger.cancelTurn({ ownerId, memberId, conversationId, requestId });
+      } catch (error) {
+        if (error instanceof MemberStoreError) throw ApplicationFailure.nonRetryable(error.code);
+        throw error;
+      }
     },
     async settleApproval(approval: Approval) {
       return await ledger.settleConfirmed(approval);

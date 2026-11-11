@@ -16,7 +16,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { z } from "zod";
 import type { DriverInput, DriverResult } from "./activities.ts";
-import { continueSession, nativeCall, proposalTool, toolName, toolResult } from "./pi-tools.ts";
+import { nativeProposal, toolNameSchema, type DeferredTool } from "./deferral.ts";
+import { continueSession, nativeCall, proposalTool, toolResult } from "./pi-tools.ts";
 import { checkpointSchema } from "./domain.ts";
 
 const textPart = z.object({ type: z.literal("text"), text: z.string(), textSignature: z.string().optional() });
@@ -27,7 +28,7 @@ const thinkingPart = z.object({
 const tokens = {
   input: z.number(), output: z.number(), cacheRead: z.number(), cacheWrite: z.number(),
 };
-const piToolName = z.enum([toolName, delegationToolName]);
+const piToolName = z.enum([...toolNameSchema.options, delegationToolName]);
 const systemMessage = z.strictObject({
   role: z.literal("system"), content: z.union([z.string(), z.array(textPart)]), timestamp: z.number(),
   sections: z.record(z.string(), z.string().nullable()).optional(),
@@ -82,7 +83,8 @@ export interface PiProfile {
 
 function onlyCall(pending: Pending) {
   const calls = pending.proposal.content.filter((part) => part.type === "toolCall");
-  if (calls.length !== 1 || calls[0].name !== toolName || calls[0].arguments.operation_id !== pending.runId) {
+  if (calls.length !== 1 || calls[0].name === delegationToolName ||
+      (calls[0].name === "record_work_item" && calls[0].arguments.operation_id !== pending.runId)) {
     throw new Error("Expected one Pi tool call for this input");
   }
   return calls[0];
@@ -97,8 +99,8 @@ export function runPiDelegatingSegment(input: DriverInput, profile: PiProfile) {
   return runSegment(input, profile, "delegating");
 }
 
-export async function runPiSegment(input: DriverInput, profile: PiProfile) {
-  const segment = await runSegment(input, profile, "protected");
+export async function runPiSegment(input: DriverInput, profile: PiProfile, tool: DeferredTool = "record_work_item") {
+  const segment = await runSegment(input, profile, tool);
   if (segment.kind === "delegated") throw new Error("Unexpected Pi delegation in a protected session");
   return segment;
 }
@@ -109,7 +111,7 @@ export async function runPiTurn(input: DriverInput, profile: PiProfile) {
   return { text: segment.text, checkpoint: segment.checkpoint };
 }
 
-async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" | "protected" | "delegating") {
+async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" | DeferredTool | "delegating") {
   input.signal.throwIfAborted();
   const prior = input.checkpoint;
   if (prior !== null && (prior.engine !== "pi" || prior.version !== 1)) throw new Error("Invalid Pi checkpoint");
@@ -121,22 +123,27 @@ async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" |
   }
   if (state.turns.length >= 4) throw new Error("Pi conversation input limit reached");
   const pending = state.pending;
-  const protectedTool = mode === "protected" || (mode === "delegating" && profile.allowRecordWorkItem === true);
+  const toolName = mode === "text" ? undefined : mode === "delegating" ?
+    (profile.allowRecordWorkItem ? "record_work_item" : undefined) : mode;
   const hasContinuation = input.continuation !== undefined || input.childResults !== undefined;
   if (Boolean(pending) !== hasContinuation || (input.childResults && input.continuation) ||
       (pending && (pending.runId !== input.runId || contentText(pending.user.content) !== input.text))) {
     throw new Error("Pi continuation does not match the pending turn");
   }
   const results = [];
-  if (pending && input.continuation && protectedTool) results.push(toolResult(onlyCall(pending), input.continuation));
+  if (pending && input.continuation && toolName) {
+    const call = onlyCall(pending);
+    if (call.name !== toolName) throw new Error("Pending Pi call differs from the member profile");
+    results.push(toolResult(call, input.continuation));
+  }
   if (pending && input.childResults && mode === "delegating") {
     const calls = pending.proposal.content.filter((part) => part.type === "toolCall");
     if (calls.some((call) => call.name !== delegationToolName)) throw new Error("Expected pending Pi delegations");
     results.push(...delegationToolResults(calls.map((call) => ({ nativeCallId: call.id })), input.childResults, pending.proposal.timestamp));
   }
   if (pending && results.length === 0) throw new Error("Missing authorized Pi continuation");
-  const tool = protectedTool ? proposalTool(input.runId) : undefined;
-  const batch = mode === "delegating" ? createDelegationBatch({ model: profile.model.id, allowRecordWorkItem: protectedTool }) : undefined;
+  const tool = toolName ? proposalTool(input.runId, toolName) : undefined;
+  const batch = mode === "delegating" ? createDelegationBatch({ model: profile.model.id, allowRecordWorkItem: toolName === "record_work_item" }) : undefined;
   const prepared = await profile.prepare?.();
   const factories = [...(prepared ? [prepared.extension] : []), ...(batch ? [batch.extension] : [])];
   const cwd = await mkdtemp(join(tmpdir(), "birb-pi-"));
@@ -170,7 +177,7 @@ async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" |
         : turn.tool;
       if (toolHistory) {
         const calls = toolHistory.proposal.content.filter((part) => part.type === "toolCall");
-        if (calls.some((call) => call.name === toolName)) onlyCall({ ...turn, proposal: toolHistory.proposal });
+        if (calls.some((call) => call.name !== delegationToolName)) onlyCall({ ...turn, proposal: toolHistory.proposal });
         const replies = "result" in toolHistory ? [toolHistory.result] : toolHistory.results;
         if (calls.length !== replies.length || new Set(calls.map((c) => c.id)).size !== calls.length ||
             calls.some((call, i) => call.id !== replies[i].toolCallId || call.name !== replies[i].toolName)) {
@@ -199,7 +206,7 @@ async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" |
     const committedCallIds: string[] = [];
     const reportPreview = toolPreviewReporter(input.runId, input.onToolArgs);
     const unsubscribe = session.subscribe((event) => {
-      if (tool && !pending && event.type === "message_update") {
+      if (toolName === "record_work_item" && !pending && event.type === "message_update") {
         const chunk = event.assistantMessageEvent;
         if (chunk.type === "toolcall_delta" && chunk.delta) {
           const call = chunk.partial.content[chunk.contentIndex];
@@ -250,10 +257,10 @@ async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" |
           return { kind: "delegated" as const, proposals, checkpoint: privateCheckpoint({ ...state, pending: proposal }) };
         }
         const call = onlyCall(proposal);
-        if (!tool || receipts.length !== 1 || call.id !== last.toolCallId || !tool.accepted.has(call.id) || last.isError) {
+        if (!tool || call.name !== toolName || receipts.length !== 1 || call.id !== last.toolCallId || !tool.accepted.has(call.id) || last.isError) {
           throw new Error("Pi did not confirm a permitted tool proposal");
         }
-        return { kind: "pending" as const, proposal: { name: toolName, nativeCallId: call.id, arguments: call.arguments },
+        return { kind: "pending" as const, proposal: nativeProposal.parse({ name: call.name, nativeCallId: call.id, arguments: call.arguments }),
           checkpoint: privateCheckpoint({ ...state, pending: proposal }) } satisfies DriverResult;
       }
       if (last?.role !== "assistant" || last.stopReason !== "stop" || committedCallIds.length) {

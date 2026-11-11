@@ -2,12 +2,14 @@ import { createHash } from "node:crypto";
 import { applyChild, endChildStep, insertToolResult, type ChildChange, type ObservedChild } from "./child-observation.ts";
 import { EventType as E, type Event, type Message } from "@ag-ui/core";
 import type { Pool, PoolClient } from "pg";
+import { toolChoices } from "./deferral.ts";
 import type { Approval, ToolOutcome } from "./approvals.ts";
 import { MemberStoreError, type Conversation } from "./domain.ts";
 
 const retainedEvents = 256;
 
-type PublicApproval = Omit<Approval, "argumentDigest" | "ownerId" | "nativeCallId"> & { choices: ["approve", "deny"] };
+type PublicApproval = Omit<Approval, "argumentDigest" | "ownerId" | "nativeCallId"> & { choices: typeof toolChoices.record_work_item };
+type PublicQuestion = Omit<PublicApproval, "choices"> & { choices: typeof toolChoices.choose_next_step };
 type Phase = "idle" | "running" | "waiting" | "complete" | "failed";
 type Projection = {
   conversationId: string;
@@ -18,6 +20,7 @@ type Projection = {
   openStep: string | null;
   children?: ObservedChild[];
   pendingApprovals: PublicApproval[];
+  pendingQuestions?: PublicQuestion[];
 };
 
 type Change = ChildChange
@@ -176,11 +179,12 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
       const { memberId, conversationId, requestId, invocationId, approvalId, version, policyVersion,
         toolName, summary } = change.approval;
       commitPreamble(invocationId === requestId ? undefined : invocationId);
-      state.pendingApprovals.push({ memberId, conversationId, requestId, invocationId,
-        approvalId, version, policyVersion, toolName, summary, choices: ["approve", "deny"] });
+      const card = { memberId, conversationId, requestId, invocationId, approvalId, version, policyVersion, toolName, summary };
+      if (toolName === "choose_next_step") (state.pendingQuestions ??= []).push({ ...card, choices: toolChoices.choose_next_step });
+      else state.pendingApprovals.push({ ...card, choices: toolChoices.record_work_item });
       state.phase = "waiting";
       const attribution = invocationId === requestId ? {} : { subagentRunId: invocationId };
-      const args = JSON.stringify({ operation_id: requestId });
+      const args = toolName === "choose_next_step" ? "{}" : JSON.stringify({ operation_id: requestId });
       const messageId = approvalId + "/assistant";
       const preamble = snapshot.openTools[invocationId]?.preamble;
       if (preamble) messages.push({id:preamble.id,role:"assistant",content:preamble.prefix,...attribution});
@@ -206,19 +210,21 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
       break;
     }
     case "answered":
+      if (state.pendingQuestions) state.pendingQuestions = state.pendingQuestions.filter((p) => p.approvalId !== change.approvalId);
       state.pendingApprovals = state.pendingApprovals.filter((p) => p.approvalId !== change.approvalId);
-      state.phase = state.pendingApprovals.length ? "waiting" : "running";
+      state.phase = state.pendingApprovals.length || state.pendingQuestions?.length ? "waiting" : "running";
       break;
     case "cancelled":
+      if (state.pendingQuestions) state.pendingQuestions = state.pendingQuestions.filter((p) => p.requestId !== change.requestId);
       state.pendingApprovals = state.pendingApprovals.filter((p) => p.requestId !== change.requestId);
-      state.phase = state.pendingApprovals.length ? "waiting" : "running";
+      state.phase = state.pendingApprovals.length || state.pendingQuestions?.length ? "waiting" : "running";
       break;
     case "resume":
       startStep(change.approvalId + "/continue");
       break;
     case "result": {
       const id = change.approvalId + "/result";
-      const content = JSON.stringify(change.outcome.kind === "recorded" ?
+      const content = change.outcome.kind === "answered" ? change.outcome.choice : JSON.stringify(change.outcome.kind === "recorded" ?
         { kind: "recorded", receiptId: change.outcome.receipt.receiptId } : { kind: change.outcome.kind });
       const call = messages.find(m => m.role === "assistant" && m.toolCalls?.some(t => t.id === change.approvalId));
       const attribution = call?.subagentRunId ? { subagentRunId: call.subagentRunId } : {};
@@ -260,6 +266,7 @@ function apply(snapshot: PublicSnapshot, change: Change): Event[] {
       finishStep();
       state.phase = "failed";
       state.pendingApprovals = [];
+      if (state.pendingQuestions) state.pendingQuestions = [];
       break;
   }
   // A finalized snapshot omits live messages and would remove them from HttpAgent.

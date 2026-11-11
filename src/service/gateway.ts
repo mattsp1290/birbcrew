@@ -158,7 +158,7 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       case "human": {
         const key = human.parse(input);
         const { rows: [call] } = await store.pool.query<{ argument_digest: string; native_call_id: string }>(
-          `SELECT argument_digest,native_call_id FROM birbcrew_ts.protected_calls JOIN birbcrew_ts.conversations USING (conversation_id)
+          `SELECT argument_digest,native_call_id FROM birbcrew_ts.deferred_calls JOIN birbcrew_ts.conversations USING (conversation_id)
            WHERE conversation_id=$1 AND approval_id=$2 AND owner_id=$3`,
           [conversationId, key.approvalId, ownerId]);
         if (!call) throw new HttpError(409, "unknown_approval");

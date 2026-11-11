@@ -22,9 +22,9 @@ The gateway prints its loopback URL. Send the token as an `Authorization: Bearer
 | --- | --- |
 | POST /members | Send a new `requestId` (UUID), `engine` (`claude` or `pi`) and a registered `profile`. Returns the member identity. Reuse the same body for retries. |
 | POST /conversations | Send `memberId` and a new `conversationId` (UUID). Returns the initial public snapshot. |
-| GET /conversations/{id} | Returns `messages`, `state` and the committed `cursor`. State includes the member, engine, profile, phase and pending approvals. |
+| GET /conversations/{id} | Returns `messages`, `state` and the committed `cursor`. State includes the member, engine, profile, phase, pending approvals and any pending questions. |
 | POST /conversations/{id}/inputs | Send a new `requestId` and `text`. A 202 response acknowledges the input. Retry ambiguous acknowledgements with the same ID and text. |
-| POST /conversations/{id}/human | Copy `memberId`, `requestId`, `invocationId`, `approvalId` and `version` from the pending card. Add `choice` with `approve` or `deny`. |
+| POST /conversations/{id}/human | Copy `memberId`, `requestId`, `invocationId`, `approvalId` and `version` from the pending card. Set `choice` to a value in its `choices` array. Cards in `state.pendingApprovals` accept `approve` or `deny`. Cards in `state.pendingQuestions` accept `inspect` or `test`. |
 | POST /conversations/{id}/cancel | Send the `requestId` of a pending protected call. Acknowledges cancellation. The native continuation can then report the cancelled result. |
 | POST /conversations/{id}/events | Attach a read-only AG-UI observer using the route's conversation ID as its thread ID. |
 
@@ -46,7 +46,7 @@ await agent.runAgent({}, {
 
 An explicit `?after=<cursor>` must match the current snapshot. A stale value returns HTTP 410 before streaming. A live observer that falls more than 256 frames behind receives `RUN_ERROR` with `CURSOR_EXPIRED`. In either case a fresh observer without `after` receives the latest snapshot. Conversations whose turns predate the public event ledger report HTTP 409 `history_unavailable`; their old prompt digests cannot reconstruct their public messages.
 
-The fixture suite exercises two official observers during a protected approval on each engine, gateway restart, argument redaction, cursor expiry and terminal message equality. During native generation observers receive assistant text as it arrives. A newly attached observer receives the open step and its accumulated text before the next delta. A failed attempt closes the open message and restores the committed history.
+The fixture suite exercises two official observers during a protected approval and an ordinary next-step question on each engine, gateway restart, argument redaction, cursor expiry and terminal message equality. During native generation observers receive assistant text as it arrives. A newly attached observer receives the open step and its accumulated text before the next delta. A failed attempt closes the open message and restores the committed history.
 
 Both SDKs also report when they start receiving arguments for a protected work item. Observers first see the public argument prefix `{"operation_id":`. A client joining at that point receives the same tool opener and prefix. When the native arguments contain the expected operation ID, both clients receive its value while the call remains open. The confirmed native proposal closes the arguments and enables the decision. The public tool ID stays the same through the result. If the worker dies before confirmation, the observer receives the closing tool frame and the committed message history.
 

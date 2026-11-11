@@ -34,12 +34,12 @@ export async function registerProfiles(pool: Pool, config: ReadonlyMap<string, M
       const digest = createHash("sha256").update(entry.accountId).digest();
       for (const engine of ["claude", "pi"] as const) {
         if (!entry[engine]) continue;
-        const key = [name, engine, digest, engine === "claude" ? volume : null, entry.protectedTool ?? null, engine === "pi" && entry.delegateTask === true];
-        await db.query(`INSERT INTO birbcrew_ts.profiles (name,engine,account_digest,volume,protected_tool,delegate_task)
-                        VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, key);
+        const key = [name, engine, digest, engine === "claude" ? volume : null, entry.protectedTool ?? null, engine === "pi" && entry.delegateTask === true, entry.humanTool ?? null];
+        await db.query(`INSERT INTO birbcrew_ts.profiles (name,engine,account_digest,volume,protected_tool,delegate_task,human_tool)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, key);
         const match = await db.query(`SELECT 1 FROM birbcrew_ts.profiles WHERE name=$1 AND engine=$2
-                         AND account_digest=$3 AND volume IS NOT DISTINCT FROM $4::uuid AND protected_tool IS NOT DISTINCT FROM $5::text AND delegate_task=$6`, key);
-        if (!match.rowCount) throw new Error("Profile registered for another account or native state volume");
+                         AND account_digest=$3 AND volume IS NOT DISTINCT FROM $4::uuid AND protected_tool IS NOT DISTINCT FROM $5::text AND delegate_task=$6 AND human_tool IS NOT DISTINCT FROM $7::text`, key);
+        if (!match.rowCount) throw new Error("Profile registered for another account or native state volume, or with different tools");
       }
     }
     await db.query("COMMIT");
