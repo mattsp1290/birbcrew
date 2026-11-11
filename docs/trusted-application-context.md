@@ -127,11 +127,27 @@ explicit uncertainty, never an automatic retry of the effect.
 
 After a worker disappears, call `recover(key)`. A live lease makes it busy. With
 no live lease it classifies the interrupted request as uncertain, returns receipt
-operation IDs/outcomes/acknowledgement status, and holds later queued work behind
+operation IDs/outcomes/result-release/acknowledgement status, and holds later queued work behind
 a generation barrier. Finish that barrier and explicitly release or cancel held
 requests. Recovery never calls an effect handler. If its acknowledgement is lost,
 `recover(key, requestId)` reconstructs the persisted uncertain outcome and receipt
-status without advancing the generation again.
+status without advancing the generation again. The same explicit request lookup
+works after context rotation has marked that interrupted request `cancelled`:
+request cancellation does not imply its effect was rolled back. Receipt outcomes
+remain `completed` when known, or `uncertain` when admitted without a recorded
+outcome. Readback never re-executes a tool or revives a cancelled request.
+
+Recovery requires current `output` permission and a fresh `receipt` authorization
+for **each original operation**. The policy input contains the historical `scope`
+and `version`, `requestId`, `toolName` and `operationId`. Implement this phase
+explicitly; permission to the replacement scope alone is not permission to an old
+operation. A denial fails the entire readback. Only operation ID, tool name,
+outcome, `released` and `acknowledged` are returned: no historical context,
+arguments, result body or reply. These authority identifiers are erased by
+`erase()`. Migration 15 can backfill still-current operations, but pre-upgrade
+rotated records have no provable historical scope and fail closed with `denied`.
+Applications must reconcile those legacy records through their existing domain
+receipts rather than guess authority from the current context.
 
 `acknowledged` means the native SDK/adapter confirmed the correctly paired tool
 result. It is **not** proof of remote provider durability, user delivery or an

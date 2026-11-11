@@ -87,9 +87,11 @@ async function crashChild() {
     return receipt;
   };
   const store = new TrustedContextStore(pool,base);
-  await store.dispatch(claim,"crash-call","record_effect",{note},noAbort());
-  process.send?.({ready:true});
-  await new Promise(() => {});
+  await store.admitted(claim,noAbort(),async () => {
+    await store.dispatch(claim,"crash-call","record_effect",{note},noAbort());
+    process.send?.({ready:true});
+    await new Promise(() => {});
+  });
 }
 
 if (process.argv.includes("--fixture-effect-child")) {
@@ -337,6 +339,51 @@ if (process.argv.includes("--fixture-effect-child")) {
         await fresh.acknowledge(turn.claim,"crash-call","record_effect");
       }
       assert.equal((await pool.query("SELECT 1 FROM birbcrew_ts.test_trusted_effects WHERE note=$1",[note])).rowCount,1);
+    });
+  }
+
+  for (const mode of ["after-effect","after-dispatch"] as const) {
+    test(`historical receipt recovery after SIGKILL and rotation: ${mode}`, async () => {
+      let historicalAccess = true;
+      const checks: Authorization[] = [];
+      const {store,key} = await fixture({authorize:async input => {
+        checks.push(input);
+        return input.phase !== "receipt" || (historicalAccess && input.scope === snapshot.scope && input.version === snapshot.version);
+      }});
+      const turn = await start(store,key), note = randomUUID();
+      const child = fork(fileURLToPath(import.meta.url),["--fixture-effect-child"],{
+        execArgv:[],stdio:["ignore","ignore","pipe","ipc"],env:{...process.env,
+          TRUSTED_TEST_CLAIM:JSON.stringify(turn.claim),TRUSTED_TEST_NOTE:note,TRUSTED_TEST_CRASH_MODE:mode},
+      });
+      let stderr = ""; child.stderr?.on("data",chunk => {stderr += chunk;});
+      try {
+        await Promise.race([once(child,"message"),once(child,"exit").then(() => {throw new Error(stderr || "Child exited before crash boundary");})]);
+        const exited = once(child,"exit"); child.kill("SIGKILL");
+        assert.equal((await exited)[1],"SIGKILL");
+      } finally {if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");}
+      const original = await callRow(turn.claim,"crash-call");
+      assert.equal(original.outcome,mode === "after-dispatch" ? "completed" : "admitted");
+      const generation = await store.invalidate(key,turn.claim.generation,nextSnapshot);
+      await assert.rejects(store.recover(key,turn.claim.requestId),errorCode("busy"));
+      await store.finishRotation(key);
+      historicalAccess = false;
+      await assert.rejects(store.recover(key,turn.claim.requestId),errorCode("denied"));
+      historicalAccess = true;
+      const expected = {requestId:turn.claim.requestId,outcome:"uncertain",receipts:[{
+        operationId:original.operation_id,toolName:"record_effect",outcome:mode === "after-dispatch" ? "completed" : "uncertain",
+        released:mode === "after-dispatch",acknowledged:false,
+      }]};
+      assert.deepEqual(await store.recover(key,turn.claim.requestId),expected);
+      assert.deepEqual(await store.recover(key,turn.claim.requestId),expected);
+      assert.deepEqual(await store.result(key,turn.claim.requestId),{phase:"cancelled",reply:null});
+      assert.ok(checks.some(c => c.phase === "receipt" && c.operationId === original.operation_id && c.scope === snapshot.scope));
+      assert.equal((await pool.query("SELECT generation FROM birbcrew_ts.trusted_sessions WHERE conversation_id=$1",[key.conversationId])).rows[0].generation,generation);
+      assert.equal((await pool.query("SELECT 1 FROM birbcrew_ts.test_trusted_effects WHERE note=$1",[note])).rowCount,1);
+      assert.equal(await store.begin(key),null);
+      await assert.rejects(store.dispatch(turn.claim,"crash-call","record_effect",{note},noAbort()),errorCode("stale"));
+      // An upgraded pre-fix row with no provable historical scope fails closed.
+      await pool.query("UPDATE birbcrew_ts.trusted_tool_calls SET scope=NULL WHERE operation_id=$1",[original.operation_id]);
+      await assert.rejects(store.recover(key,turn.claim.requestId),errorCode("denied"));
     });
   }
 

@@ -10,10 +10,10 @@ const snapshotSchema = z.strictObject({ scope: text(256), version: text(256), te
 export type TrustedKey = z.infer<typeof keySchema>;
 export type ContextSnapshot = z.infer<typeof snapshotSchema>;
 export type TrustedClaim = TrustedKey & { requestId: string; generation: number; token: string };
-export type AuthorizationPhase = "open" | "submit" | "dispatch" | "release" | "output";
+export type AuthorizationPhase = "open" | "submit" | "dispatch" | "release" | "output" | "receipt";
 export interface Authorization {
   ownerId: string; conversationId: string; scope: string; version: string;
-  phase: AuthorizationPhase; requestId?: string; toolName?: string; arguments?: unknown;
+  phase: AuthorizationPhase; requestId?: string; toolName?: string; arguments?: unknown; operationId?: string;
 }
 export interface RegisteredTool {
   name: string; description: string; inputSchema: Record<string, unknown>;
@@ -254,8 +254,8 @@ export class TrustedContextStore {
       const {rows:[count]} = await db.query<{n:number}>("SELECT count(*)::int AS n FROM birbcrew_ts.trusted_tool_calls WHERE conversation_id=$1 AND request_id=$2",[claim.conversationId,claim.requestId]);
       if (count.n >= 16) throw new TrustedContextError("limit");
       const operationId = randomUUID();
-      await db.query(`INSERT INTO birbcrew_ts.trusted_tool_calls (conversation_id,request_id,native_call_id,generation,tool_name,argument_digest,operation_id,kind)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,[claim.conversationId,claim.requestId,nativeCallId,claim.generation,toolName,fingerprint,operationId,tool.kind]);
+      await db.query(`INSERT INTO birbcrew_ts.trusted_tool_calls (conversation_id,request_id,native_call_id,generation,tool_name,argument_digest,operation_id,kind,scope,context_version)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,[claim.conversationId,claim.requestId,nativeCallId,claim.generation,toolName,fingerprint,operationId,tool.kind,s.scope,s.context_version]);
       return {existing:false,operationId,result:undefined};
     });
     let result = admission.result;
@@ -339,15 +339,23 @@ export class TrustedContextStore {
       if (!lease.rows[0].ok) throw new TrustedContextError("busy");
       const s = await this.session(db,input,true);
       const {rows:[r]} = await db.query<{request_id:string;phase:string}>(`SELECT request_id,phase FROM birbcrew_ts.trusted_requests
-        WHERE conversation_id=$1 AND phase IN ('running','uncertain') AND ($2::uuid IS NULL OR request_id=$2)
+        WHERE conversation_id=$1 AND phase IN ('running','uncertain','cancelled') AND ($2::uuid IS NULL OR request_id=$2)
         ORDER BY (phase='running') DESC,position DESC LIMIT 1`,[input.conversationId,requestId ?? null]);
       if (!r) return null;
       await this.allowed(this.authority(s,"output",r.request_id));
       if (r.phase === "running" && s.phase !== "active") throw new TrustedContextError("busy");
       await db.query("UPDATE birbcrew_ts.trusted_tool_calls SET outcome='uncertain' WHERE conversation_id=$1 AND request_id=$2 AND outcome='admitted'",[input.conversationId,r.request_id]);
-      const {rows:receipts} = await db.query<{operationId:string;toolName:string;outcome:string;acknowledged:boolean}>(`SELECT operation_id AS "operationId",tool_name AS "toolName",outcome,acknowledged
+      const {rows:calls} = await db.query<{operationId:string;toolName:string;outcome:string;released:boolean;acknowledged:boolean;scope:string|null;version:string|null}>(`SELECT operation_id AS "operationId",tool_name AS "toolName",outcome,released,acknowledged,scope,context_version AS version
         FROM birbcrew_ts.trusted_tool_calls WHERE conversation_id=$1 AND request_id=$2 ORDER BY native_call_id`,[input.conversationId,r.request_id]);
-      if (r.phase === "uncertain") return {requestId:r.request_id,outcome:"uncertain" as const,receipts};
+      // Reconciliation authority is checked against each original operation, never
+      // inferred from access to the replacement scope. No arguments/results escape.
+      for (const call of calls) {
+        if (call.scope === null || call.version === null) throw new TrustedContextError("denied");
+        await this.allowed({...this.authority(s,"receipt",r.request_id,call.toolName),
+          scope:call.scope,version:call.version,operationId:call.operationId});
+      }
+      const receipts = calls.map(({scope:_,version:__,...receipt}) => receipt);
+      if (r.phase !== "running") return {requestId:r.request_id,outcome:"uncertain" as const,receipts};
       await db.query("UPDATE birbcrew_ts.trusted_requests SET phase='uncertain',prompt=NULL WHERE conversation_id=$1 AND request_id=$2",[input.conversationId,r.request_id]);
       await db.query("UPDATE birbcrew_ts.trusted_requests SET phase='held' WHERE conversation_id=$1 AND phase='queued'",[input.conversationId]);
       await db.query("UPDATE birbcrew_ts.trusted_sessions SET generation=generation+1,phase='draining',checkpoint=NULL,native_thread_id=gen_random_uuid() WHERE conversation_id=$1",[input.conversationId]);
@@ -376,7 +384,7 @@ export class TrustedContextStore {
       await db.query("UPDATE birbcrew_ts.trusted_sessions SET phase='deleted',context_text=NULL,checkpoint=NULL WHERE conversation_id=$1",[input.conversationId]);
       await db.query("UPDATE birbcrew_ts.trusted_requests SET prompt=NULL,reply=NULL,phase='cancelled' WHERE conversation_id=$1",[input.conversationId]);
       await db.query("DELETE FROM birbcrew_ts.conversation_notes WHERE conversation_id=$1",[input.conversationId]);
-      await db.query("UPDATE birbcrew_ts.trusted_tool_calls SET result=NULL,outcome='uncertain' WHERE conversation_id=$1",[input.conversationId]);
+      await db.query("UPDATE birbcrew_ts.trusted_tool_calls SET result=NULL,outcome='uncertain',scope=NULL,context_version=NULL WHERE conversation_id=$1",[input.conversationId]);
     });
   }
 }
