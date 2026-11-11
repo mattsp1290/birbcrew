@@ -19,7 +19,16 @@ export async function createProxyProfile(options: ProxyProfileOptions) {
       !options.model?.trim() || (options.protectedTool && options.humanTool)) {
     throw new Error("Invalid proxy engine, protocol, model, account or tool configuration");
   }
-  const relay = await startProxyRelay(options);
+  // Snapshot trusted routing before any invocation can use it.
+  const relayOptions = { ...options, headers: options.headers && { ...options.headers } };
+  const relay = await startProxyRelay(relayOptions);
+  const active = new Set<() => Promise<void>>();
+  let closed = false;
+  const close = async () => {
+    closed = true;
+    await relay.close();
+    await Promise.all([...active].map(stop => stop()));
+  };
   try {
     const profile: MemberProfile = {
       accountId: options.accountId,
@@ -29,8 +38,31 @@ export async function createProxyProfile(options: ProxyProfileOptions) {
     if (options.engine === "claude") {
       profile.claude = { model: options.model, baseUrl: relay.baseUrl, apiKey: relay.apiKey };
     } else if (options.engine === "codex") {
-      // The scoped relay, not a user login or global auth file, owns upstream authorization.
-      profile.codex = { model: options.model, baseUrl: relay.baseUrl, apiKey: relay.apiKey, authorize: async () => {} };
+      // The native SDK may settle its abort before its socket closes. Bind the
+      // upstream lifetime to the host turn signal, with a separate listener/token
+      // per invocation so cancelling one turn cannot cancel another.
+      await relay.close();
+      profile.codex = { model: options.model, proxyTransport: async signal => {
+        signal.throwIfAborted();
+        if (closed) throw new Error("Proxy profile is closed");
+        const transport = await startProxyRelay(relayOptions);
+        let completion: Promise<void> | undefined;
+        const stop = () => {
+          if (!completion) {
+            signal.removeEventListener("abort", abort);
+            completion = transport.close().finally(() => active.delete(stop));
+          }
+          return completion;
+        };
+        const abort = () => { void stop().catch(() => {}); };
+        active.add(stop);
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted || closed) {
+          await stop();
+          throw new Error("Proxy invocation cancelled");
+        }
+        return { baseUrl: transport.baseUrl, apiKey: transport.apiKey, close: stop };
+      } };
     } else {
       const model: Model<"openai-completions"> = {
         id: options.model, name: options.model, provider: "birbcrew-proxy", api: "openai-completions",
@@ -59,9 +91,9 @@ export async function createProxyProfile(options: ProxyProfileOptions) {
       }));
       profile.pi = { model, modelRuntime: runtime };
     }
-    return { profile, close: relay.close };
+    return { profile, close };
   } catch {
-    await relay.close();
+    await close();
     throw new Error("Proxy profile initialization failed");
   }
 }
