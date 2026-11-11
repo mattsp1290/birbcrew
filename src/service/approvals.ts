@@ -24,6 +24,8 @@ export const decisionSchema = approvalKey.extend({
 });
 const settleSchema = approvalKey.extend({ token: uuid });
 
+type Proposal = z.input<typeof claim> & { toolName: DeferredTool; arguments: unknown };
+type ProposalMode = {recoverStopped:true} | {childGeneration:string} | {liveDeadline:string};
 type Scope = z.infer<typeof scopeSchema>;
 type CallKey = z.infer<typeof approvalKey>;
 export type Decision = z.infer<typeof decisionSchema>;
@@ -53,9 +55,9 @@ function publicApproval(scope: Scope, row: CallRow): Approval {
 }
 
 async function lockTurn(db: PoolClient, scope: Scope) {
-  const conversation = await db.query(
-    `SELECT 1 FROM birbcrew_ts.conversations WHERE owner_id = $1 AND member_id = $2 AND conversation_id = $3
-     FOR UPDATE`, [scope.ownerId, scope.memberId, scope.conversationId],
+  const conversation = await db.query<{engine:string}>(
+    `SELECT m.engine FROM birbcrew_ts.conversations c JOIN birbcrew_ts.members m USING(owner_id,member_id)
+     WHERE c.owner_id=$1 AND c.member_id=$2 AND c.conversation_id=$3 FOR UPDATE OF c`, [scope.ownerId, scope.memberId, scope.conversationId],
   );
   if (!conversation.rowCount) throw new MemberStoreError("not_found");
   const { rows: [turn] } = await db.query<{ token: string; phase: string }>(
@@ -63,7 +65,7 @@ async function lockTurn(db: PoolClient, scope: Scope) {
     [scope.conversationId, scope.requestId],
   );
   if (!turn) throw new MemberStoreError("not_found");
-  return turn;
+  return {...turn, engine:conversation.rows[0].engine};
 }
 
 export async function confirmedApproval(db: PoolClient, key: Scope & { invocationId: string; approvalId: string }) {
@@ -79,8 +81,9 @@ const stoppedChildApproval = `SELECT 1 FROM birbcrew_ts.pi_children j WHERE j.ch
     WHERE (s.conversation_id,s.request_id,s.token)=(j.conversation_id,j.request_id,j.generation)))`;
 
 async function findCall(db: PoolClient, key: CallKey) {
-  const { rows: [row] } = await db.query<CallRow & { childStopped: boolean }>(
-    `SELECT ${columns}, EXISTS (${stoppedChildApproval}) AS "childStopped" FROM birbcrew_ts.deferred_calls p WHERE p.conversation_id = $1 AND p.request_id = $2
+  const { rows: [row] } = await db.query<CallRow & { childStopped: boolean; live: boolean }>(
+    `SELECT ${columns}, EXISTS (${stoppedChildApproval}) AS "childStopped",
+     EXISTS (SELECT 1 FROM birbcrew_ts.codex_live_calls l WHERE l.approval_id=p.approval_id) AS live FROM birbcrew_ts.deferred_calls p WHERE p.conversation_id = $1 AND p.request_id = $2
      AND p.invocation_id = $3 AND p.native_call_id = $4 AND p.approval_id = $5`,
     [key.conversationId, key.requestId, key.invocationId, key.nativeCallId, key.approvalId],
   );
@@ -108,7 +111,7 @@ export class ApprovalStore {
   readonly pool: Pool;
   constructor(pool: Pool) { this.pool = pool; }
 
-  private async transaction<T>(action: (db: PoolClient) => Promise<T>): Promise<T> {
+  async transaction<T>(action: (db: PoolClient) => Promise<T>): Promise<T> {
     const db = await this.pool.connect();
     try {
       await db.query("BEGIN");
@@ -127,77 +130,81 @@ export class ApprovalStore {
     await new MemberStore(this.pool).migrate();
   }
 
-  async propose(input: z.input<typeof claim> & { toolName: DeferredTool; arguments: unknown }, pendingCheckpoint?: unknown, mode?: {recoverStopped:true} | {childGeneration:string}): Promise<Approval> {
+  async propose(input: Proposal, pendingCheckpoint?: unknown, mode?: Exclude<ProposalMode, {liveDeadline:string}>): Promise<Approval> {
+    return this.transaction(db => this.proposeLocked(db, input, pendingCheckpoint, mode));
+  }
+
+  async proposeLocked(db: PoolClient, input: Proposal, pendingCheckpoint?: unknown, mode?: ProposalMode): Promise<Approval> {
     const key = proposalSchema.parse(input);
     if (key.toolName === "record_work_item" && key.arguments.operation_id !== key.requestId) throw new MemberStoreError("conflict");
     const checkpoint = pendingCheckpoint === undefined ? undefined : checkpointSchema.parse(pendingCheckpoint);
     const digest = createHash("sha256").update(JSON.stringify(key.toolName === "choose_next_step" ? [key.toolName] :
       [key.toolName, key.arguments.operation_id, key.arguments.note ?? null])).digest("hex");
     const ids = [key.conversationId, key.requestId, key.invocationId, key.nativeCallId];
-    return this.transaction(async (db) => {
-      const turn = await lockTurn(db, key);
-      const childGeneration = mode && "childGeneration" in mode ? mode.childGeneration : undefined;
-      if (childGeneration) {
-        if (key.toolName !== "record_work_item") throw new MemberStoreError("conflict");
-        const child = await db.query(`SELECT 1 FROM birbcrew_ts.pi_children
-          WHERE child_id=$1 AND conversation_id=$2 AND request_id=$3 AND generation=$4 AND NOT launch_revoked AND phase IN ('running','waiting')
-          AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests
-                          WHERE conversation_id=$2 AND request_id=$3 AND token=$4)`,
-          [key.invocationId, key.conversationId, key.requestId, childGeneration]);
-        if (!child.rowCount || !checkpoint || key.token !== childGeneration) throw new MemberStoreError("stale");
+    const turn = await lockTurn(db, key);
+    if ((turn.engine === "codex") !== Boolean(mode && "liveDeadline" in mode)) throw new MemberStoreError("stale");
+    const childGeneration = mode && "childGeneration" in mode ? mode.childGeneration : undefined;
+    if (childGeneration) {
+      if (key.toolName !== "record_work_item") throw new MemberStoreError("conflict");
+      const child = await db.query(`SELECT 1 FROM birbcrew_ts.pi_children
+        WHERE child_id=$1 AND conversation_id=$2 AND request_id=$3 AND generation=$4 AND NOT launch_revoked AND phase IN ('running','waiting')
+        AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.native_stop_requests
+                        WHERE conversation_id=$2 AND request_id=$3 AND token=$4)`,
+        [key.invocationId, key.conversationId, key.requestId, childGeneration]);
+      if (!child.rowCount || !checkpoint || key.token !== childGeneration) throw new MemberStoreError("stale");
+    }
+    if (!childGeneration && turn.token !== key.token) throw new MemberStoreError("stale");
+    if (mode && "recoverStopped" in mode && turn.phase === "uncertain" && checkpoint?.engine === "claude") {
+      const recovered = await db.query(`UPDATE birbcrew_ts.turns t SET phase='started'
+        FROM birbcrew_ts.native_launches n WHERE n.conversation_id=t.conversation_id AND n.request_id=t.request_id
+          AND n.token=t.token AND t.token=$3 AND t.conversation_id=$1 AND t.request_id=$2 AND n.stopped AND NOT n.recovery_closed
+          AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.paused_segments s
+            WHERE s.conversation_id=t.conversation_id AND s.request_id=t.request_id)`, [key.conversationId, key.requestId, key.token]);
+      if (!recovered.rowCount) throw new MemberStoreError("stale");
+    } else if (turn.phase !== "started") throw new MemberStoreError("stale");
+    if (await cancelled(db, key)) throw new MemberStoreError("conflict");
+    const existing = await db.query<CallRow>(
+      `SELECT ${columns} FROM birbcrew_ts.deferred_calls p WHERE p.conversation_id = $1 AND p.request_id = $2
+       AND p.invocation_id = $3 AND p.native_call_id = $4`, ids,
+    );
+    const prior = existing.rows[0];
+    if (prior) {
+      if (prior.argumentDigest !== digest) throw new MemberStoreError("conflict");
+      if (checkpoint) {
+        const same = await db.query(childGeneration
+          ? "SELECT 1 FROM birbcrew_ts.pi_children WHERE approval_id=$1 AND native_checkpoint=$2::jsonb"
+          : "SELECT 1 FROM birbcrew_ts.paused_segments WHERE approval_id=$1 AND checkpoint=$2::jsonb",
+          [prior.approvalId, JSON.stringify(checkpoint)]);
+        if (!same.rowCount) throw new MemberStoreError("conflict");
       }
-      if (!childGeneration && turn.token !== key.token) throw new MemberStoreError("stale");
-      if (mode && "recoverStopped" in mode && turn.phase === "uncertain" && checkpoint?.engine === "claude") {
-        const recovered = await db.query(`UPDATE birbcrew_ts.turns t SET phase='started'
-          FROM birbcrew_ts.native_launches n WHERE n.conversation_id=t.conversation_id AND n.request_id=t.request_id
-            AND n.token=t.token AND t.token=$3 AND t.conversation_id=$1 AND t.request_id=$2 AND n.stopped AND NOT n.recovery_closed
-            AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.paused_segments s
-              WHERE s.conversation_id=t.conversation_id AND s.request_id=t.request_id)`, [key.conversationId, key.requestId, key.token]);
-        if (!recovered.rowCount) throw new MemberStoreError("stale");
-      } else if (turn.phase !== "started") throw new MemberStoreError("stale");
-      if (await cancelled(db, key)) throw new MemberStoreError("conflict");
-      const existing = await db.query<CallRow>(
-        `SELECT ${columns} FROM birbcrew_ts.deferred_calls p WHERE p.conversation_id = $1 AND p.request_id = $2
-         AND p.invocation_id = $3 AND p.native_call_id = $4`, ids,
-      );
-      const prior = existing.rows[0];
-      if (prior) {
-        if (prior.argumentDigest !== digest) throw new MemberStoreError("conflict");
-        if (checkpoint) {
-          const same = await db.query(childGeneration
-            ? "SELECT 1 FROM birbcrew_ts.pi_children WHERE approval_id=$1 AND native_checkpoint=$2::jsonb"
-            : "SELECT 1 FROM birbcrew_ts.paused_segments WHERE approval_id=$1 AND checkpoint=$2::jsonb",
-            [prior.approvalId, JSON.stringify(checkpoint)]);
-          if (!same.rowCount) throw new MemberStoreError("conflict");
-        }
-        return publicApproval(key, prior);
-      }
-      const { rows: [preview] } = await db.query<{ public_id: string; native_call_id: string; generation: string }>(
-        "SELECT public_id,native_call_id,generation FROM birbcrew_ts.tool_previews WHERE conversation_id=$1 AND request_id=$2 AND invocation_id=$3",
-        ids.slice(0, 3));
-      if (preview && (preview.native_call_id !== key.nativeCallId || preview.generation !== key.token)) throw new MemberStoreError("stale");
-      const inserted = await db.query<CallRow>(
-        `INSERT INTO birbcrew_ts.deferred_calls AS p
-         (conversation_id, request_id, invocation_id, native_call_id, tool_name, arguments, argument_digest,
-          policy_version, decision_version, approval_id)
-         SELECT $1, $2, $3, $4, $5, $6, $7, 1, 1, COALESCE($8::uuid,gen_random_uuid())
-         WHERE (SELECT count(*) FROM birbcrew_ts.deferred_calls WHERE conversation_id = $1 AND request_id = $2) < 16
-         RETURNING ${columns}`, [...ids, key.toolName, key.arguments, digest, preview?.public_id ?? null],
-      );
-      if (!inserted.rows.length) throw new MemberStoreError("input_limit");
-      const row = inserted.rows[0];
-      if (childGeneration) {
-        const updated = await db.query(`UPDATE birbcrew_ts.pi_children SET phase='waiting',native_checkpoint=$2,approval_id=$3
-          WHERE child_id=$1 AND phase='running' AND generation=$4`, [key.invocationId, JSON.stringify(checkpoint), row.approvalId, childGeneration]);
-        if (!updated.rowCount) throw new MemberStoreError("stale");
-      } else if (checkpoint) {
-        await db.query(`INSERT INTO birbcrew_ts.paused_segments (approval_id,conversation_id,request_id,checkpoint)
-                        VALUES ($1,$2,$3,$4)`, [row.approvalId, key.conversationId, key.requestId, JSON.stringify(checkpoint)]);
-      }
-      const approval = publicApproval(key, row);
-      await publishObservation(db, key.conversationId, { kind: "call", approval });
-      return approval;
-    });
+      return publicApproval(key, prior);
+    }
+    const { rows: [preview] } = await db.query<{ public_id: string; native_call_id: string; generation: string }>(
+      "SELECT public_id,native_call_id,generation FROM birbcrew_ts.tool_previews WHERE conversation_id=$1 AND request_id=$2 AND invocation_id=$3",
+      ids.slice(0, 3));
+    if (preview && (preview.native_call_id !== key.nativeCallId || preview.generation !== key.token)) throw new MemberStoreError("stale");
+    const inserted = await db.query<CallRow>(
+      `INSERT INTO birbcrew_ts.deferred_calls AS p
+       (conversation_id, request_id, invocation_id, native_call_id, tool_name, arguments, argument_digest,
+        policy_version, decision_version, approval_id)
+       SELECT $1, $2, $3, $4, $5, $6, $7, 1, 1, COALESCE($8::uuid,gen_random_uuid())
+       WHERE (SELECT count(*) FROM birbcrew_ts.deferred_calls WHERE conversation_id = $1 AND request_id = $2) < 16
+       RETURNING ${columns}`, [...ids, key.toolName, key.arguments, digest, preview?.public_id ?? null],
+    );
+    if (!inserted.rows.length) throw new MemberStoreError("input_limit");
+    const row = inserted.rows[0];
+    if (childGeneration) {
+      const updated = await db.query(`UPDATE birbcrew_ts.pi_children SET phase='waiting',native_checkpoint=$2,approval_id=$3
+        WHERE child_id=$1 AND phase='running' AND generation=$4`, [key.invocationId, JSON.stringify(checkpoint), row.approvalId, childGeneration]);
+      if (!updated.rowCount) throw new MemberStoreError("stale");
+    } else if (checkpoint) {
+      await db.query(`INSERT INTO birbcrew_ts.paused_segments (approval_id,conversation_id,request_id,checkpoint)
+                      VALUES ($1,$2,$3,$4)`, [row.approvalId, key.conversationId, key.requestId, JSON.stringify(checkpoint)]);
+    }
+    const approval = publicApproval(key, row);
+    await publishObservation(db, key.conversationId, { kind: "call", approval,
+      ...(mode && "liveDeadline" in mode && { expiresAt: mode.liveDeadline }) });
+    return approval;
   }
 
   async pending(input: z.input<typeof openSchema>) {
@@ -214,6 +221,10 @@ export class ApprovalStore {
        WHERE p.conversation_id = $1 AND p.decision IS NULL
          AND t.phase = 'started' AND x.request_id IS NULL
          AND NOT EXISTS (${stoppedChildApproval})
+         AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.codex_live_calls l WHERE l.approval_id=p.approval_id
+           AND (l.phase<>'waiting' OR l.expires_at <= clock_timestamp() OR EXISTS
+             (SELECT 1 FROM birbcrew_ts.native_stop_requests s WHERE
+               (s.conversation_id,s.request_id,s.token)=(l.conversation_id,l.request_id,l.token))))
        ORDER BY p.approval_id`,
       [key.conversationId],
     );
@@ -236,19 +247,21 @@ export class ApprovalStore {
   }
 
   async decide(input: z.input<typeof decisionSchema>): Promise<Choice> {
-    const key = decisionSchema.parse(input);
-    return this.transaction(async (db) => {
-      const turn = await lockTurn(db, key);
-      const call = await findCall(db, key);
-      if (!acceptsChoice(call.toolName, key.choice)) throw new MemberStoreError("conflict");
-      if (call.version !== key.version || call.argumentDigest !== key.argumentDigest) throw new MemberStoreError("conflict");
-      if (call.decision === key.choice) return call.decision;
-      if (call.decision || turn.phase !== "started" || call.childStopped || await cancelled(db, key)) throw new MemberStoreError("conflict");
-      await db.query("UPDATE birbcrew_ts.deferred_calls SET decision = $2 WHERE approval_id = $1",
-        [key.approvalId, key.choice]);
-      await publishObservation(db, key.conversationId, { kind: "answered", approvalId: key.approvalId });
-      return key.choice;
-    });
+    return this.transaction(db => this.decideLocked(db, decisionSchema.parse(input)));
+  }
+
+  async decideLocked(db: PoolClient, key: Decision, live = false): Promise<Choice> {
+    const turn = await lockTurn(db, key);
+    const call = await findCall(db, key);
+    if (call.live !== live) throw new MemberStoreError("stale");
+    if (!acceptsChoice(call.toolName, key.choice)) throw new MemberStoreError("conflict");
+    if (call.version !== key.version || call.argumentDigest !== key.argumentDigest) throw new MemberStoreError("conflict");
+    if (call.decision === key.choice) return call.decision;
+    if (call.decision || turn.phase !== "started" || call.childStopped || await cancelled(db, key)) throw new MemberStoreError("conflict");
+    await db.query("UPDATE birbcrew_ts.deferred_calls SET decision = $2 WHERE approval_id = $1",
+      [key.approvalId, key.choice]);
+    await publishObservation(db, key.conversationId, { kind: "answered", approvalId: key.approvalId });
+    return key.choice;
   }
 
   async isCancelled(scope: Scope) {
@@ -263,6 +276,7 @@ export class ApprovalStore {
     const key = scopeSchema.parse(input);
     await this.transaction(async (db) => {
       const turn = await lockTurn(db, key);
+      if (turn.engine === "codex") throw new MemberStoreError("stale");
       if (await cancelled(db, key)) return;
       if (turn.phase !== "started") throw new MemberStoreError("conflict");
       const answered = await db.query(`SELECT 1 FROM birbcrew_ts.deferred_calls
@@ -305,10 +319,11 @@ export class ApprovalStore {
     return this.transaction((db) => this.settleLocked(db, key));
   }
 
-  async settleLocked(db: PoolClient, key: z.infer<typeof settleSchema>): Promise<ToolOutcome> {
+  async settleLocked(db: PoolClient, key: z.infer<typeof settleSchema>, live = false): Promise<ToolOutcome> {
     const turn = await lockTurn(db, key);
     if (turn.token !== key.token) throw new MemberStoreError("stale");
     const call = await findCall(db, key);
+    if (call.live !== live) throw new MemberStoreError("stale");
     const nativeCallId = key.nativeCallId;
     async function finish(outcome: ToolOutcome) {
       await publishObservation(db, key.conversationId, { kind: "result", approvalId: key.approvalId, outcome });
@@ -339,8 +354,12 @@ export class ApprovalStore {
     const inserted = await db.query<{ receipt_id: string }>(
       `INSERT INTO birbcrew_ts.work_items (conversation_id, request_id, approval_id, note)
        SELECT conversation_id, request_id, approval_id, arguments->>'note' FROM birbcrew_ts.deferred_calls
-       WHERE approval_id = $1 AND decision = 'approve' RETURNING receipt_id`, [key.approvalId],
+       WHERE approval_id = $1 AND decision = 'approve'
+         AND (NOT $2::boolean OR EXISTS (SELECT 1 FROM birbcrew_ts.codex_live_calls l
+           WHERE l.approval_id=$1 AND l.phase='dispatching' AND l.expires_at>clock_timestamp())) RETURNING receipt_id`,
+      [key.approvalId,live],
     );
+    if (!inserted.rowCount) throw new MemberStoreError("stale");
     return finish({ nativeCallId, kind: "recorded", receipt: { receiptId: inserted.rows[0].receipt_id, operationId: key.requestId } });
   }
 }
