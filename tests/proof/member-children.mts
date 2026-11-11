@@ -92,13 +92,24 @@ export async function verifyChildren(s: Services, stop: () => Promise<void>) {
   assert.deepEqual(JSON.parse(denied.text!.replace(/^settled /, "")), { kind: "denied", nativeCallId: p.nativeCallId });
   assert.equal(await failure.items(), "0");
 
-  const cancel = await begin([{ role: "analyst", task: "child wait" }, { role: "recorder", task: "record assigned cancelled" }]);
-  await cancel.phases(["running", "waiting"]);
-  const [waiting] = pendingSchema.parse(await command("pending", cancel.key));
-  for (let n = 0; n < 2; n++) assert.deepEqual(await command("cancel-pending", { ...cancel.key, requestId: cancel.requestId }), { cancelled: true });
-  assert.deepEqual((await cancel.finish()).map((o) => o.kind), ["cancelled", "cancelled"]);
-  assert.equal(await cancel.items(), "0");
-  await command("decide", decision(waiting, "approve"), true);
+  for (const committed of [false, true]) {
+    const cancel = await begin([{ role: "analyst", task: "child wait" }, { role: "recorder", task: "record assigned cancelled" }]);
+    await cancel.phases(["running", "waiting"]);
+    const [waiting] = pendingSchema.parse(await command("pending", cancel.key));
+    if (committed) {
+      await command("decide", decision(waiting, "approve"));
+      await cancel.phases(["running", "complete"]);
+    }
+    for (let n = 0; n < 2; n++) assert.deepEqual(await command("cancel-pending", { ...cancel.key, requestId: cancel.requestId }), { cancelled: true });
+    const [analyst, recorder] = await cancel.finish();
+    assert.equal(analyst.kind, "cancelled");
+    assert.equal(recorder.kind, committed ? "completed" : "cancelled");
+    assert.equal(await cancel.items(), committed ? "1" : "0");
+    if (committed) {
+      const receipt = await s.sql("SELECT receipt_id FROM birbcrew_ts.work_items" + cancel.scope);
+      assert.equal(JSON.parse(recorder.text!.replace(/^settled /, "")).receipt.receiptId, receipt);
+    } else await command("decide", decision(waiting, "approve"), true);
+  }
   const illegal = await begin([{ role: "analyst", task: "next step" }, { role: "recorder", task: "next step" }]);
   assert.deepEqual((await illegal.finish()).map((o) => o.kind), ["failed", "failed"]);
   assert.equal(await illegal.items(), "0");

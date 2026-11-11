@@ -326,10 +326,16 @@ export class MemberStore {
         }
         return { kind: "uncertain" as const };
       }
-      const { rows: [{ token }] } = await db.query<{token: string}>(
+      // Pre-effect cancellation still delivers its native tool result. A committed receipt survives a stopped turn.
+      const { rows: [grant] } = await db.query<{token: string}>(
         `UPDATE birbcrew_ts.turns SET token=gen_random_uuid(),activity_id=$3,attempt=$4
-         WHERE conversation_id=$1 AND request_id=$2 RETURNING token`,
-        [key.conversationId, key.requestId, execution.activityId, execution.attempt]);
+         WHERE conversation_id=$1 AND request_id=$2 AND NOT EXISTS (
+           SELECT 1 FROM birbcrew_ts.work_items w JOIN birbcrew_ts.tool_cancellations USING (conversation_id,request_id)
+           WHERE w.approval_id=$5
+         ) RETURNING token`,
+        [key.conversationId, key.requestId, execution.activityId, execution.attempt, approval?.approvalId ?? null]);
+      if (!grant) throw new MemberStoreError("stale");
+      const { token } = grant;
       let childResults: ChildOutcome[] | undefined;
       if (approval) {
         await db.query("UPDATE birbcrew_ts.paused_segments SET resume_activity_id=$2 WHERE approval_id=$1",

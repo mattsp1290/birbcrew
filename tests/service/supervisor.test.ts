@@ -208,7 +208,7 @@ test("concurrent and revoked receipt submissions reach each native engine at mos
   for (const engine of ["pi", "claude"] as const) {
     const ownerId = randomUUID();
     const member = await store.spawn({ engine, ownerId, profile, requestId: randomUUID() });
-    for (const revoke of [true, false]) {
+    for (const stop of ["before resume", "before launch", "none"]) {
       const conversationId = randomUUID(), requestId = randomUUID();
       await store.openConversation({ ownerId, memberId: member.memberId, conversationId });
       const request = { ownerId, conversationId, requestId, text: "record " + requestId };
@@ -224,6 +224,12 @@ test("concurrent and revoked receipt submissions reach each native engine at mos
       const receipt = await ledger.settleConfirmed(approval);
       assert.equal(receipt.kind, "recorded");
       const next = { ...execution, activityId: "resume" };
+      if (stop === "before resume") {
+        await ledger.cancelTurn({ ownerId, memberId: member.memberId, conversationId, requestId });
+        await assert.rejects(store.beginResume(request, approval, next), { code: "stale" });
+        assert.deepEqual(await ledger.settleConfirmed(approval), receipt);
+        continue;
+      }
       const resume = await store.beginResume(request, approval, next);
       assert.equal(resume.kind, "start");
       assert.notEqual(resume.token, claim.token);
@@ -231,6 +237,7 @@ test("concurrent and revoked receipt submissions reach each native engine at mos
       await a.stop(initial);
       await b.stop(initial);
       const callsBefore = (await readFile(log, "utf8")).trim().split("\n").length;
+      const revoke = stop === "before launch";
       if (revoke) {
         await b.stop(launch);
         await assert.rejects(a.start(launch, t.signal));
