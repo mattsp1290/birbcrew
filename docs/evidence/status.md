@@ -6,7 +6,7 @@ The [TypeScript fixture report](typescript-members.json) records the source fing
 
 Independent implementation review covered `9fd67ce73ada5274e5e9560ad3aafe0c8e6d3e63`. Reviewers exercised the receipt and cancellation races, Pi child ordering, account-proof authorization, report provenance and cleanup. If Codex loses a pending native call, the observer shows the known effect and whether delivery was confirmed. A committed receipt survives worker loss or cancellation.
 
-Hosted-account acceptance is pending separately for Claude, Codex and Pi, including hosted Pi delegation. Human authentication and permissions sign-off and the production cutover are pending. The historical live evidence below belongs to the Python implementation.
+Pi passed [hosted acceptance on OpenCode Go](typescript-pi-hosted.json) with `glm-5.3-flash` at `a5e9007`. Two independent observers verified one approved work item and its receipt, cold recall after worker replacement, and a separate Pi child session. The run used 12 provider requests. Hosted Claude and Codex runs remain pending. Human authentication and permissions sign-off and the production cutover are pending. The historical live evidence below belongs to the Python implementation.
 
 ## Historical Python milestone
 
