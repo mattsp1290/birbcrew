@@ -176,7 +176,11 @@ export class ApprovalStore {
         FROM birbcrew_ts.native_launches n WHERE n.conversation_id=t.conversation_id AND n.request_id=t.request_id
           AND n.token=t.token AND t.token=$3 AND t.conversation_id=$1 AND t.request_id=$2 AND n.stopped AND NOT n.recovery_closed
           AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.paused_segments s
-            WHERE s.conversation_id=t.conversation_id AND s.request_id=t.request_id)`, [key.conversationId, key.requestId, key.token]);
+            WHERE s.conversation_id=t.conversation_id AND s.request_id=t.request_id)
+          -- A handed-off source admits nothing new: a turn its handoff counted as uncertain stays
+          -- uncertain. lockTurn holds the row lock a handoff takes, so the two serialise.
+          AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.conversation_handoffs h
+            WHERE h.source_conversation_id=t.conversation_id)`, [key.conversationId, key.requestId, key.token]);
       if (!recovered.rowCount) throw new MemberStoreError("stale");
     } else if (turn.phase !== "started") throw new MemberStoreError("stale");
     if (await cancelled(db, key)) throw new MemberStoreError("conflict");

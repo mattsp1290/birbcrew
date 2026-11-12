@@ -251,6 +251,42 @@ test("a source with a running turn, a pending approval or a queued request is bu
   assert.equal((await f.created(source, target)).carriedTurns, 3);
 });
 
+test("a Claude turn left to recovery when its source is handed off stays uncertain: the recovered proposal is refused", async (t) => {
+  const f = await fixture(t);
+  const profile = "handoff-recover-" + randomUUID();
+  await pool.query(`INSERT INTO birbcrew_ts.profiles (name,engine,account_digest,volume,protected_tool)
+    VALUES ($1,'claude',$2,$3,'record_work_item')`, [profile, Buffer.alloc(32), randomUUID()]);
+  const member = await f.spawn("claude", f.token, profile), target = await f.spawn("codex");
+  const source = await f.open(member);
+  await f.turn(source, "remember yew", "stored yew");
+  const request = { ownerId: f.ownerId, conversationId: source, requestId: randomUUID(), text: "recover me" };
+  assert.equal((await f.api(`/v1/conversations/${source}/requests`, { requestId: request.requestId, text: request.text })).status, 202);
+  const run = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
+  const begun = await store.beginTurn(request, run);
+  assert.equal(begun.kind, "start"); if (begun.kind !== "start") return;
+  const launch = [source, request.requestId, begun.token];
+  await pool.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+    VALUES ($1,$2,$3,$4,$5,1)`, [...launch, run.workflowRunId, run.activityId]);
+  // The turn failed after its native launch: it is uncertain but still recoverable, and nothing is busy.
+  assert.deepEqual(await store.reconcileTurn(request, run.workflowRunId, false), { kind: "recover" });
+  await pool.query("UPDATE birbcrew_ts.native_launches SET stopped=true WHERE conversation_id=$1 AND request_id=$2 AND token=$3", launch);
+  const view = await f.created(source, target);
+  assert.deepEqual([view.carriedTurns, view.uncertainTurns], [1, 1]);
+
+  // recoverPending restored the native session and proposes the call it found.
+  await assert.rejects(approvals.propose({ ownerId: f.ownerId, memberId: member, conversationId: source, requestId: request.requestId,
+    token: begun.token, invocationId: request.requestId, nativeCallId: "recovered-call", toolName: "record_work_item",
+    arguments: { operation_id: request.requestId } }, { version: 1, engine: "claude", state: {} }, { recoverStopped: true }),
+  (error: unknown) => error instanceof MemberStoreError && error.code === "stale");
+  const { rows: [state] } = await pool.query(`SELECT t.phase, (SELECT count(*)::integer FROM birbcrew_ts.deferred_calls d
+      WHERE d.conversation_id=t.conversation_id AND d.request_id=t.request_id) AS calls
+    FROM birbcrew_ts.turns t WHERE t.conversation_id=$1 AND t.request_id=$2`, [source, request.requestId]);
+  assert.deepEqual(state, { phase: "uncertain", calls: 0 });
+  // The workflow's final reconcile closes it as the handoff recorded it.
+  assert.equal(await store.reconcileTurn(request, run.workflowRunId, false, false), null);
+  assert.equal((await f.status(source, request.requestId)).status, "uncertain");
+});
+
 test("a retried requestId returns the same handoff, drives its reserved request again and never opens a second target", async (t) => {
   const f = await fixture(t);
   const member = await f.spawn(), target = await f.spawn("codex"), sibling = await f.spawn("claude");
@@ -617,6 +653,25 @@ test("a standing grant never covers the handoff turn; the target exposes no card
   assert.deepEqual(rows.map(row => row.kind), ["owner"]);
   assert.deepEqual((await f.api(`/v1/conversations/${view.target.conversationId}`)).body.state.grantedCalls.map((c: { requestId: string }) => c.requestId),
     [rows[0].requestId]);
+});
+
+test("a conversation grant of a sealed source is listed as closed", async (t) => {
+  const f = await fixture(t);
+  const member = await f.spawn("pi", f.token, protectedProfile), target = await f.spawn("claude");
+  const source = await f.open(member);
+  const granting = await f.start(source, "grant");
+  const scope = { ownerId: f.ownerId, memberId: member, conversationId: source, requestId: granting.requestId };
+  const card = await approvals.propose({ ...scope, token: granting.token, invocationId: granting.requestId, nativeCallId: "call-" + randomUUID(),
+    toolName: "record_work_item", arguments: { operation_id: granting.requestId, note: "grant" } });
+  await approvals.decide({ ...scope, invocationId: card.invocationId, nativeCallId: card.nativeCallId, approvalId: card.approvalId,
+    argumentDigest: card.argumentDigest, version: card.version, choice: "allow_conversation" });
+  await approvals.settle({ ...scope, approvalId: card.approvalId, invocationId: card.invocationId, nativeCallId: card.nativeCallId, token: granting.token });
+  await f.commit(granting, "granted");
+  const grants = async () => (await f.api(`/v1/members/${member}/grants`)).body;
+  const { active: [grant] } = await grants();
+  assert.deepEqual([grant.conversationId, grant.status], [source, "active"]);
+  await f.created(source, target);
+  assert.deepEqual(await grants(), { apiVersion: "1", memberId: member, active: [], inactive: [{ ...grant, status: "conversation_closed" }] });
 });
 
 test("MemberClient refuses a pending target, a sealed source and an oversized owner prompt before any workflow update", async (t) => {
