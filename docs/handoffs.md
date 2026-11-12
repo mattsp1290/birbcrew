@@ -100,7 +100,7 @@ target's first user message in its snapshot, and the reserved request's receipt 
 | `409` | `trusted_conversation` | the source is attached to the [trusted-context lane](trusted-application-context.md) |
 | `409` | `history_unavailable` | the source predates the public event ledger, or a committed prompt does not match its turn's digest |
 | `409` | `memory_limit` | the target member's notes and memory would not fit its engine, as for any open |
-| `409` | `conflict` | the `requestId` was used with another source or member |
+| `409` | `conflict` | the `requestId` was used with another source or member; on the target's request routes, the reserved request's ID sent with other text |
 | `409` | `handoff_pending` | on the target's request routes: its reserved request is not admitted yet |
 | `503` | `retry_same_request` | the outcome may be unknown; retry with the same `requestId` |
 
