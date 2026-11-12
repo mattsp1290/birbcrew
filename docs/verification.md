@@ -110,8 +110,9 @@ timing and status.
 Set `BIRBCREW_OTLP_TRACES_ENDPOINT` to also send the same spans over OTLP/HTTP
 JSON to a collector. Give the full traces URL, such as
 `https://collector.example/v1/traces`. It must use `https`, except that plain
-`http` is allowed to `127.0.0.1`, such as
-`http://127.0.0.1:4318/v1/traces`. IPv6 literal hosts such as `[::1]` are
+`http` is allowed to `127.0.0.1`, such as `http://127.0.0.1:4318/v1/traces`,
+and to any other host when `BIRBCREW_OTLP_TRACES_ALLOW_HTTP=true` is also set
+(see the Datadog Agent recipe below). IPv6 literal hosts such as `[::1]` are
 rejected because the exporter cannot connect to them. It must have a path and must not embed a
 user name, password, query string or fragment; the exporter sends only the
 path, so a query string would otherwise be dropped. Either sink, both or
@@ -119,11 +120,11 @@ neither may be set. Spans come from the member worker and its native turn
 runners, but every process that loads the store also reads the setting: the
 gateway, every `members` command, the worker, the supervisor host and the turn
 runners. Each of them fails at startup when the value breaks these rules, so
-a malformed value stops the whole service, not only tracing. The error does
-not repeat the value. Each span carries only its name, trace and span IDs,
-parent, timing, status and the same correlation IDs as the file. The resource
-carries only `service.name=birbcrew`. Prompts, replies, tool arguments and
-credentials are never span data. Spans are batched in a bounded queue and
+a malformed value stops the whole service, not only tracing. The error names
+the variable and does not repeat the value. Each span carries only its name,
+trace and span IDs, parent, timing, status and the same correlation IDs as the
+file. Prompts, replies, tool arguments and credentials are never span data.
+Spans are batched in a bounded queue and
 dropped when the queue is full or the collector fails; export never fails a
 turn. It can slow one, though: the host confirms a native turn only after its
 runner exits, and the runner first waits up to 250 milliseconds to flush its
@@ -136,6 +137,72 @@ honours the standard `OTEL_EXPORTER_OTLP_HEADERS`,
 variables. The generic `OTEL_EXPORTER_OTLP_*` forms apply to every OTLP
 exporter, so a header or certificate set for another service on the same host
 is sent to this collector too. Prefer the `OTEL_EXPORTER_OTLP_TRACES_*` forms
-and keep the generic ones unset for Crew. Crew registers no OpenTelemetry
-diagnostic logger and discards export errors, so header values are not
-logged.
+and keep the generic ones unset for Crew. The exporter sends JSON only:
+`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` is ignored, gRPC is not used, and the
+standard `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
+do nothing on their own. The Python worker writes only the JSONL file.
+
+The resource carries `service.name` and any attributes from
+`OTEL_RESOURCE_ATTRIBUTES`. Both variables are read only when
+`BIRBCREW_OTLP_TRACES_ENDPOINT` is set; no host, process or container
+attributes are detected. The service name is `OTEL_SERVICE_NAME` when set and
+not empty, otherwise `service.name` from `OTEL_RESOURCE_ATTRIBUTES`, otherwise
+`birbcrew`. `OTEL_RESOURCE_ATTRIBUTES` follows the OpenTelemetry format:
+comma-separated `key=value` entries such as
+`deployment.environment.name=production,service.version=1.2.3`. Spaces and
+tabs around keys, values and commas are ignored, and empty entries are
+skipped. Each key is a W3C Baggage token (letters, digits and
+``!#$%&'*+-.^_`|~``) of at most 255 characters and appears once. Each value is
+not empty and uses printable ASCII other than space, `"`, `,`, `;` and `\`;
+percent-encode anything else, such as `%20` for a space or `%2C` for a comma.
+Decoded, a value must be valid UTF-8 of at most 255 characters with no control
+or invisible formatting characters. At most 32 entries and 4096 characters are
+accepted. `OTEL_SERVICE_NAME` follows the same length and character limits as
+a decoded value. Unlike the OpenTelemetry SDK, which drops malformed input
+silently, Crew refuses to start when either variable breaks these rules, so a
+typo cannot quietly remove the environment or version. The error names the
+variable and, for an attribute, the entry's position, never its content.
+
+When an export fails, the process writes one line to standard error, such as
+`birbcrew: OTLP trace export failed (ECONNREFUSED) and its spans were dropped;
+the next warning comes at least 5 minutes later`. The reason is only an HTTP
+status, a Node error code such as `ENOTFOUND` or `EPROTO`, or `timeout`;
+the line never contains the endpoint, a header, the collector's status text or
+response body, or span data. Each process writes at most one such line every
+five minutes and counts the failures it held back in the next one. Native
+turn runners discard standard error, so the line comes from the worker. Crew
+registers no OpenTelemetry diagnostic logger.
+
+#### Datadog Agent
+
+To send spans to a Datadog Agent's OTLP receiver inside a Kubernetes cluster,
+set these on the worker container. Its supervisor host and turn runners inherit
+them. The gateway also reads them but emits no spans.
+
+```sh
+BIRBCREW_OTLP_TRACES_ENDPOINT=http://datadog-agent.default.svc:4318/v1/traces
+BIRBCREW_OTLP_TRACES_ALLOW_HTTP=true
+OTEL_SERVICE_NAME=crew-worker
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=production,service.version=1.2.3
+```
+
+The Agent must run APM with its OTLP HTTP receiver listening beyond
+loopback, for example `DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_HTTP_ENDPOINT=0.0.0.0:4318`.
+The receiver speaks plain HTTP, so an `https` endpoint fails every export with
+`EPROTO`. `BIRBCREW_OTLP_TRACES_ALLOW_HTTP` accepts only `true` or `false`, in
+any case; empty means `false`, and any other value stops startup. When the endpoint is plain `http`
+to a host other than `127.0.0.1`, Crew refuses to start if
+`OTEL_EXPORTER_OTLP_HEADERS` or `OTEL_EXPORTER_OTLP_TRACES_HEADERS` is set,
+because those headers usually hold credentials and would cross the network
+unencrypted. The spans themselves also travel unencrypted, so use this only
+where the path to the Agent stays inside the cluster network.
+
+The Agent maps `service.name` to the Datadog service,
+`deployment.environment.name` to `env` and `service.version` to `version`.
+The span name (`workflow.segment`, `model.invoke`, `tool.settle` or
+`native.restore`) becomes the Datadog resource name. Every span's operation
+name is `Internal`, because Crew sets no `operation.name` attribute: spans
+carry only correlation IDs and the engine. An Agent started with
+`DD_OTLP_CONFIG_TRACES_SPAN_NAME_AS_RESOURCE_NAME=true` uses the span name as
+the operation name too, but that setting applies to every service sending OTLP
+to that Agent.
