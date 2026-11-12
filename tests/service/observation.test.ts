@@ -7,6 +7,8 @@ import { Pool } from "pg";
 import { MemberStore } from "../../src/service/store.ts";
 import { ApprovalStore } from "../../src/service/approvals.ts";
 import { service, startWorker, until } from "./observer-host.ts";
+import { fileURLToPath } from "node:url";
+import { Worker } from "@temporalio/worker";
 
 for (const engine of ["claude", "pi"]) {
   test(`${engine} observers converge across a protected pause and gateway restart`, { timeout: 100_000 }, async (t) => {
@@ -597,5 +599,48 @@ for (const engine of ["pi", "claude"]) {
     }
     assert.deepEqual(first.agent.messages, second.agent.messages);
     assert.equal((await host.db.query("SELECT count(*) AS n FROM birbcrew_ts.work_items WHERE conversation_id=$1", [cid])).rows[0].n, "0");
+  });
+}
+
+for (const engine of ["claude", "pi"]) {
+  test(`${engine} observers see a granted call run without a card, and its history replays`, { timeout: 120_000 }, async (t) => {
+    const host = await service(t);
+    const { memberId } = await host.post("/members", { requestId: randomUUID(), engine, profile: "fixture.approval.v1" });
+    const cid = randomUUID(), path = "/conversations/" + cid;
+    await host.post("/conversations", { memberId, conversationId: cid });
+    const observer = host.attach(cid);
+    const idle = () => until(async () => { const s = await (await host.api(path)).json(); return s.state.phase === "idle" ? s : undefined; });
+    const first = randomUUID();
+    await host.post(`/v1${path}/requests`, { requestId: first, text: "record " + first });
+    const card = await until(async () => (await (await host.api(path)).json()).state.pendingApprovals[0]);
+    assert.deepEqual([card.choices, card.standingChoices], [["approve", "deny"], ["allow_conversation", "allow_always"]]);
+    const { invocationId, approvalId, version } = card;
+    assert.deepEqual(await host.post(path + "/human", { memberId, requestId: first, invocationId, approvalId, version, choice: "allow_conversation" }),
+      { approvalId, decision: "allow_conversation" });
+    await idle();
+    const second = randomUUID();
+    await host.post(`/v1${path}/requests`, { requestId: second, text: "record " + second });
+    const end = await until(async () => { const s = await (await host.api(path)).json();
+      return s.state.phase === "idle" && s.messages.filter((m: { role: string }) => m.role === "user").length === 2 ? s : undefined; });
+    const [granted] = end.state.grantedCalls;
+    assert.equal(end.state.grantedCalls.length, 1);
+    assert.deepEqual({ ...granted, approvalId: undefined, grantId: undefined }, { requestId: second, approvalId: undefined, grantId: undefined, scope: "conversation" });
+    const { rows: [grant] } = await host.db.query("SELECT grant_id FROM birbcrew_ts.tool_grants WHERE approval_id=$1", [approvalId]);
+    assert.equal(granted.grantId, grant.grant_id);
+    assert.equal((await host.db.query("SELECT count(*) AS n FROM birbcrew_ts.work_items WHERE conversation_id=$1", [cid])).rows[0].n, "2");
+    await until(async () => observer.events.some((e) => e.type === "TOOL_CALL_RESULT" && e.toolCallId === granted.approvalId) || undefined);
+    assert.ok(!observer.events.some((e) => e.type === "STATE_SNAPSHOT" &&
+      (e.snapshot as { pendingApprovals: { requestId: string }[] }).pendingApprovals.some((p) => p.requestId === second)), "no card for the granted call");
+    const toolFrames = (id: string) => observer.events.filter((e) => String(e.type).startsWith("TOOL_CALL") && e.toolCallId === id).map((e) => e.type);
+    assert.deepEqual(toolFrames(granted.approvalId), toolFrames(approvalId), "the same tool-call frames as the carded call");
+    assert.equal(toolFrames(approvalId).at(-1), "TOOL_CALL_RESULT");
+
+    // The workflow skipped the wait behind the patch marker, which only the granted call recorded.
+    const workflowId = `birbcrew-ts/member/${memberId}/conversation/${cid}`;
+    const history = await host.temporal.workflow.getHandle(workflowId).fetchHistory();
+    const patches = (history.events ?? []).flatMap((e) => e.markerRecordedEventAttributes?.markerName === "core_patch"
+      ? (e.markerRecordedEventAttributes.details?.["patch-data"]?.payloads ?? []).map((payload) => Buffer.from(payload.data ?? []).toString()) : []);
+    assert.equal(patches.filter((patch) => patch.includes("standing-grants-v1")).length, 1, patches.join());
+    await Worker.runReplayHistory({ workflowsPath: fileURLToPath(new URL("../../src/service/workflow.ts", import.meta.url)) }, history, workflowId);
   });
 }

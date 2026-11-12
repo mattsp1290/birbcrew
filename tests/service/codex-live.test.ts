@@ -155,3 +155,28 @@ test("Codex redacts a future tool ID in preamble and a known ID split across com
   const stored = await host.db.query("SELECT reply FROM birbcrew_ts.turns WHERE conversation_id=$1 AND phase='committed'", [conversationId]);
   assert.equal(stored.rows[0].reply,"Before private." + requestId + "After private." + requestId + " finished.");
 });
+
+test("Codex allow_always lets the member's next live call run without a card", {timeout:100_000}, async t => {
+  const host = await service(t);
+  const first = await open(host,"fixture.approval.v1");
+  await host.post(`/v1${first.path}/requests`,{requestId:first.requestId,text:"record " + first.requestId});
+  const card = await until(async () => (await state(host,first.path)).state.pendingApprovals?.[0]);
+  assert.deepEqual(card.standingChoices,["allow_conversation","allow_always"]);
+  const key = {memberId:first.memberId,requestId:first.requestId,invocationId:card.invocationId,approvalId:card.approvalId,version:1};
+  assert.deepEqual(await host.post(first.path+"/human",{...key,choice:"allow_always"}),{approvalId:card.approvalId,decision:"allow_always"});
+  await until(async () => (await state(host,first.path)).state.phase === "idle" || undefined);
+
+  const conversationId = randomUUID(), requestId = randomUUID(), path = "/conversations/" + conversationId;
+  await host.post("/conversations",{conversationId,memberId:first.memberId});
+  const observer = host.attach(conversationId);
+  await host.post(`/v1${path}/requests`,{requestId,text:"record " + requestId});
+  const end = await until(async () => { const s = await state(host,path); return s.state.phase === "idle" && s.state.grantedCalls ? s : undefined; });
+  const [granted] = end.state.grantedCalls;
+  assert.deepEqual([granted.requestId,granted.scope],[requestId,"member"]);
+  const [receipt] = await countWrites(host,conversationId);
+  assert.deepEqual(end.state.liveOperations,[{requestId,approvalId:granted.approvalId,effect:"committed",delivery:"confirmed",receiptId:receipt.receipt_id}]);
+  assert.ok(end.messages.at(-1).content.includes(receipt.receipt_id));
+  await until(async () => observer.events.some(e => e.type === "TOOL_CALL_RESULT" && e.toolCallId === granted.approvalId) || undefined);
+  assert.ok(!observer.events.some(e => e.type === "STATE_SNAPSHOT" &&
+    (e.snapshot as {pendingApprovals:{requestId:string}[]}).pendingApprovals.some(p => p.requestId === requestId)), "no card for the granted call");
+});
