@@ -50,8 +50,7 @@ How the open-source products relate to each other and to the hosted ones:
 | ? | The sources that were read do not say. |
 
 Every "Part" cell of OpenBot, OpenMuse, OpenDots, and OpenDuet has a note. These
-"Part" cells of the hosted products have no note: Grok Bot rows 17, 25, 38, and
-39; Muse rows 11, 12, 16, 23, 24, 25, 34, 38, and 39; Dots rows 8, 11, 12, 14,
+"Part" cells of the hosted products have no note: Grok Bot rows 17, 25, and 39; Muse rows 11, 12, 16, 23, 24, 25, 34, 38, and 39; Dots rows 8, 11, 12, 14,
 16, 20, 22, 25, 28, 34, 35, 36, and 38; and Duet rows 8, 11, 15, 16, 25, 35, 36,
 and 38. In those cells the sources show the feature with a limit that this page
 does not record.
@@ -293,7 +292,9 @@ no row. "How to read the grid" lists the "Part" cells that have no note.
   decision about it, and is exported through OpenTelemetry.
 - **Row 20.** Bots sign in with logins from Vault, a connected password manager,
   or a Secure Form without seeing the values. The sources read do not say that
-  Vault is encrypted.
+  Vault is encrypted. On the Enterprise plan, Team Secrets for team setup
+  scripts are stored encrypted, and xAI states that they are not given to Bots
+  directly.
 - **Row 21.** Outside content is marked as untrusted data for the model. Auto
   Review counts only the user's own messages as requests.
 - **Row 22.** xAI states that each user's computer is dedicated and
@@ -312,6 +313,13 @@ no row. "How to read the grid" lists the "Part" cells that have no note.
   reached in Slack, and an admin can let Team Bots join Microsoft Teams.
 - **Row 34.** A Bot sends a system or mobile alert when it finishes or needs
   the user.
+- **Row 36.** On team plans. SCIM provisioning is on the Enterprise plan only.
+  The roles that the sources describe are team admin and the Managers of a
+  Team Bot.
+- **Row 38.** Usage is metered per product. On the Enterprise plan only,
+  OpenTelemetry Export streams usage metrics and logs to the customer's
+  collector, and members see a spend limit. xAI states that a separate spend
+  cap for Grok Bot alone is not available.
 - **No row.** A user can claim one email address that all of their Bots share.
   A Bot can join a video meeting
   and report back. A Bot can run commands on the user's own computer under a
