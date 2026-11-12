@@ -24,7 +24,8 @@ export interface RecoveryFence {
    * orders restored audit identities (recovery.ts acceptRestoreImpl). The move sets it to
    * max(epoch + 1, minimumEpoch); a retried transfer to the same target returns it, raised
    * to minimumEpoch if lower; nothing lowers it. When the result would reach fenceEpochLimit,
-   * throw before changing anything, so authority stays with the source. */
+   * throw a RecoveryRefusedError before changing anything, so authority stays with the source
+   * and the CLI shows the operator why (it hides any other error's message). */
   transfer(installation: string, source: string, target: string, generation: string, minimumEpoch: number): Promise<number>;
   verifyActivation(installation: string, instance: string, generation: string): Promise<void>;
   activate(installation: string, instance: string, generation: string): Promise<void>;
@@ -37,8 +38,11 @@ export class FileRecoveryFence implements RecoveryFence {
   constructor(directory: string) { this.directory=directory; if (!isAbsolute(directory)) throw new Error('Fence requires an absolute private shared directory'); }
   // The epoch lives in epoch.json, beside a state.json that earlier releases parse strictly, so
   // a rolled-back release still reads the fence. It ignores epoch.json, and a missing file reads
-  // as 0. An epoch left behind by transfers an earlier release made is harmless: such a release
-  // draws no audit IDs, and acceptance raises the epoch past every ID in the restored database.
+  // as 0. An epoch left behind by transfers an earlier release made is harmless only because
+  // acceptance requires the capturing release's application commit (recovery.ts), so this
+  // release never retries a transfer an earlier one made: that retry would return the stale
+  // epoch, which belongs to an earlier timeline. A move from a held source takes the stored
+  // epoch plus one, and acceptance raises it past every ID in the restored database.
   private async change(run: (old: FenceIdentity | null, epoch: number) => FenceIdentity & { epoch?: number }) {
     await mkdir(this.directory, {recursive:true,mode:0o700});
     const lock=join(this.directory,'lock');
