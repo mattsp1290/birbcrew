@@ -80,6 +80,13 @@ packets, accepts a connection and never answers, or answers slowly. The next hea
 request after that starts a fresh probe, so health stops reporting `unavailable`
 within about 6 seconds of PostgreSQL becoming reachable again.
 
+Leave PostgreSQL one connection slot of headroom beyond the gateway's pool for this
+probe. The probe sends `statement_timeout` as a connection startup parameter. A pooler
+that rejects startup parameters it does not track, as PgBouncer does by default, refuses
+that connection, and health then reports the database `unavailable` while requests
+through the pool still work. Allow the parameter in the pooler (PgBouncer's
+`ignore_startup_parameters`) or point the gateway at PostgreSQL directly.
+
 When the database is ready, `schemaVersion` is the highest migration number applied to
 it. It is `null` when the database is unavailable. Migration numbers are not
 contiguous, and a later release can add a migration numbered below one that an earlier
