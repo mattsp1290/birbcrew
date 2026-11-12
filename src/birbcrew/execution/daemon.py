@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import json
 from pathlib import Path
 
@@ -6,12 +7,15 @@ from temporalio import activity
 from wsproto import ConnectionType, WSConnection
 from wsproto.events import AcceptConnection, CloseConnection, Ping, Request, TextMessage
 
+NOT_LISTENING = {errno.ENOENT, errno.ECONNREFUSED, errno.ENOTSOCK}
+
 
 class Daemon:
     """An owned client of the existing managed daemon. Notifications are discarded."""
 
-    def __init__(self, binary: Path):
+    def __init__(self, binary: Path, socket: Path | None = None):
         self.binary = binary
+        self.socket = socket
         self.wire = WSConnection(ConnectionType.CLIENT)
         self.sequence = 0
         self.partial = ""
@@ -29,6 +33,7 @@ class Daemon:
             str(self.binary),
             "app-server",
             "proxy",
+            *(("--sock", str(self.socket)) if self.socket else ()),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
@@ -101,3 +106,21 @@ class Daemon:
             except TimeoutError:
                 self.process.terminate()
                 await self.process.wait()
+
+
+async def wait_for_socket(path: Path, timeout: float) -> None:
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                try:
+                    _, writer = await asyncio.open_unix_connection(path)
+                except OSError as error:
+                    if error.errno not in NOT_LISTENING:
+                        raise
+                    await asyncio.sleep(1)
+                    continue
+                writer.close()
+                await writer.wait_closed()
+                return
+    except TimeoutError:
+        raise ValueError("codex_socket_unavailable") from None
