@@ -390,7 +390,11 @@ test("an open during an uncommitted delete neither waits nor fails, and the dele
     assert.deepEqual(entries(await conversationContext(pool, opened)), [{ memoryId, text: "racing" }]);
     await deleter.query("COMMIT");
     assert.equal(await conversationContext(pool, opened), undefined);
-  } finally { deleter.release(); }
+  } finally {
+    // After a failure the delete may still be open, holding up the open and the pool's end.
+    await deleter.query("ROLLBACK").catch(() => {});
+    deleter.release();
+  }
 });
 
 test("hostile text stays inside its frame and returns exactly", async (t) => {
