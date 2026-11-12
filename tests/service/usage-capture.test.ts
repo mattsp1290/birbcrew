@@ -61,6 +61,9 @@ test("a Codex rollout that cannot be read, or a total that went backwards, is un
   assert.deepEqual(codexUsage(now, { input_tokens: 80, output_tokens: 9 }), { ...reported, model: null, inputTokens: 50,
     outputTokens: 11, cachedInputTokens: 4, cacheWriteTokens: null, reasoningTokens: null });
   assert.equal(codexUsage(now, undefined).state, "unknown");
+  // A part of the input that cannot be read is left out; the input and output counts stay.
+  assert.deepEqual(codexUsage(now, { input_tokens: 80, output_tokens: 9, cached_input_tokens: 6 }), { ...reported, model: null,
+    inputTokens: 50, outputTokens: 11, cachedInputTokens: null, cacheWriteTokens: null, reasoningTokens: null });
   assert.equal(codexUsage(now, { input_tokens: 200, output_tokens: 9 }).state, "unknown");
   assert.equal(codexUsage({ input_tokens: 1.5, output_tokens: 2 }, null).state, "unknown");
 });

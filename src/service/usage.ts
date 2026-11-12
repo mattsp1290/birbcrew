@@ -26,7 +26,7 @@ export const usageCapabilities = {
   },
   budget: { route: "/v1/usage/budgets/{memberId}", period: "utc_day", counts: "input+output", scope: "member",
     enforcement: "admission-soft-cap", refusal: "usage_limit", tokenLimitMaximum: usageLimits.tokenLimitMaximum },
-  recordPagination: "usage-id-keyset-newest-first", restore: "rewound-with-database",
+  recordPagination: "usage-id-keyset-newest-first", restore: "rewound-with-database; usage-ids-after-recovery-point-reissued",
 } as const;
 
 type Queryable = Pick<PoolClient, "query">;
@@ -36,6 +36,16 @@ type Queryable = Pick<PoolClient, "query">;
  * whose driver reported nothing is recorded as unknown. The launch's execution identity must
  * match the reserved native_launches row. */
 export async function recordSegmentUsage(db: Queryable, launch: Launch, usage: SegmentUsage = { state: "unknown", model: null }) {
+  try { await insertUsage(db, launch, usage); }
+  catch (error) {
+    // Metering must not cost a finished segment its result: a row the ledger's CHECKs refuse
+    // is kept as unknown instead.
+    if (usage.state === "unknown" || !(error && typeof error === "object" && "code" in error && String(error.code).startsWith("23"))) throw error;
+    await insertUsage(db, launch, { state: "unknown", model: null });
+  }
+}
+
+async function insertUsage(db: Queryable, launch: Launch, usage: SegmentUsage) {
   const counts = usage.state === "reported" ? usage : undefined;
   await db.query(`INSERT INTO birbcrew_ts.usage_ledger (owner_id,member_id,conversation_id,request_id,token,child_id,engine,state,
       model,input_tokens,output_tokens,cached_input_tokens,cache_write_tokens,reasoning_tokens,cost_usd)
@@ -80,6 +90,12 @@ export async function refuseOverBudget(db: Queryable, key: { ownerId: string; co
  * answers at once; recordAcceptance checks again in the admission transaction. A request that
  * already has an admission or a turn is never refused: a retry gets the answer it got before. */
 export async function checkUsageAdmission(store: MemberStore, request: TurnRequest) {
+  // Most members have no budget. A trusted-context conversation is refused by admission itself.
+  const budgeted = await store.pool.query(`SELECT 1 FROM birbcrew_ts.conversations c JOIN birbcrew_ts.usage_budgets b USING (member_id)
+    WHERE c.owner_id=$1 AND c.conversation_id=$2 AND b.state='active'
+      AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.trusted_sessions s WHERE s.conversation_id=c.conversation_id)`,
+  [request.ownerId, request.conversationId]);
+  if (!budgeted.rowCount) return;
   const refused = await store.transaction(async db => {
     const { rows: [conversation] } = await db.query<{ member_id: string }>(`SELECT member_id FROM birbcrew_ts.conversations
       WHERE owner_id=$1 AND conversation_id=$2 FOR KEY SHARE`, [request.ownerId, request.conversationId]);

@@ -99,8 +99,9 @@ export interface AuditFact<T extends AuditEventType> {
 
 // No caller chooses the initiator. A request's row copies the one its admission recorded,
 // read by the insert itself inside the caller's transaction. A request with no admission row
-// (workflow histories older than durable admission, and the trusted-context lane, which
-// records none) is attributed to the owner, as before admissions recorded an initiator.
+// (workflow histories older than durable admission, the trusted-context lane, which records
+// none, and a request refused under its member's usage budget) is attributed to the owner, as
+// before admissions recorded an initiator.
 // An owner admission stores no initiator_id; the audit row names the owner. The type CHECK
 // gives every request-tied type a request_id and the others, spawn and open, none.
 const initiatorFromAdmission = `SELECT $1,$2,$3,coalesce(a.initiator_kind,'owner'),coalesce(a.initiator_id,$1),$4,$5,$6,$7,$8

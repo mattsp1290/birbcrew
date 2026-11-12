@@ -138,8 +138,19 @@ test("each launch records its segment's usage once, bound to the launch's execut
   for (const change of ["UPDATE birbcrew_ts.usage_ledger SET input_tokens=0 WHERE owner_id=$1", "DELETE FROM birbcrew_ts.usage_ledger WHERE owner_id=$1"]) {
     await assert.rejects(pool.query(change, [owner.ownerId]), { code: "23514" });
   }
-  await assert.rejects(pool.query(`INSERT INTO birbcrew_ts.usage_ledger (owner_id,member_id,conversation_id,request_id,token,engine,state,input_tokens)
-    VALUES ($1,$2,$3,$4,$5,'pi','unknown',3)`, [owner.ownerId, owner.memberId, conversationId, other.request.requestId, other.launch.token]), { code: "23505" });
+  const direct = (state: string, input: number | null) => pool.query(`INSERT INTO birbcrew_ts.usage_ledger
+    (owner_id,member_id,conversation_id,request_id,token,engine,state,input_tokens) VALUES ($1,$2,$3,$4,$5,'pi',$6,$7)`,
+  [owner.ownerId, owner.memberId, conversationId, other.request.requestId, other.launch.token, state, input]);
+  await assert.rejects(direct("unknown", null), { code: "23505" });
+  await assert.rejects(direct("unknown", 3), { code: "23514" }, "an unknown row carries no count");
+  await assert.rejects(direct("reported", 3), { code: "23514" }, "a reported row has both counts");
+  await other.commit();
+
+  // A row the ledger's CHECKs would refuse is kept as unknown rather than failing the segment.
+  const odd = await launched(store, owner.ownerId, conversationId, "third");
+  await recordSegmentUsage(pool, odd.launch, { ...reported(5, 5), model: "é".repeat(200) });
+  assert.deepEqual((await rows()).at(-1), { token: odd.launch.token, engine: "pi", state: "unknown", model: null, input_tokens: null,
+    output_tokens: null, cached_input_tokens: null, cache_write_tokens: null, reasoning_tokens: null, cost: null });
 });
 
 test("the usage routes total an owner's usage by member and conversation, mark routine requests, and show no other owner's rows", async (t) => {
@@ -394,11 +405,21 @@ test("migration 031 takes its locks without queueing, rewrites nothing, leaves i
       { relation: "routine_firings", mode: "AccessExclusiveLock" },
     ]);
     const { rows: checks } = await db.query(`SELECT conname AS name, convalidated AS validated FROM pg_constraint
-      WHERE conname IN ('audit_events_type_check','routine_firings_check4') ORDER BY 1`);
-    assert.deepEqual(checks, [{ name: "audit_events_type_check", validated: false }, { name: "routine_firings_check4", validated: false }]);
+      WHERE conname IN ('audit_events_type_check','routine_firings_check4','routine_firings_reason_check') ORDER BY 1`);
+    assert.deepEqual(checks, [{ name: "audit_events_type_check", validated: false }, { name: "routine_firings_reason_check", validated: false }]);
   } finally {
     await db.query("ROLLBACK");
     db.release();
+  }
+  // A sibling migration that already renamed the reason CHECK does not stop this one.
+  const renamed = await upgraded.connect();
+  try {
+    await renamed.query("BEGIN");
+    await renamed.query("ALTER TABLE birbcrew_ts.routine_firings RENAME CONSTRAINT routine_firings_check4 TO routine_firings_reason_check");
+    await renamed.query(await readFile(new URL("031-usage.sql", sql), "utf8"));
+  } finally {
+    await renamed.query("ROLLBACK");
+    renamed.release();
   }
 
   // A launch being reserved holds native_launches in a mode the migration's lock excludes.
@@ -427,6 +448,14 @@ test("migration 031 takes its locks without queueing, rewrites nothing, leaves i
   // The turn that started before the upgrade is metered when its segment returns.
   await recordSegmentUsage(upgraded, { ownerId, conversationId, requestId, text, token: start.token, execution }, reported(3, 4));
   assert.equal((await upgraded.query("SELECT count(*)::integer AS n FROM birbcrew_ts.usage_ledger")).rows[0].n, 1);
+});
+
+test("migrate() refuses to apply a migration below one already applied", async (t) => {
+  // A database that ran a later migration first would otherwise get an earlier one's narrower CHECKs.
+  const ahead = await databaseAt(t, 26);
+  await ahead.query("INSERT INTO birbcrew_ts.schema_versions VALUES (40)");
+  await assert.rejects(new MemberStore(ahead).migrate(), /Migration 31 would apply after migration 40/);
+  assert.equal((await ahead.query("SELECT to_regclass('birbcrew_ts.usage_ledger') AS ledger")).rows[0].ledger, null);
 });
 
 test("migration 031 completes while a native turn holds its admission", async (t) => {

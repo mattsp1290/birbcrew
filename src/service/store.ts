@@ -114,9 +114,13 @@ export class MemberStore {
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
       [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [22, "022-conversation-owner-index.sql"], [23, "023-request-initiator.sql"], [24, "024-standing-grants.sql"], [25, "025-routines.sql"], [26, "026-memories.sql"], [31, "031-usage.sql"]] as const;
+      const { rows: [{ latest }] } = await db.query<{ latest: number | null }>("SELECT max(version) AS latest FROM birbcrew_ts.schema_versions");
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
+        // Migrations replace whole CHECK constraints, so one applied after a later one would
+        // silently narrow what the later one allowed.
+        if (latest !== null && version < latest) throw new Error(`Migration ${version} would apply after migration ${latest}`);
         await db.query(await readFile(new URL("./sql/" + name, import.meta.url), "utf8"));
         await db.query("INSERT INTO birbcrew_ts.schema_versions VALUES ($1)", [version]);
       }
@@ -211,7 +215,8 @@ export class MemberStore {
         if(budget.used>=budget.limit)throw new MemberStoreError("input_limit");
       }
       const recorded=await firingInitiator(db,key,conversation)??attested;
-      if(await refuseOverBudget(db,key,conversation.memberId,recorded.kind==="routine"?recorded.id:undefined))return true;
+      // A request whose turn already started (a legacy non-durable submit) is running, never refused.
+      if(!existingTurn&&await refuseOverBudget(db,key,conversation.memberId,recorded.kind==="routine"?recorded.id:undefined))return true;
       const [initiatorKind,initiatorId]=initiatorColumns(recorded);
       await db.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest,initiator_kind,initiator_id)
         VALUES($1,$2,$3,$4,$5)`,[key.conversationId,key.requestId,digest,initiatorKind,initiatorId]);

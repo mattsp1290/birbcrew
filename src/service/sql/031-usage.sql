@@ -56,12 +56,15 @@ CREATE TABLE birbcrew_ts.usage_ledger (
     FOREIGN KEY (conversation_id, request_id, token) REFERENCES birbcrew_ts.native_launches (conversation_id, request_id, token),
     FOREIGN KEY (owner_id, member_id) REFERENCES birbcrew_ts.members (owner_id, member_id),
     CHECK ((state = 'reported') = (input_tokens IS NOT NULL AND output_tokens IS NOT NULL)),
-    CHECK (state = 'reported' OR (cached_input_tokens IS NULL AND cache_write_tokens IS NULL
-        AND reasoning_tokens IS NULL AND cost_usd IS NULL))
+    CHECK (state = 'reported' OR (input_tokens IS NULL AND output_tokens IS NULL AND cached_input_tokens IS NULL
+        AND cache_write_tokens IS NULL AND reasoning_tokens IS NULL AND cost_usd IS NULL))
 );
--- The budget check sums one member's current window; the record list pages an owner's rows.
+-- The budget check sums one member's current window; the record list pages an owner's rows;
+-- the summary reads a time range and the conversation list groups by conversation.
 CREATE INDEX usage_ledger_member_window ON birbcrew_ts.usage_ledger (member_id, recorded_at);
 CREATE INDEX usage_ledger_owner_page ON birbcrew_ts.usage_ledger (owner_id, usage_id);
+CREATE INDEX usage_ledger_owner_time ON birbcrew_ts.usage_ledger (owner_id, recorded_at);
+CREATE INDEX usage_ledger_owner_conversation ON birbcrew_ts.usage_ledger (owner_id, conversation_id);
 
 CREATE FUNCTION birbcrew_ts.reject_usage_ledger_change() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -99,8 +102,13 @@ END;
 $$;
 CREATE TRIGGER usage_budgets_guard BEFORE UPDATE OR DELETE ON birbcrew_ts.usage_budgets
     FOR EACH ROW EXECUTE FUNCTION birbcrew_ts.guard_usage_budget();
+CREATE FUNCTION birbcrew_ts.reject_usage_budget_truncate() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'Usage budgets are cleared, never deleted' USING ERRCODE = '23514';
+END;
+$$;
 CREATE TRIGGER usage_budgets_kept BEFORE TRUNCATE ON birbcrew_ts.usage_budgets
-    FOR EACH STATEMENT EXECUTE FUNCTION birbcrew_ts.reject_usage_ledger_change();
+    FOR EACH STATEMENT EXECUTE FUNCTION birbcrew_ts.reject_usage_budget_truncate();
 
 -- 019 fenced only the tables that existed then; recovery capture refuses an unfenced table.
 CREATE TRIGGER recovery_write_barrier BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON birbcrew_ts.usage_ledger
@@ -109,20 +117,24 @@ CREATE TRIGGER recovery_write_barrier BEFORE INSERT OR UPDATE OR DELETE OR TRUNC
     FOR EACH STATEMENT EXECUTE FUNCTION birbcrew_ts.require_active_installation();
 
 -- A routine firing refused by its member's budget fails with its own reason, which counts toward
--- the consecutive-failure switch-off like any failure. 025 left this CHECK unnamed; it keeps the
--- name PostgreSQL gave it so a later migration can find it the same way.
+-- the consecutive-failure switch-off like any failure. 025 left this CHECK unnamed, so PostgreSQL
+-- named it routine_firings_check4; a sibling migration may already have renamed it
+-- routine_firings_reason_check, the name it gets here. Like the type CHECK below, it replaces the
+-- whole predicate: when stacking, copy in every reason the migrations before this one added.
 ALTER TABLE birbcrew_ts.routine_firings
-    DROP CONSTRAINT routine_firings_check4,
-    ADD CONSTRAINT routine_firings_check4 CHECK ((CASE status
+    DROP CONSTRAINT IF EXISTS routine_firings_check4,
+    DROP CONSTRAINT IF EXISTS routine_firings_reason_check,
+    ADD CONSTRAINT routine_firings_reason_check CHECK ((CASE status
         WHEN 'skipped' THEN reason IN ('missed', 'overlap', 'owner_unavailable')
         WHEN 'failed' THEN reason IN ('rejected', 'approval_required', 'turn_failed', 'turn_cancelled', 'turn_uncertain', 'usage_limit')
         WHEN 'admitted' THEN reason IS NULL OR reason = 'approval_required'
         WHEN 'waiting' THEN reason IS NULL OR reason = 'approval_required'
         ELSE reason IS NULL END) IS TRUE) NOT VALID;
 
--- 021's recipe. This constraint replaces 026's, so it repeats every type 026 lists. Keep it in
--- step with auditEvents in src/service/audit.ts. A budget change belongs to a member only; a
--- refusal names the refused request, which has no admission row.
+-- 021's recipe. This constraint replaces 026's, so it repeats every type 026 lists; when stacking,
+-- copy in every type the migrations before this one added. Keep it in step with auditEvents in
+-- src/service/audit.ts. A budget change belongs to a member only; a refusal names the refused
+-- request, which has no admission row.
 ALTER TABLE birbcrew_ts.audit_events
     DROP CONSTRAINT audit_events_type_check,
     ADD CONSTRAINT audit_events_type_check CHECK (

@@ -6,7 +6,8 @@ import { z } from "zod";
 // outputTokens includes reasoningTokens. A field the SDK does not report is null, never 0.
 // costUsd is only a provider-billed cost; SDK and catalog estimates are never kept.
 const count = z.int().min(0).max(2_147_483_647);
-const model = z.string().min(1).max(256).refine(text => !/[\p{Cc}]/u.test(text)).nullable();
+// 256 UTF-8 bytes, as the ledger's CHECK counts them.
+const model = z.string().min(1).refine(text => Buffer.byteLength(text) <= 256 && !/[\p{Cc}]/u.test(text)).nullable();
 export const segmentUsage = z.discriminatedUnion("state", [
   z.strictObject({
     state: z.literal("reported"), model,
@@ -118,10 +119,11 @@ export function codexUsage(total: unknown, prior: Record<string, unknown> | null
   const now = codexTotal.safeParse(total);
   if (!now.success || prior === undefined) return unknown();
   const share = (field: typeof codexFields[number]) => {
-    if (now.data[field] === undefined) return null;
     const after = tokens(now.data[field]), before = tokens(prior?.[field] ?? 0);
-    return after === undefined || before === undefined ? Number.NaN : after - before;
+    return after === undefined || before === undefined || after < before ? undefined : after - before;
   };
-  return reported(null, { input: share("input_tokens") ?? undefined, output: share("output_tokens") ?? undefined,
-    cached: share("cached_input_tokens"), cacheWrite: share("cache_write_input_tokens"), reasoning: share("reasoning_output_tokens") });
+  // A part of the input or output that cannot be read is left out; the counts themselves must be sound.
+  return reported(null, { input: share("input_tokens"), output: share("output_tokens"),
+    cached: share("cached_input_tokens") ?? null, cacheWrite: share("cache_write_input_tokens") ?? null,
+    reasoning: share("reasoning_output_tokens") ?? null });
 }
