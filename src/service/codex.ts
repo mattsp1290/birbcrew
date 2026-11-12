@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { Codex, type McpToolCallItem } from "@openai/codex-sdk";
 import { z } from "zod";
 import { codexSubscriptionEndpoint } from "./accounts.ts";
+import { turnTextBytes } from "./domain.ts";
 
 const uuid = z.uuid();
 const hash = (data: Buffer | string) => createHash("sha256").update(data).digest("hex");
@@ -87,7 +88,7 @@ async function executeCodexTurn(input: CodexInput, profile: CodexProfile): Promi
   input.signal.throwIfAborted();
   const threadId = uuid.parse(input.threadId), requestId = uuid.parse(input.runId), memberId = uuid.parse(profile.memberId);
   const ownerDigest = hash(profile.ownerId);
-  if (!isAbsolute(profile.stateDir) || !profile.model || !input.text || Buffer.byteLength(input.text) > 16_384) throw new Error("Invalid Codex member input");
+  if (!isAbsolute(profile.stateDir) || !profile.model || !input.text || Buffer.byteLength(input.text) > turnTextBytes) throw new Error("Invalid Codex member input");
   const provider = profile.baseUrl ? loopback(profile.baseUrl) : undefined;
   const approved = profile.authorize !== undefined;
   const credentialCount = Number(profile.apiKey !== undefined) + Number(profile.subscription !== undefined);

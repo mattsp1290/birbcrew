@@ -44,6 +44,7 @@ const routes: [string, string][] = [
   ["GET", `/v1/conversations/${conversation}/requests/${request}`], ["POST", `/v1/conversations/${conversation}/requests/${request}/cancel`],
   ["POST", `/v1/conversations/${conversation}/events`], ["POST", `/v1/conversations/${conversation}/human`],
   ["POST", `/v1/conversations/${conversation}/inputs`], ["POST", `/v1/conversations/${conversation}/cancel`],
+  ["POST", `/v1/conversations/${conversation}/handoffs`], ["GET", `/v1/conversations/${conversation}/handoff`],
   ["POST", "/members"], ["POST", "/conversations"], ["GET", `/conversations/${conversation}`],
   ["GET", `/conversations/${conversation}/requests/${request}`], ["POST", `/conversations/${conversation}/inputs`],
   ["POST", `/conversations/${conversation}/human`], ["POST", `/conversations/${conversation}/cancel`],

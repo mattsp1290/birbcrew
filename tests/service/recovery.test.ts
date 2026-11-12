@@ -16,6 +16,7 @@ import {RoutineApi,RoutineDispatcher} from '../../src/service/routines.ts';
 import {ApprovalStore} from '../../src/service/approvals.ts';
 import {revokeGrant} from '../../src/service/grants.ts';
 import {conversationContext,MemoryApi} from '../../src/service/memories.ts';
+import {HandoffApi} from '../../src/service/handoffs.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 const exec=promisify(execFile);
@@ -421,6 +422,38 @@ test('capture accepts the memory tables, and a held installation refuses every m
  assert.deepEqual(await api.get('owner',kept.memoryId),kept,'reads still work');
  await t.recovery.resume(t.hooks);
  assert.equal((await api.delete('owner',kept.memoryId)).state,'deleted');
+});
+
+test('capture accepts the handoff table, and a held installation refuses every handoff write',async context=>{
+ const t=await setup(context);
+ const {memberId}=await spawn(t.store);
+ const members={async open(input:Parameters<MemberStore['openConversation']>[0]){return t.store.openConversation(input);},
+  async accept(input:TurnRequest){await t.store.recordAcceptance(input,ownerInitiator);return {requestId:input.requestId};}} as unknown as MemberClient;
+ const api=new HandoffApi(t.store,members);
+ async function committed() {
+  const conversationId=randomUUID(),requestId=randomUUID(),text='remember '+requestId;
+  await t.store.openConversation({ownerId:'owner',memberId,conversationId});
+  await t.store.recordAcceptance({ownerId:'owner',conversationId,requestId,text},ownerInitiator);
+  const start=await t.store.beginTurn({ownerId:'owner',conversationId,requestId,text});
+  assert.equal(start.kind,'start');if(start.kind!=='start') throw new Error('unreachable');
+  await t.store.commitTurn({ownerId:'owner',conversationId,requestId,token:start.token,reply:'stored',checkpoint:{version:1,engine:'pi',state:{}}});
+  return conversationId;
+ }
+ const [handed,held]=[await committed(),await committed()];
+ const kept=await api.create('owner',handed,{requestId:randomUUID(),memberId});
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);
+ assert.equal(manifest.inventory.conversation_handoffs,1);
+ for(const write of [()=>api.create('owner',held,{requestId:randomUUID(),memberId}),
+  ()=>t.pool.query(`INSERT INTO birbcrew_ts.conversation_handoffs (owner_id,request_id,source_conversation_id,source_member_id,
+    target_conversation_id,target_member_id,transcript,transcript_digest,carried_turns,omitted_turns,uncertain_turns)
+    SELECT owner_id,$1,$2,source_member_id,target_conversation_id,target_member_id,transcript,transcript_digest,1,0,0
+    FROM birbcrew_ts.conversation_handoffs`,[randomUUID(),held])]) {
+  await assert.rejects(write(),{code:'55000'});
+ }
+ assert.equal((await api.read('owner',handed)).outgoing?.handoffId,kept.handoffId,'reads still work');
+ await t.recovery.resume(t.hooks);
+ assert.equal((await api.create('owner',held,{requestId:randomUUID(),memberId})).carriedTurns,1);
 });
 
 test('a restored installation suspends every active memory as it resumes; a held source keeps its own',async context=>{

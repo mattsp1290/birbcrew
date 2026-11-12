@@ -127,3 +127,11 @@ writes memory; the model cannot. Deleting a fact erases its text, but Codex, and
 Claude where its SDK records the prompt, keep the context a conversation's first turn
 saw, and native session files and Pi checkpoints keep copies. Memory reaches every
 later conversation of the member, so whoever holds the owner's token can steer them all.
+
+An owner can [hand a conversation off](docs/handoffs.md) to another of their members,
+often of another engine, through `/v1/conversations/{conversationId}/handoffs`. The source
+is sealed and stays readable. A fresh target conversation's first request carries a
+verbatim transcript of the source's newest committed turns, up to 64 KiB, as a user
+message quoted as data; tool calls, approvals and native state do not cross. The owner
+continues in the target. Model replies from the source reach the target at user rank, so
+hand off only conversations whose replies you would paste into a prompt yourself.

@@ -5,6 +5,7 @@ import { approvalDeadline, initiatorColumns, initiatorFromColumns, initiatorKind
   turnKey, type Engine, type RequestInitiator } from "./domain.ts";
 import { standingChoice } from "./deferral.ts";
 import { grantListLimit } from "./grants.ts";
+import { handoffCapabilities } from "./handoffs.ts";
 import { conversationTurnLimit, workflowGenerationTurnLimit } from "./limits.ts";
 import { memoryCapabilities } from "./memories.ts";
 import { routineCapabilities } from "./routines.ts";
@@ -36,6 +37,7 @@ export const integrationCapabilities = {
     revocation: "later-proposals-only",
   },
   memories: memoryCapabilities,
+  handoffs: handoffCapabilities,
   approvalExpiry: {
     version: 1, field: "approvalDeadlineSeconds", routes: ["/v1/conversations/{conversationId}/requests", "/v1/routines"],
     minimumSeconds: approvalDeadline.minimumSeconds, maximumSeconds: approvalDeadline.maximumSeconds,

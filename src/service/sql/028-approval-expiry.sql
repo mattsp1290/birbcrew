@@ -97,7 +97,7 @@ ALTER TABLE birbcrew_ts.routine_firings
         WHEN 'waiting' THEN reason IS NULL OR reason = 'approval_required'
         ELSE reason IS NULL END) IS TRUE) NOT VALID;
 
--- 021's recipe. This constraint replaces 026's, so it repeats every type 026 lists. Keep it in
+-- 021's recipe. This constraint replaces 027's, so it repeats every type 027 lists. Keep it in
 -- step with auditEvents in src/service/audit.ts.
 ALTER TABLE birbcrew_ts.audit_events
     DROP CONSTRAINT audit_events_type_check,
@@ -126,6 +126,8 @@ ALTER TABLE birbcrew_ts.audit_events
         OR (event_type IN ('memory.created', 'memory.deleted', 'memory.suspended')
             AND conversation_id IS NULL AND request_id IS NULL
             AND (jsonb_typeof(payload->'memoryId') = 'string') IS TRUE)
+        OR (event_type = 'conversation.handed_off' AND conversation_id IS NOT NULL AND request_id IS NULL
+            AND (jsonb_typeof(payload->'handoffId') = 'string') IS TRUE)
         OR (event_type = 'approval.expired' AND request_id IS NOT NULL
             AND (jsonb_typeof(payload->'approvalId') = 'string') IS TRUE)) NOT VALID;
 

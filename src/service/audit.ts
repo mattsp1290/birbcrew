@@ -19,7 +19,7 @@ const memoryFact = "((payload->>'memoryId'), event_type) WHERE event_type IN ('m
 
 type Actor = "owner" | "system";
 /** The closed audit vocabulary. 021-audit.sql repeats these types in a CHECK, widened by
- * 024-standing-grants.sql, 025-routines.sql, 026-memories.sql and 028-approval-expiry.sql. Payloads are strict: identifiers, digests, choices and statuses only,
+ * 024-standing-grants.sql, 025-routines.sql, 026-memories.sql, 027-handoffs.sql and 028-approval-expiry.sql. Payloads are strict: identifiers, digests, choices and statuses only,
  * never prompt/reply text, tool arguments or secrets. An actor given as a function is
  * decided by the validated payload. A routine acts with its owner's authority, so rows its
  * firings cause name the owner; Crew's own decisions about a routine name the system. */
@@ -80,6 +80,13 @@ export const auditEvents = {
   // Crew suspends every active entry when a restored installation resumes.
   "memory.suspended": { actor: "system", key: memoryFact,
     payload: z.strictObject({ memoryId: uuid, reason: z.literal("recovery_restore") }) },
+  // On the source conversation. The digest is of the server-written transcript; never its text.
+  "conversation.handed_off": { actor: "owner", key: "((payload->>'handoffId')) WHERE event_type = 'conversation.handed_off'",
+    payload: z.strictObject({
+      handoffId: uuid, targetConversationId: uuid, targetMemberId: uuid, firstRequestId: uuid,
+      carriedTurns: z.int().min(1).max(128), omittedTurns: z.int().min(0).max(127), uncertainTurns: z.int().min(0).max(128),
+      transcriptDigest: sha256,
+    }) },
 } as const;
 export type AuditEventType = keyof typeof auditEvents;
 export const auditEventTypes = Object.keys(auditEvents) as AuditEventType[];

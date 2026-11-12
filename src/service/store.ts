@@ -10,13 +10,15 @@ import { savedProposal, type Approval } from "./approvals.ts";
 import { appendAudit } from "./audit.ts";
 import { firingConversation, firingInitiator } from "./routines.ts";
 import { snapshotMemories } from "./memories.ts";
+import { handoffAdmission } from "./handoffs.ts";
+import { ApplicationFailure } from "@temporalio/client";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Pool, PoolClient } from "pg";
 import type { z } from "zod";
 import {
   checkpointSchema, claimSchema, commitSchema, conversationKey, executionSchema, initiatorColumns, initiatorFromColumns,
-  MemberStoreError, openSchema, ownerInitiator, requestInitiator, spawnSchema, submitSchema,
+  MemberStoreError, openSchema, ownerInitiator, requestInitiator, spawnSchema, submitSchema, turnRequestSchema,
   type BeginTurn, type Conversation, type Member, type RequestInitiator, type TurnRequest,
 } from "./domain.ts";
 
@@ -74,12 +76,25 @@ export async function admittedInitiator(
 
 /** The member workflow's recordAcceptance activity. Only MemberClient issues that workflow's
  * acceptTurn and submitTurn updates, for the owner-authenticated gateway, the operator CLI
- * acting as the owner and the gateway's routine dispatcher, so the caller attests the owner.
- * recordAcceptance records a routine instead only when a routine firing row names the
- * request. The initiator is not a workflow or update argument, so recorded histories replay
- * unchanged. */
+ * acting as the owner, the gateway's routine dispatcher and its handoff route, so the caller
+ * attests the owner. recordAcceptance records a routine instead only when a routine firing row
+ * names the request, and a handoff only for the request a handoff row reserved. The initiator
+ * is not a workflow or update argument, so recorded histories replay unchanged.
+ * A seal lifts only through a recovery restore, so retrying it only delays the failure the workflow reaches anyway; and a
+ * request that reached admission ahead of its target's reserved one must not slip in once that
+ * one is admitted. Either refusal fails at once. The workflow does not inspect why an activity
+ * failed, and a failure is history data, not a command, so replay is unaffected. */
 export function ownerAdmissionActivity(store: MemberStore) {
-  return (request: TurnRequest): Promise<void> => store.recordAcceptance(request, ownerInitiator);
+  return async (request: TurnRequest): Promise<void> => {
+    try {
+      await store.recordAcceptance(request, ownerInitiator);
+    } catch (error) {
+      if (error instanceof MemberStoreError && (error.code === "handed_off" || error.code === "handoff_pending")) {
+        throw ApplicationFailure.nonRetryable(error.code);
+      }
+      throw error;
+    }
+  };
 }
 
 export class MemberStore {
@@ -109,7 +124,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [22, "022-conversation-owner-index.sql"], [23, "023-request-initiator.sql"], [24, "024-standing-grants.sql"], [25, "025-routines.sql"], [26, "026-memories.sql"], [28, "028-approval-expiry.sql"]] as const;
+      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [22, "022-conversation-owner-index.sql"], [23, "023-request-initiator.sql"], [24, "024-standing-grants.sql"], [25, "025-routines.sql"], [26, "026-memories.sql"], [27, "027-handoffs.sql"], [28, "028-approval-expiry.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -139,36 +154,41 @@ export class MemberStore {
     });
   }
 
-  async openConversation(input: z.input<typeof openSchema>): Promise<Conversation> {
+  openConversation(input: z.input<typeof openSchema>): Promise<Conversation> {
     const key = openSchema.parse(input);
-    return this.transaction(async (db) => {
-      const inserted = await db.query(
-        `INSERT INTO birbcrew_ts.conversations (owner_id, member_id, conversation_id)
-         SELECT owner_id, member_id, $3 FROM birbcrew_ts.members WHERE owner_id = $1 AND member_id = $2
-         ON CONFLICT (conversation_id) DO NOTHING`,
-        [key.ownerId, key.memberId, key.conversationId],
-      );
-      const conversation = await conversationFor(db, key, false);
-      if (conversation.memberId !== key.memberId) throw new MemberStoreError("conflict");
-      if (inserted.rowCount) {
-        const capture = await captureProjectNotes(key.ownerId);
-        if (capture) await db.query("INSERT INTO birbcrew_ts.conversation_notes (conversation_id,capture) VALUES ($1,$2)",
-          [key.conversationId, JSON.stringify(capture)]);
-        await snapshotMemories(db, conversation);
-        const routineId = await firingConversation(db, key);
-        await appendAudit(db, { type: "conversation.opened", ownerId: key.ownerId, memberId: key.memberId,
-          conversationId: key.conversationId, payload: routineId ? { routineId } : {} });
-      }
-      return conversation;
-    });
+    return this.transaction(db => this.openWithin(db, key));
+  }
+
+  /** openConversation inside the caller's transaction, which a handoff uses to open its target
+   * with the same notes capture, memory snapshot and audit row. */
+  async openWithin(db: PoolClient, input: z.input<typeof openSchema>): Promise<Conversation> {
+    const key = openSchema.parse(input);
+    const inserted = await db.query(
+      `INSERT INTO birbcrew_ts.conversations (owner_id, member_id, conversation_id)
+       SELECT owner_id, member_id, $3 FROM birbcrew_ts.members WHERE owner_id = $1 AND member_id = $2
+       ON CONFLICT (conversation_id) DO NOTHING`,
+      [key.ownerId, key.memberId, key.conversationId],
+    );
+    const conversation = await conversationFor(db, key, false);
+    if (conversation.memberId !== key.memberId) throw new MemberStoreError("conflict");
+    if (inserted.rowCount) {
+      const capture = await captureProjectNotes(key.ownerId);
+      if (capture) await db.query("INSERT INTO birbcrew_ts.conversation_notes (conversation_id,capture) VALUES ($1,$2)",
+        [key.conversationId, JSON.stringify(capture)]);
+      await snapshotMemories(db, conversation);
+      const routineId = await firingConversation(db, key);
+      await appendAudit(db, { type: "conversation.opened", ownerId: key.ownerId, memberId: key.memberId,
+        conversationId: key.conversationId, payload: routineId ? { routineId } : {} });
+    }
+    return conversation;
   }
 
   getConversation(key: ConversationKey): Promise<Conversation> {
     return conversationFor(this.pool, conversationKey.parse(key), false);
   }
 
-  async requestAdmission(input: z.input<typeof submitSchema>): Promise<{phase:"accepted"|"rejected";reason:string|null}|undefined> {
-    const key=submitSchema.parse(input);
+  async requestAdmission(input: z.input<typeof turnRequestSchema>): Promise<{phase:"accepted"|"rejected";reason:string|null}|undefined> {
+    const key=turnRequestSchema.parse(input);
     const {rows:[row]}=await this.pool.query<{phase:"accepted"|"rejected";reason:string|null;prompt_digest:Buffer;approval_deadline_seconds:number|null}>(`
       SELECT a.phase,a.reason,a.prompt_digest,a.approval_deadline_seconds FROM birbcrew_ts.request_admissions a
       JOIN birbcrew_ts.conversations c USING(conversation_id)
@@ -178,10 +198,25 @@ export class MemberStore {
     return {phase:row.phase,reason:row.reason};
   }
 
+  /** recordAcceptance's refusals of a new request, checked before MemberClient sends any workflow
+   * update: the same refusal inside the workflow's admission activity fails the whole conversation.
+   * recordAcceptance repeats them under the conversation's lock. */
+  async checkAdmission(input: z.input<typeof turnRequestSchema>): Promise<void> {
+    const key = turnRequestSchema.parse(input);
+    await conversationFor(this.pool, key, false);
+    if (await this.requestAdmission(key) !== undefined) return;
+    const turn = await this.pool.query("SELECT 1 FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",
+      [key.conversationId, key.requestId]);
+    if (turn.rowCount) return;
+    if ((await handoffAdmission(this.pool, key))?.kind !== "handoff") submitSchema.parse(key);
+  }
+
   /** A replay of an admitted request keeps the initiator its first admission recorded. A routine
-   * is recorded only from its firing row, read in this transaction; a caller cannot name one. */
-  async recordAcceptance(input: z.input<typeof submitSchema>, initiator: RequestInitiator): Promise<void> {
-    const key=submitSchema.parse(input);
+   * is recorded only from its firing row, and a handoff only from its own row for the request it
+   * reserved, both read in this transaction; a caller cannot name either. Only that reserved
+   * request may carry more than promptBytes. */
+  async recordAcceptance(input: z.input<typeof turnRequestSchema>, initiator: RequestInitiator): Promise<void> {
+    const key=turnRequestSchema.parse(input);
     const attested=requestInitiator.parse(initiator);
     if(attested.kind!=="owner")throw new MemberStoreError("conflict");
     const digest=createHash("sha256").update(key.text).digest();
@@ -205,7 +240,10 @@ export class MemberStore {
           FROM birbcrew_ts.conversations WHERE conversation_id=$1`,[key.conversationId]);
         if(budget.used>=budget.limit)throw new MemberStoreError("input_limit");
       }
-      const [initiatorKind,initiatorId]=initiatorColumns(await firingInitiator(db,key,conversation)??attested);
+      const handoff=existingTurn?null:await handoffAdmission(db,key);
+      const recorded=handoff??await firingInitiator(db,key,conversation)??attested;
+      if(recorded.kind!=="handoff")submitSchema.parse(key);
+      const [initiatorKind,initiatorId]=initiatorColumns(recorded);
       await db.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest,initiator_kind,initiator_id,approval_deadline_seconds)
         VALUES($1,$2,$3,$4,$5,$6)`,[key.conversationId,key.requestId,digest,initiatorKind,initiatorId,key.approvalDeadlineSeconds??null]);
       await appendAudit(db,{type:"request.accepted",ownerId:key.ownerId,memberId:conversation.memberId,
@@ -213,8 +251,8 @@ export class MemberStore {
     });
   }
 
-  async rejectAccepted(input: z.input<typeof submitSchema>, reason:"predecessor_failed"|"predecessor_cancelled"): Promise<void> {
-    const key=submitSchema.parse(input);
+  async rejectAccepted(input: z.input<typeof turnRequestSchema>, reason:"predecessor_failed"|"predecessor_cancelled"): Promise<void> {
+    const key=turnRequestSchema.parse(input);
     if(reason!=="predecessor_failed"&&reason!=="predecessor_cancelled")throw new MemberStoreError("conflict");
     await this.transaction(async db=>{
       const conversation=await conversationFor(db,key,true);
@@ -231,8 +269,8 @@ export class MemberStore {
 
   // Caller must have either an admission activity failure (with original text)
   // or a confirmed terminal logical workflow. Never infer this from a timeout.
-  async rejectUnstartedAdmission(input: z.input<typeof submitSchema> | {ownerId:string;conversationId:string;requestId:string}): Promise<void> {
-    const parsed=submitSchema.safeParse(input);
+  async rejectUnstartedAdmission(input: z.input<typeof turnRequestSchema> | {ownerId:string;conversationId:string;requestId:string}): Promise<void> {
+    const parsed=turnRequestSchema.safeParse(input);
     const key=parsed.success?parsed.data:claimSchema.omit({token:true}).parse(input);
     const digest=parsed.success?createHash("sha256").update(parsed.data.text).digest():null;
     await this.transaction(async db=>{
@@ -281,8 +319,8 @@ export class MemberStore {
     return turn?.run ?? undefined;
   }
 
-  async committedReply(input: z.input<typeof submitSchema>): Promise<string | undefined> {
-    const key = submitSchema.parse(input);
+  async committedReply(input: z.input<typeof turnRequestSchema>): Promise<string | undefined> {
+    const key = turnRequestSchema.parse(input);
     if((await this.requestAdmission(key))?.phase === "rejected")throw new MemberStoreError("request_rejected");
     const { rows: [turn] } = await this.pool.query<Pick<TurnRow, "prompt_digest" | "phase" | "reply">>(
       `SELECT t.prompt_digest, t.phase, t.reply
@@ -318,8 +356,8 @@ export class MemberStore {
     });
   }
 
-  async reconcileTurn(input: z.input<typeof submitSchema>, workflowRunId: string, resuming: boolean, allowRecovery = true) {
-    const key = submitSchema.parse(input);
+  async reconcileTurn(input: z.input<typeof turnRequestSchema>, workflowRunId: string, resuming: boolean, allowRecovery = true) {
+    const key = turnRequestSchema.parse(input);
     const digest = createHash("sha256").update(key.text).digest();
     await requestNativeStop(this.pool, key, { workflowRunId });
     return this.transaction(async (db) => {
@@ -374,7 +412,7 @@ export class MemberStore {
   }
 
   async stoppedProposal(input: TurnRequest, workflowRunId: string) {
-    const key = submitSchema.parse(input);
+    const key = turnRequestSchema.parse(input);
     return this.transaction(async (db) => {
       const conversation = await conversationFor(db, key, true);
       if (conversation.engine !== "claude") return null;
@@ -398,8 +436,8 @@ export class MemberStore {
     });
   }
 
-  async beginTurn(input: z.input<typeof submitSchema>, identity?: Execution): Promise<BeginTurn> {
-    const key = submitSchema.parse(input);
+  async beginTurn(input: z.input<typeof turnRequestSchema>, identity?: Execution): Promise<BeginTurn> {
+    const key = turnRequestSchema.parse(input);
     const execution = executionSchema.optional().parse(identity);
     const digest = createHash("sha256").update(key.text, "utf8").digest();
     if (execution && execution.attempt > 1) await requestNativeStop(this.pool, key, {
@@ -461,7 +499,7 @@ export class MemberStore {
   }
 
   async beginResume(request: TurnRequest, approval: Approval | null, execution: Execution) {
-    const key = submitSchema.parse(request);
+    const key = turnRequestSchema.parse(request);
     if (execution && execution.attempt > 1) await requestNativeStop(this.pool, key, {
       workflowRunId: execution.workflowRunId,
       activityId: execution.activityId, beforeAttempt: execution.attempt
