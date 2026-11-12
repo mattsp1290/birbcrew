@@ -2,7 +2,7 @@
  * AG-UI argument. It owns pools, external fencing, teardown and DB backup tools. */
 import {pathToFileURL} from 'node:url';
 import {resolve} from 'node:path';
-import {InstallationRecovery,readRecoveryManifest,type RecoveryHooks,type RecoveryPins} from './recovery.ts';
+import {InstallationRecovery,readRecoveryManifest,RecoveryRefusedError,type RecoveryHooks,type RecoveryPins} from './recovery.ts';
 export interface RecoveryOperator {
  recovery:InstallationRecovery; pins:RecoveryPins; hooks:RecoveryHooks; close():Promise<void>;
 }
@@ -29,7 +29,8 @@ try {
  }
  }
  console.log(JSON.stringify(receipt));
-} catch {
+} catch(error) {
  // Never dump pg connection strings, provider errors, module paths or hook output.
- console.error(JSON.stringify({status:'failed',message:'Recovery operation failed; keep the installation held and inspect private operator diagnostics.'}));process.exitCode=1;
+ const message=error instanceof RecoveryRefusedError?error.message:'Recovery operation failed; keep the installation held and inspect private operator diagnostics.';
+ console.error(JSON.stringify({status:'failed',message}));process.exitCode=1;
 } finally {try{await operator?.close();}catch{process.exitCode=1;}}

@@ -3,7 +3,8 @@ import { join, isAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
-const identity = z.strictObject({ installation: z.uuid(), instance: z.uuid(), generation: z.uuid().nullable(), phase: z.enum(['active','preparing','held','restored']) });
+// Fence state from before epochs existed starts at 0: no audit ID depended on its earlier transfers.
+const identity = z.strictObject({ installation: z.uuid(), instance: z.uuid(), generation: z.uuid().nullable(), phase: z.enum(['active','preparing','held','restored']), epoch: z.number().int().nonnegative().default(0) });
 export type FenceIdentity = z.infer<typeof identity>;
 /** Implement this interface using a linearizable authority shared by both hosts.
  * Never put its state in a recovery bundle or restore it from a snapshot. */
@@ -12,7 +13,10 @@ export interface RecoveryFence {
   hold(installation: string, instance: string, generation: string): Promise<void>;
   seal(installation: string, instance: string, generation: string): Promise<void>;
   verify(installation: string, instance: string, generation: string): Promise<void>;
-  transfer(installation: string, source: string, target: string, generation: string): Promise<void>;
+  /** Returns the authority epoch. A transfer to a new instance increments it, a retried
+   * transfer to the same target returns it unchanged, and nothing ever lowers it: restored
+   * audit identities are ordered by it (recovery.ts advanceAuditIdentity). */
+  transfer(installation: string, source: string, target: string, generation: string): Promise<number>;
   verifyActivation(installation: string, instance: string, generation: string): Promise<void>;
   activate(installation: string, instance: string, generation: string): Promise<void>;
 }
@@ -40,7 +44,7 @@ export class FileRecoveryFence implements RecoveryFence {
     } finally { await rm(temporary,{force:true}); await rm(lock,{recursive:true}); await syncDirectory(); }
   }
   async initialize(installation:string,instance:string) {
-    await this.change(old=>{if(old && (old.installation!==installation||old.instance!==instance)) throw new Error('Fence already belongs to another installation');return old??{installation,instance,generation:null,phase:'active'};});
+    await this.change(old=>{if(old && (old.installation!==installation||old.instance!==instance)) throw new Error('Fence already belongs to another installation');return old??{installation,instance,generation:null,phase:'active',epoch:0};});
   }
   async hold(installation:string,instance:string,generation:string) {
     await this.change(old=>{if(!old||old.installation!==installation||old.instance!==instance||(old.phase!=='active'&&old.generation!==generation)) throw new Error('Source is fenced'); return old.phase==='held'?old:{...old,generation,phase:'preparing'};});
@@ -52,7 +56,9 @@ export class FileRecoveryFence implements RecoveryFence {
     await this.change(old=>{if(!old||old.installation!==installation||old.instance!==instance||old.generation!==generation||old.phase==='active') throw new Error('Recovery fence mismatch');return old;});
   }
   async transfer(installation:string,source:string,target:string,generation:string) {
-    await this.change(old=>{if(!old||old.installation!==installation||old.generation!==generation||!(old.instance===source&&old.phase==='held'||old.instance===target&&old.phase==='restored')) throw new Error('Restore overlap or source not held');return {...old,instance:target,phase:'restored'};});
+    let epoch=0;
+    await this.change(old=>{if(!old||old.installation!==installation||old.generation!==generation||!(old.instance===source&&old.phase==='held'||old.instance===target&&old.phase==='restored')) throw new Error('Restore overlap or source not held');epoch=old.phase==='held'?old.epoch+1:old.epoch;return {...old,instance:target,phase:'restored',epoch};});
+    return epoch;
   }
   async verifyActivation(installation:string,instance:string,generation:string) {
     await this.change(old=>{if(!old||old.installation!==installation||old.instance!==instance||old.generation!==generation) throw new Error('Instance is fenced');return old;});

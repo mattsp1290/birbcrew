@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {after,test} from 'node:test';
 import {Pool} from 'pg';
 import {MemberStore} from '../../src/service/store.ts';
-import {InstallationRecovery,readRecoveryManifest,type RecoveryPins,type RecoveryHooks} from '../../src/service/recovery.ts';
+import {InstallationRecovery,readRecoveryManifest,RecoveryRefusedError,type RecoveryPins,type RecoveryHooks} from '../../src/service/recovery.ts';
 import {FileRecoveryFence} from '../../src/service/recovery-fence.ts';
 import {auditQuerySchema,readAudit} from '../../src/service/audit.ts';
 import {execFile} from 'node:child_process';
@@ -222,19 +222,24 @@ test('retained A backup restores to C after A→B, but only after current owner 
  }finally{await poolC?.end();await admin.query(`DROP DATABASE IF EXISTS ${nameC} WITH(FORCE)`);await t.cleanup();}
 });
 
-test('a restored audit trail never reissues an event ID, even when one generation is restored twice',async()=>{
+async function dumpToBundle(t:Awaited<ReturnType<typeof setup>>) {
+ const sourceUrl=new URL(url!);sourceUrl.pathname='/'+t.name;
+ return t.recovery.capture(t.bundle,pins,{...t.hooks,snapshot:async directory=>{
+  const artifacts=await t.hooks.snapshot(directory);
+  await writeFile(join(directory,'application-postgres.fixture'),await postgresTool('pg_dump',['--dbname',sourceUrl.toString(),'--format=custom','--no-owner']));
+  return artifacts;
+ }});
+}
+const lastId=async(pool:Pool)=>(await pool.query<{id:string}>('SELECT max(event_id)::text AS id FROM birbcrew_ts.audit_events')).rows[0].id;
+const spawn=(store:MemberStore)=>store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'});
+const epochOf=async(t:Awaited<ReturnType<typeof setup>>)=>JSON.parse(await readFile(join(t.directory,'external-fence','state.json'),'utf8')).epoch as number;
+
+test('a restored audit trail never reissues an event ID, even when one generation is restored twice, whatever the clocks',async()=>{
  const t=await setup();const databases:string[]=[];const pools:Pool[]=[];
  try {
-  const spawn=(store:MemberStore)=>store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'});
-  const lastId=async(pool:Pool)=>(await pool.query<{id:string}>('SELECT max(event_id)::text AS id FROM birbcrew_ts.audit_events')).rows[0].id;
   const page=async(pool:Pool,after:string)=>(await readAudit(pool,'owner',auditQuerySchema.parse({after}))).events.map(event=>event.eventId);
   await spawn(t.store);
-  const sourceUrl=new URL(url!);sourceUrl.pathname='/'+t.name;
-  await t.recovery.capture(t.bundle,pins,{...t.hooks,snapshot:async directory=>{
-   const artifacts=await t.hooks.snapshot(directory);
-   await writeFile(join(directory,'application-postgres.fixture'),await postgresTool('pg_dump',['--dbname',sourceUrl.toString(),'--format=custom','--no-owner']));
-   return artifacts;
-  }});
+  await dumpToBundle(t);
   const manifest=await readRecoveryManifest(t.bundle);const recoveryPoint=await lastId(t.pool);
   // The source runs on past the recovery point, and a consumer pages past what the restore keeps.
   await t.recovery.resume(t.hooks);await spawn(t.store);const seenOnSource=await lastId(t.pool);
@@ -251,22 +256,47 @@ test('a restored audit trail never reissues an event ID, even when one generatio
    return {pool,recovery,store:new MemberStore(pool),instance};
   }
   await t.recovery.holdForRestore(manifest.generation,t.hooks);
-  const b=await restore();
+  const b=await restore();const epochB=await epochOf(t);
+  await spawn(b.store);const firstOnB=await lastId(b.pool);
+  assert.deepEqual(await page(b.pool,seenOnSource),[firstOnB],'a saved cursor never skips a new event');
+  // B draws 2^44 IDs. With a clock-based jump, C's clock would now have to be ahead of B's
+  // by 2^44 µs (about 203 days) to pass them. The fence epoch reads no clock.
+  await b.pool.query(`SELECT setval(pg_get_serial_sequence('birbcrew_ts.audit_events','event_id'),$1::bigint)`,[(BigInt(firstOnB)+(1n<<44n)-2n).toString()]);
   await spawn(b.store);const onB=await lastId(b.pool);
-  assert.ok(BigInt(onB)>BigInt(seenOnSource),'a restored target never reissues an ID the source issued');
-  assert.deepEqual(await page(b.pool,seenOnSource),[onB],'a saved cursor never skips a new event');
-  // The retained bundle is restored again after B has run: C must pass B's IDs too.
+  // The retained bundle is restored again after B has run: C must pass all of B's IDs.
   await b.recovery.holdForRestore(manifest.generation,t.hooks);
   const c=await restore(b.instance);
   await spawn(c.store);const onC=await lastId(c.pool);
   assert.ok(BigInt(onC)>BigInt(onB),'a second restore of one generation never reissues the first one\'s IDs');
   assert.deepEqual(await page(c.pool,onB),[onC]);
+  assert.deepEqual([epochB,await epochOf(t)],[1,2],'every transfer advances the epoch once; an acknowledgement retry does not');
+  assert.deepEqual([firstOnB,onB,onC],[1n<<44n,(2n<<44n)-1n,2n<<44n].map(String),'each timeline starts at its epoch times 2^44');
  } finally {
   for(const pool of pools) await pool.end();
   // Not FORCE: end() resolves before its connections close, and terminating one then is an unhandled pool error.
   for(const name of databases) await admin.query(`DROP DATABASE IF EXISTS ${name}`);
   await t.cleanup();
  }
+});
+
+test('a restore whose audit identity already reaches its fence epoch is refused and stays held',async()=>{
+ const t=await setup();const name='recovery_'+randomUUID().replaceAll('-','');let pool:Pool|undefined;
+ try {
+  // As if the fence had been replaced after a restored timeline ran: the source already drew epoch 1's first ID.
+  await t.pool.query(`SELECT setval(pg_get_serial_sequence('birbcrew_ts.audit_events','event_id'),$1::bigint,false)`,[(1n<<44n).toString()]);
+  await spawn(t.store);
+  await dumpToBundle(t);
+  await admin.query(`CREATE DATABASE ${name}`);const target=new URL(url!);target.pathname='/'+name;
+  await postgresTool('pg_restore',['--dbname',target.toString(),'--no-owner'],await readFile(join(t.bundle,'application-postgres.fixture')));
+  pool=new Pool({connectionString:target.toString()});const recovery=new InstallationRecovery(pool,t.fence);const instance=randomUUID();
+  const sequence=`SELECT pg_sequence_last_value(pg_get_serial_sequence('birbcrew_ts.audit_events','event_id')::regclass)::text AS id`;
+  const before=(await pool.query(sequence)).rows[0].id;
+  for(let attempt=0;attempt<2;attempt++) await assert.rejects(recovery.acceptRestore(t.bundle,pins,instance),
+   (error:unknown)=>error instanceof RecoveryRefusedError&&/drawn event ID 17592186044416, at or past 17592186044416, where fence epoch 1 must start/.test(error.message));
+  assert.equal((await recovery.status()).control.phase,'frozen','a refused restore never reaches restored, so resume cannot proceed');
+  assert.equal((await pool.query(sequence)).rows[0].id,before,'the identity is left where the dump put it');
+  await assert.rejects(recovery.resume(t.hooks,await readRecoveryManifest(t.bundle)),/fenced/);
+ } finally {await pool?.end();await admin.query(`DROP DATABASE IF EXISTS ${name}`);await t.cleanup();}
 });
 
 test('bundle directory fsync failure cannot record a successful or transferable backup',async()=>{

@@ -23,6 +23,13 @@ export const recoveryManifest=z.strictObject({
 export type RecoveryManifest=z.infer<typeof recoveryManifest>;
 export type RecoveryPins=Pick<RecoveryManifest,'applicationCommit'|'lockfileSha256'|'temporal'|'logicalNativeRoot'>;
 type Control={installation:string;instance:string;phase:'active'|'frozen'|'restored';generation:string|null};
+// A restored timeline's audit IDs are [epoch<<44, (epoch+1)<<44). Epochs below 2^19 keep the last one within 2^63-1.
+const auditEpochBits=44n;
+const auditEpochLimit=2**19;
+/** A refusal whose message is safe to show the operator: no connection strings, paths or provider output. */
+export class RecoveryRefusedError extends Error {
+ constructor(message:string) {super(message);this.name='RecoveryRefusedError';}
+}
 export type SnapshotArtifact={kind:RecoveryManifest['artifacts'][number]['kind'];file:string};
 /** Hooks are trusted operator code, not user/AG-UI input. They must stop ALL
  * consumers/workers/native descendants and await teardown, and stop/fence the
@@ -164,23 +171,27 @@ export class InstallationRecovery {
   // preserve the manifest digest in the operator's independent backup catalog.
   const restoredInventory=await this.inventory();
   if(JSON.stringify(restoredInventory)!==JSON.stringify(manifest.inventory)) throw new Error("Restored inventory does not match generation");
-  await this.fence.transfer(c.installation,sourceInstance,targetInstance,manifest.generation);
-  await this.advanceAuditIdentity();
+  const epoch=await this.fence.transfer(c.installation,sourceInstance,targetInstance,manifest.generation);
+  await this.advanceAuditIdentity(epoch);
   await this.pool.query(`UPDATE birbcrew_ts.recovery_control SET instance_id=$1,phase='restored' WHERE singleton`,[targetInstance]);
   return {generation:manifest.generation,instance:targetInstance,phase:'restored' as const};
  }
- /** The dump resumes the audit identity at the recovery point, so it would reissue IDs
-  * a later timeline already gave consumers, who would then skip the new events. A fixed
-  * jump from the restored maximum is not enough: a second restore of this generation,
-  * after the first one ran, would jump to the same place. Jump to the restore time in
-  * microseconds instead. Each earlier timeline began at an earlier restore time (or at 1)
-  * and drew fewer IDs than microseconds have passed since, so this passes all of them,
-  * given database clocks that agree to within a restore's duration. setval is not a
-  * table write, so the held installation allows it; a retry only moves further forward. */
- private async advanceAuditIdentity() {
-  await this.pool.query(`SELECT setval(seq,greatest(coalesce(pg_sequence_last_value(seq),0),
-    (SELECT coalesce(max(event_id),0) FROM birbcrew_ts.audit_events),(extract(epoch FROM clock_timestamp())*1000000)::bigint))
-    FROM (SELECT pg_get_serial_sequence('birbcrew_ts.audit_events','event_id')::regclass AS seq) AS identity`);
+ /** The dump resumes the audit identity at the recovery point, so it would reissue IDs a
+  * later timeline already gave consumers, who would then skip the new events. Each restored
+  * timeline starts at its fence epoch times 2^44 instead. The fence is never restored and
+  * every transfer raises its epoch, so a later restore, even of the same generation, starts
+  * above every ID an earlier timeline drew, whatever the database clocks say. setval is not
+  * a table write, so the held installation allows it. is_called=false leaves no drawn ID,
+  * so a retry in the same epoch passes the check and sets the same value again. */
+ private async advanceAuditIdentity(epoch:number) {
+  if(!Number.isSafeInteger(epoch)||epoch<1) throw new RecoveryRefusedError('The recovery fence returned no transfer epoch. RecoveryFence.transfer must return it; see docs/coordinated-recovery.md. The installation stays held.');
+  if(epoch>=auditEpochLimit) throw new RecoveryRefusedError(`Recovery fence epoch ${epoch} is past the last audit identity epoch, ${auditEpochLimit-1}. The installation stays held.`);
+  const floor=(BigInt(epoch)<<auditEpochBits).toString();
+  const {rows:[identity]}=await this.pool.query<{restored:string;moved:string|null}>(`SELECT restored::text,
+    CASE WHEN restored<$1::bigint THEN setval(seq,$1::bigint,false) END::text AS moved
+    FROM (SELECT seq,greatest(coalesce(pg_sequence_last_value(seq),0),(SELECT coalesce(max(event_id),0) FROM birbcrew_ts.audit_events)) AS restored
+      FROM (SELECT pg_get_serial_sequence('birbcrew_ts.audit_events','event_id')::regclass AS seq) AS identity) AS restore`,[floor]);
+  if(identity.moved===null) throw new RecoveryRefusedError(`The restored audit identity has drawn event ID ${identity.restored}, at or past ${floor}, where fence epoch ${epoch} must start. The fence was reset or replaced, or a timeline drew 2^44 IDs, so new IDs could repeat ones consumers hold. The restore is refused and the installation stays held.`);
  }
  private async resumeImpl(hooks:Pick<RecoveryHooks,'reconcile'>,manifest:RecoveryManifest|null=null) {
   const {control:c}=await this.status();

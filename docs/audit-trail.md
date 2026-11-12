@@ -12,8 +12,8 @@ Each row in `birbcrew_ts.audit_events` records one fact:
 
 - `event_id`: a database identity that increases with every row. It is the only
   ordering and pagination key. IDs are shared by all owners and are not
-  contiguous. Gaps reflect other owners' events, rolled-back writes and suppressed
-  duplicates.
+  contiguous. Gaps reflect other owners' events, rolled-back writes, suppressed
+  duplicates and the jump at each restore (see below).
 - `owner_id`: the tenant whose state changed. A foreign key binds the member to
   that owner. When a conversation is present, a row trigger
   (`audit_events_conversation_binding`) looks it up as the row is inserted and
@@ -219,25 +219,49 @@ Restoring a generation rewinds the trail to that recovery point. Events committe
 after it on the previous timeline are gone from the trail, along with the state
 changes they recorded. The dump saves the identity's position, so on its own the
 restored identity would reissue IDs that the previous timeline had already handed
-out, and a consumer whose cursor had passed them would skip the new events.
+out, and a consumer whose cursor had passed them would skip the new events. A
+fixed jump from the restored maximum would not help when one generation is
+restored to two targets in turn: both would jump to the same place. A jump to the
+database clock would depend on every target's clock running ahead of every
+earlier one's.
+
 Accepting the restore (`npm run recovery -- accept-restore`) therefore moves the
-identity to the restore time in microseconds since 1970, or past the restored
-maximum if that is larger. New IDs are then larger than every ID an earlier timeline
-issued, including a target restored earlier from the same generation. A fixed jump
-from the restored maximum would not cover that case: both targets would jump to the
-same place. Across a restore, a consumer sees this:
+identity to `epoch × 2^44`. The epoch comes from the recovery fence, which is
+never restored: each transfer of authority to a new instance raises it by one, and
+a retried acceptance gets the same epoch and sets the same value again. Timeline
+`e` draws its IDs from `e × 2^44` up to `(e + 1) × 2^44 - 1`. The original
+timeline, before any restore, is epoch 0 and starts at 1. Every restored timeline
+therefore starts above every ID an earlier timeline drew, whichever target or
+generation it came from, whatever the database clocks say. This holds while:
+
+- the fence's state is never reset, replaced or rolled back;
+- no timeline draws 2^44 IDs (about 1.8 × 10^13);
+- the installation makes fewer than 2^19 (524,288) transfers, so the last range
+  ends at 2^63 - 1, the largest `bigint`.
+
+Acceptance refuses the restore when the restored identity has already drawn an
+ID at or past the new epoch's first ID, or when the epoch reaches 2^19. Either
+means a condition above was broken. The command fails with a message naming the ID
+and the epoch. Neither the source nor the target can resume then: the fence has
+moved to the target, whose database is still held. Find out how the fence lost its
+state before going further. A reset fence is caught only when its new epoch does
+not pass the restored identity, so never reset it.
+
+Across a restore, a consumer sees this:
 
 - Its saved `after` cursor stays valid and never skips a new event.
 - Events it holds with IDs above the restored maximum no longer exist, and no page
   returns them. Once the operator reports a restore, a consumer that keeps copies
   should re-read from an earlier cursor and drop the copies the trail no longer
   returns.
-- IDs jump, typically to sixteen digits. Keep treating them as strings.
+- IDs jump to a multiple of 2^44 (17592186044416). They have 14 digits after the
+  first restore and at most 19. From the 512th restore on they are at least 2^53,
+  more than a JavaScript number or a double holds exactly. Keep them as strings,
+  and compare them as 64-bit integers: as strings, IDs of different lengths sort
+  wrongly.
 
-The response carries no recovery epoch, because recovery state is never exposed
-through the gateway. The jump assumes that the database servers' clocks agree to
-within the time a restore takes, and that the trail draws fewer than one ID per
-microsecond. A retried acceptance only moves the identity further forward.
+The response does not carry the epoch, because recovery state is never exposed
+through the gateway.
 
 ## Not covered
 
@@ -325,9 +349,13 @@ pending intents.
 `trusted-context.test.ts` checks the single `trusted_effect.completed` row for a
 replayed effect. The recovery suite restores a real `pg_dump` archive and compares the audit rows.
 It confirms the restored copy stays append-only and readable while held. Another
-test lets the source run past the recovery point, restores the generation, runs
-the target, then restores the same generation again. Each target's new IDs pass
-every ID issued before it, and a saved cursor returns the new event.
+test lets the source run past the recovery point, restores the generation, lets
+the target draw its whole range of 2^44 IDs, then restores the same generation
+again. The second target's IDs pass all of the first one's, which a clock-based
+jump would allow only if that target's clock were about 203 days ahead. A saved
+cursor returns each new event, every transfer raises the epoch by one, a retried
+acceptance does not, and each target starts at its epoch times 2^44. A third test
+refuses a restore whose identity already reaches its epoch and leaves it held.
 
 Not claimed: these suites call the store, approval and child-store functions the
 way Temporal activities do. They do not run a Temporal worker or native SDK. The
