@@ -15,6 +15,7 @@ import { decisionSchema } from "./approvals.ts";
 import { AuditUnsettledError, auditCsv, auditParameterNames, auditQuerySchema, readAudit } from "./audit.ts";
 import { MemberClient } from "./client.ts";
 import { listGrants, revokeGrant } from "./grants.ts";
+import { MemoryApi, memoryListParameterNames } from "./memories.ts";
 import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from "./domain.ts";
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
 import { MemberStore } from "./store.ts";
@@ -32,7 +33,11 @@ class HttpError extends Error {
   constructor(status: number, reason: string) { super(reason); this.status = status; }
 }
 
-async function body(request: IncomingMessage): Promise<unknown> {
+// Refuses malformed UTF-8 instead of replacing it with U+FFFD, and keeps a BOM for JSON.parse to refuse.
+const exactUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/** `exact` refuses a body that is not well-formed UTF-8; otherwise malformed bytes become U+FFFD. */
+async function body(request: IncomingMessage, exact = false): Promise<unknown> {
   const chunks: Buffer[] = [];
   let bytes = 0;
   for await (const chunk of request.iterator({ destroyOnReturn: false })) {
@@ -43,7 +48,8 @@ async function body(request: IncomingMessage): Promise<unknown> {
     }
     chunks.push(chunk);
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+  const raw = Buffer.concat(chunks);
+  try { return JSON.parse(exact ? exactUtf8.decode(raw) : raw.toString("utf8")); }
   catch { throw new HttpError(400, "invalid_json"); }
 }
 
@@ -134,6 +140,7 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
   const integration = new IntegrationApi(store, members);
   const accounts = Object.entries(credentials.parse(owners)).map(([hash, actor]) => ({ digest: Buffer.from(hash, "hex"), actor }));
   const routines = new RoutineApi(store, clock);
+  const memories = new MemoryApi(store);
   const dispatcher = new RoutineDispatcher({ store, members, integration, owners: accounts.map(({ actor }) => actor), clock });
   async function route(request: IncomingMessage, response: ServerResponse) {
     const auth = request.headers.authorization;
@@ -172,6 +179,23 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       }
       if (action === undefined && request.method === "GET") return json(response, 200, await routines.get(ownerId, routineId));
       if (action === undefined && request.method === "DELETE") return json(response, 200, await routines.change(ownerId, routineId, "delete"));
+      throw new HttpError(405, "method_not_allowed");
+    }
+    const memoryRoute = versioned && /^\/memories(?:\/([^/]+))?$/.exec(path);
+    if (memoryRoute) {
+      const [, id] = memoryRoute;
+      if (id === undefined) {
+        if (request.method === "POST") {
+          if (url.search) throw new HttpError(400, "invalid_input");
+          return json(response, 201, await memories.create(ownerId, await body(request, true)));
+        }
+        if (request.method === "GET") return json(response, 200, await memories.list(ownerId, queryOf(url, memoryListParameterNames)));
+        throw new HttpError(405, "method_not_allowed");
+      }
+      const memoryId = z.uuid().parse(id);
+      if (url.search) throw new HttpError(400, "invalid_input");
+      if (request.method === "GET") return json(response, 200, await memories.get(ownerId, memoryId));
+      if (request.method === "DELETE") return json(response, 200, await memories.delete(ownerId, memoryId));
       throw new HttpError(405, "method_not_allowed");
     }
     const grantRoute = versioned && /^\/members\/([^/]+)\/grants(?:\/([^/]+)\/(revoke))?$/.exec(path);

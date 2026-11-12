@@ -9,6 +9,7 @@ import { childrenFor } from "./children.ts";
 import { savedProposal, type Approval } from "./approvals.ts";
 import { appendAudit } from "./audit.ts";
 import { firingConversation, firingInitiator } from "./routines.ts";
+import { snapshotMemories } from "./memories.ts";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Pool, PoolClient } from "pg";
@@ -147,6 +148,7 @@ export class MemberStore {
         const capture = await captureProjectNotes(key.ownerId);
         if (capture) await db.query("INSERT INTO birbcrew_ts.conversation_notes (conversation_id,capture) VALUES ($1,$2)",
           [key.conversationId, JSON.stringify(capture)]);
+        await snapshotMemories(db, conversation);
         const routineId = await firingConversation(db, key);
         await appendAudit(db, { type: "conversation.opened", ownerId: key.ownerId, memberId: key.memberId,
           conversationId: key.conversationId, payload: routineId ? { routineId } : {} });
