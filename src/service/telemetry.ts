@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeSync } from "node:fs";
 import { ROOT_CONTEXT, SpanStatusCode, trace, type Context } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
@@ -16,24 +16,76 @@ type Scope = { engine: Engine; conversationId: string; requestId: string; workfl
 const active = new AsyncLocalStorage<{ traceId: string; context: Context }>();
 const uuid = z.uuid();
 const output = process.env.BIRBCREW_TRACE_FILE;
-const endpoint = otlpEndpoint(process.env.BIRBCREW_OTLP_TRACES_ENDPOINT);
+const endpoint = otlpEndpoint(process.env);
 
-// A typo must stop startup, not silently send spans elsewhere or drop them. The value is not echoed
-// because a rejected URL may contain credentials. Plain http is allowed only to 127.0.0.1, because collector
-// headers from the OTLP environment variables ride on every request. IPv6 literals are refused outright, unlike
-// in the proxy relay: the exporter passes the bracketed host to node:http, which cannot resolve it, so every
-// export would fail unnoticed.
+// A typo must stop startup, not silently send spans elsewhere or drop them. Errors name the variable and never
+// repeat its value, because a rejected URL may contain credentials. Plain http is allowed to 127.0.0.1, or to any
+// host when the operator also sets BIRBCREW_OTLP_TRACES_ALLOW_HTTP=true (an in-cluster agent). Collector headers
+// from the OTLP environment variables ride on every request, so that opt-in refuses them: nothing secret crosses
+// the network in the clear. IPv6 literals are refused outright, unlike in the proxy relay: the exporter passes the
+// bracketed host to node:http, which cannot resolve it, so every export would fail unnoticed.
 // The exporter sends only the path, so a query or fragment (often an ingest key) would be dropped silently.
-function otlpEndpoint(value: string | undefined) {
+function otlpEndpoint(env: NodeJS.ProcessEnv) {
+  const value = env.BIRBCREW_OTLP_TRACES_ENDPOINT;
   if (!value) return undefined;
+  const allowHttp = env.BIRBCREW_OTLP_TRACES_ALLOW_HTTP ?? "";
+  if (!/^(true|false|)$/i.test(allowHttp)) throw new Error("BIRBCREW_OTLP_TRACES_ALLOW_HTTP must be true or false");
   const url = URL.parse(value);
+  const plaintext = url?.protocol === "http:" && url.hostname !== "127.0.0.1";
   if (!url || url.username || url.password || url.search || url.hash || url.pathname === "/" ||
-      url.hostname.startsWith("[") ||
-      !(url.protocol === "https:" || (url.protocol === "http:" && url.hostname === "127.0.0.1"))) {
-    throw new Error("BIRBCREW_OTLP_TRACES_ENDPOINT must be an https OTLP traces URL with a path (plain http only "
-      + "to 127.0.0.1), such as http://127.0.0.1:4318/v1/traces, with no IPv6 literal, credentials, query or fragment");
+      url.hostname.startsWith("[") || !(url.protocol === "https:" || url.protocol === "http:") ||
+      (plaintext && allowHttp.toLowerCase() !== "true")) {
+    throw new Error("BIRBCREW_OTLP_TRACES_ENDPOINT must be an https OTLP traces URL with a path (plain http only to "
+      + "127.0.0.1, or to any host with BIRBCREW_OTLP_TRACES_ALLOW_HTTP=true), such as https://collector.example/v1/traces, "
+      + "with no IPv6 literal, credentials, query or fragment");
+  }
+  if (plaintext && (env.OTEL_EXPORTER_OTLP_HEADERS?.trim() || env.OTEL_EXPORTER_OTLP_TRACES_HEADERS?.trim())) {
+    throw new Error("BIRBCREW_OTLP_TRACES_ALLOW_HTTP sends spans without encryption, so OTEL_EXPORTER_OTLP_HEADERS and "
+      + "OTEL_EXPORTER_OTLP_TRACES_HEADERS must be unset");
   }
   return url.href;
+}
+
+// OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES as the OpenTelemetry specification defines them: comma-separated
+// key=value entries with W3C Baggage keys and percent-encoded values. The SDK's own detector skips or silently
+// discards malformed input and has no size bound. Here malformed input stops startup like a bad endpoint, so a
+// typo cannot quietly drop the deployment environment or version, and the error names only the variable and entry.
+const ows = (text: string) => text.replace(/^[ \t]+|[ \t]+$/g, "");
+const baggageKey = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,255}$/;
+const baggageValue = /^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/;
+// Control, invisible formatting, and line or paragraph separator characters.
+const unprintable = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+// Lengths count Unicode code points, not UTF-16 units.
+const usable = (value: string) => value.trim() !== "" && [...value].length <= 255 && !unprintable.test(value);
+function otlpResource(env: NodeJS.ProcessEnv) {
+  const text = env.OTEL_RESOURCE_ATTRIBUTES ?? "";
+  // Whitespace around the whole value, such as a newline from a YAML block, is ignored. Positions in errors count
+  // every comma-separated part, empty ones included.
+  const parts = text.length > 4_096 ? [] : text.trim().split(",").map(ows);
+  if (text.length > 4_096 || parts.filter(Boolean).length > 32) {
+    throw new Error("OTEL_RESOURCE_ATTRIBUTES must have at most 32 entries and 4096 characters");
+  }
+  const attributes = new Map<string, string>();
+  parts.forEach((entry, index) => {
+    if (!entry) return;
+    const split = entry.indexOf("="), key = ows(entry.slice(0, split)), encoded = ows(entry.slice(split + 1));
+    let value: string | undefined;
+    try { value = decodeURIComponent(encoded); } catch {}
+    // The SDK builds the resource in a plain object and skips keys it inherits, such as toString or __proto__.
+    if (split < 0 || !baggageKey.test(key) || key in Object.prototype || attributes.has(key) ||
+        !baggageValue.test(encoded) || value === undefined || !usable(value)) {
+      throw new Error(`OTEL_RESOURCE_ATTRIBUTES entry ${index + 1} is invalid: each entry must be key=value with a `
+        + "unique W3C Baggage key and a percent-encoded value that, once decoded, is not blank, has at most 255 "
+        + "characters and has no control characters");
+    }
+    attributes.set(key, value);
+  });
+  const service = (env.OTEL_SERVICE_NAME ?? "").trim();
+  if (service && !usable(service)) {
+    throw new Error("OTEL_SERVICE_NAME must be at most 255 characters with no control characters");
+  }
+  attributes.set("service.name", service || attributes.get("service.name") || "birbcrew");
+  return Object.fromEntries(attributes);
 }
 
 const exporter: SpanExporter = {
@@ -52,21 +104,46 @@ const exporter: SpanExporter = {
   async shutdown() {},
 };
 const exportTimeoutMs = 2_000;
+// The OTEL_* resource variables are read only when OTLP export is on, so they cannot stop any other process.
+const resource = endpoint ? otlpResource(process.env) : { "service.name": "birbcrew" };
 const processors: SpanProcessor[] = [];
 if (output) processors.push(new SimpleSpanProcessor(exporter));
 if (endpoint) {
   // Loaded only when configured: every native turn forks a runner that imports this module.
-  const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-http");
-  // Ending a span only enqueues it. A full queue drops spans, and failed exports are discarded.
-  processors.push(new BatchSpanProcessor(new OTLPTraceExporter({ url: endpoint, timeoutMillis: exportTimeoutMs }), {
+  const [{ OTLPTraceExporter }, { exportWarning }] = await Promise.all([
+    import("@opentelemetry/exporter-trace-otlp-http"), import("./telemetry-warning.ts")]);
+  const otlp = new OTLPTraceExporter({ url: endpoint, timeoutMillis: exportTimeoutMs });
+  // Synchronous, so a closed stderr fails here instead of emitting an unhandled EPIPE error event, and a throw
+  // cannot reach the exporter's promise chain as an unhandled rejection.
+  const warn = exportWarning((line) => { try { writeSync(2, line); } catch {} });
+  // Ending a span only enqueues it. A full queue drops spans, and failed exports are discarded after a
+  // rate-limited warning.
+  processors.push(new BatchSpanProcessor({
+    export: (spans, done) => {
+      // node:http starts the request timeout only once connected, so a dropped connection attempt would report
+      // nothing until the operating system gives up, minutes later. The batch processor abandons the export at
+      // exportTimeoutMs; report it then. Unreferenced, so it never holds a process open.
+      let reported = false;
+      const report = (error: unknown) => { if (!reported) { reported = true; warn(error); } };
+      const timer = setTimeout(() => report(new Error("Request Timeout")), exportTimeoutMs).unref();
+      otlp.export(spans, (result) => {
+        clearTimeout(timer);
+        if (result.code !== 0) report(result.error);
+        done(result);
+      });
+    },
+    shutdown: () => otlp.shutdown(),
+    forceFlush: () => otlp.forceFlush(),
+  }, {
     maxQueueSize: 1_024, maxExportBatchSize: 256, scheduledDelayMillis: 1_000, exportTimeoutMillis: exportTimeoutMs,
   }));
 }
 const provider = processors.length ? new BasicTracerProvider({
-  resource: resourceFromAttributes({ "service.name": "birbcrew" }),
+  resource: resourceFromAttributes(resource),
   spanProcessors: processors,
-  // Bounds only the flush wait. An export it abandons can still hold a returning process (the worker) open
-  // until exportTimeoutMs; the turn runner ends it with process.exit.
+  // Bounds only the flush wait. An export it abandons can still hold a returning process (the worker) open: for
+  // about exportTimeoutMs once connected, but until the operating system gives up when a connection attempt is
+  // never answered, because node:http starts its timeout only on connect. The turn runner ends it with process.exit.
   forceFlushTimeoutMillis: 1_000,
   idGenerator: {
     generateTraceId: () => active.getStore()?.traceId ?? randomBytes(16).toString("hex"),
