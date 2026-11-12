@@ -127,3 +127,22 @@ export async function revokeGrant(pool: Pool, input: z.input<typeof memberKey> &
     db.release();
   }
 }
+
+/** A restore can bring back grants revoked after its recovery point, so a restored installation
+ * revokes every grant as it resumes. Runs in the activation's transaction: `activate` makes the
+ * installation active there, after the conversation locks, so the write barrier admits the
+ * revocation and a crash leaves neither. Returns whether `activate` changed the installation. */
+export async function revokeRestoredGrants(db: PoolClient, activate: () => Promise<boolean>) {
+  await db.query(`SELECT 1 FROM birbcrew_ts.conversations WHERE conversation_id IN
+    (SELECT conversation_id FROM birbcrew_ts.tool_grants WHERE revoked_at IS NULL) ORDER BY conversation_id FOR UPDATE`);
+  if (!await activate()) return false;
+  const { rows } = await db.query<{ grant_id: string; owner_id: string; member_id: string; conversation_id: string | null }>(
+    `WITH revoked AS (UPDATE birbcrew_ts.tool_grants SET revoked_at=clock_timestamp(), revocation_reason='recovery_restore'
+       WHERE revoked_at IS NULL RETURNING grant_id, owner_id, member_id, conversation_id, created_at)
+     SELECT grant_id, owner_id, member_id, conversation_id FROM revoked ORDER BY created_at, grant_id`);
+  for (const grant of rows) {
+    await appendAudit(db, { type: "grant.revoked", ownerId: grant.owner_id, memberId: grant.member_id,
+      conversationId: grant.conversation_id ?? undefined, payload: { grantId: grant.grant_id, reason: "recovery_restore" } });
+  }
+  return true;
+}

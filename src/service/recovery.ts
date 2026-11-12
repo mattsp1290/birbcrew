@@ -5,6 +5,7 @@ import { basename, dirname, join } from 'node:path';
 import { Client, type Pool } from 'pg';
 import { z } from 'zod';
 import { fenceEpochLimit, RecoveryRefusedError, type RecoveryFence } from './recovery-fence.ts';
+import { revokeRestoredGrants } from './grants.ts';
 export { RecoveryRefusedError } from './recovery-fence.ts';
 
 const id=z.uuid();
@@ -217,6 +218,13 @@ export class InstallationRecovery {
   await this.fence.verifyActivation(c.installation,c.instance,c.generation);
   await hooks.reconcile(manifest);
   await this.fence.activate(c.installation,c.instance,c.generation);
-  await this.pool.query(`UPDATE birbcrew_ts.recovery_control SET phase='active',generation=NULL WHERE singleton AND instance_id=$1 AND generation=$2`,[c.instance,c.generation]);
+  const db=await this.pool.connect();
+  try {
+   await db.query('BEGIN');
+   const activate=async()=>Boolean((await db.query(`UPDATE birbcrew_ts.recovery_control SET phase='active',generation=NULL WHERE singleton AND instance_id=$1 AND generation=$2`,[c.instance,c.generation])).rowCount);
+   // The restore may have brought back grants revoked after its recovery point.
+   if(c.phase==='restored') await revokeRestoredGrants(db,activate); else await activate();
+   await db.query('COMMIT');
+  } catch(e) {await db.query('ROLLBACK');throw e;} finally {db.release();}
  }
 }
