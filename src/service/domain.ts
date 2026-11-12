@@ -79,7 +79,7 @@ export type BeginTurn =
 
 export class MemberStoreError extends Error {
   readonly code: "not_found" | "conflict" | "busy" | "stale" | "input_limit" | "history_unavailable" | "request_rejected"
-    | "routine_limit" | "routine_deleted" | "memory_limit" | "memory_deleted" | "usage_limit";
+    | "routine_limit" | "routine_deleted" | "memory_limit" | "memory_deleted" | "usage_limit" | "usage_limit_closed";
 
   constructor(code: MemberStoreError["code"]) {
     super(code);

@@ -119,8 +119,9 @@ export class MemberStore {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
         // Migrations replace whole CHECK constraints, so one applied after a later one would
-        // silently narrow what the later one allowed.
-        if (latest !== null && version < latest) throw new Error(`Migration ${version} would apply after migration ${latest}`);
+        // silently narrow what the later one allowed. Releases up to 26 shipped some out of
+        // order (22 after 26), and those upgrades keep working.
+        if (version > 26 && latest !== null && version < latest) throw new Error(`Migration ${version} would apply after migration ${latest}`);
         await db.query(await readFile(new URL("./sql/" + name, import.meta.url), "utf8"));
         await db.query("INSERT INTO birbcrew_ts.schema_versions VALUES ($1)", [version]);
       }

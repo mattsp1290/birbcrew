@@ -15,7 +15,7 @@ import { IntegrationApi } from "../../src/service/integration-api.ts";
 import { withNativeAdmission } from "../../src/service/native-admission.ts";
 import { InstallationRecovery } from "../../src/service/recovery.ts";
 import { FileRecoveryFence } from "../../src/service/recovery-fence.ts";
-import { RoutineApi, RoutineDispatcher, type Clock } from "../../src/service/routines.ts";
+import { failReasons, RoutineApi, RoutineDispatcher, skipReasons, type Clock } from "../../src/service/routines.ts";
 import { MemberStore, ownerAdmissionActivity } from "../../src/service/store.ts";
 import type { Launch } from "../../src/service/supervisor.ts";
 import { checkUsageAdmission, recordSegmentUsage, UsageApi } from "../../src/service/usage.ts";
@@ -30,7 +30,7 @@ after(() => pool.end());
 const sql = new URL("../../src/service/sql/", import.meta.url);
 
 /** A database migrated only up to `version`, as that release left it; dropped after the test. */
-async function databaseAt(t: TestContext, version = Infinity) {
+async function databaseAt(t: TestContext, version = Infinity, skip: readonly number[] = []) {
   const name = "usage_" + randomUUID().replaceAll("-", "");
   await pool.query("CREATE DATABASE " + name);
   const target = new URL(url!); target.pathname = "/" + name;
@@ -44,7 +44,7 @@ async function databaseAt(t: TestContext, version = Infinity) {
   await db.query("CREATE TABLE birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
   for (const file of (await readdir(sql)).sort()) {
     const applied = Number(file.split("-")[0]);
-    if (applied > version) continue;
+    if (applied > version || skip.includes(applied)) continue;
     await db.query(await readFile(new URL(file, sql), "utf8"));
     await db.query("INSERT INTO birbcrew_ts.schema_versions VALUES ($1)", [applied]);
   }
@@ -121,7 +121,8 @@ test("each launch records its segment's usage once, bound to the launch's execut
   await recordSegmentUsage(pool, segment.launch, reported(5, 5));
   await recordSegmentUsage(pool, { ...segment.launch, execution: { ...segment.launch.execution, attempt: 2 } }, reported(7, 7));
   const rows = async () => (await pool.query(`SELECT token, engine, state, model, input_tokens, output_tokens, cached_input_tokens,
-    cache_write_tokens, reasoning_tokens, cost_usd::text AS cost FROM birbcrew_ts.usage_ledger WHERE owner_id=$1`, [owner.ownerId])).rows;
+    cache_write_tokens, reasoning_tokens, cost_usd::text AS cost FROM birbcrew_ts.usage_ledger WHERE owner_id=$1 ORDER BY usage_id`,
+  [owner.ownerId])).rows;
   assert.deepEqual(await rows(), [{ token: segment.launch.token, engine: "pi", state: "reported", model: "fixture-model",
     input_tokens: 1200, output_tokens: 80, cached_input_tokens: 900, cache_write_tokens: 100, reasoning_tokens: 20, cost: "0.0123000000" }]);
   await segment.commit();
@@ -330,7 +331,8 @@ test("a member at or over its budget is refused at admission; an admitted or run
     throw new WorkflowUpdateFailedError("Workflow Update failed", new ActivityFailure("Activity task failed", "recordAcceptance", "1",
       undefined as never, "worker", ApplicationFailure.nonRetryable("usage_limit", "usage_limit")));
   } }) } } as unknown as Client;
-  await assert.rejects(new MemberClient(store, raced).accept({ ...refused, requestId: randomUUID() }), { code: "usage_limit" });
+  // The workflow closes a conversation whose admission it refused, so this refusal says so.
+  await assert.rejects(new MemberClient(store, raced).accept({ ...refused, requestId: randomUUID() }), { code: "usage_limit_closed" });
   // A larger limit, or no limit, admits again.
   await store.recordAcceptance({ ...refused, requestId: randomUUID() }, ownerInitiator);
   await usage.setBudget(owner.ownerId, owner.memberId, { tokenLimit: 1 });
@@ -417,6 +419,9 @@ test("migration 031 takes its locks without queueing, rewrites nothing, leaves i
     await renamed.query("BEGIN");
     await renamed.query("ALTER TABLE birbcrew_ts.routine_firings RENAME CONSTRAINT routine_firings_check4 TO routine_firings_reason_check");
     await renamed.query(await readFile(new URL("031-usage.sql", sql), "utf8"));
+    const { rows: [reason] } = await renamed.query(`SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
+      WHERE conname='routine_firings_reason_check'`);
+    assert.match(reason.definition, /'usage_limit'/);
   } finally {
     await renamed.query("ROLLBACK");
     renamed.release();
@@ -456,6 +461,28 @@ test("migrate() refuses to apply a migration below one already applied", async (
   await ahead.query("INSERT INTO birbcrew_ts.schema_versions VALUES (40)");
   await assert.rejects(new MemberStore(ahead).migrate(), /Migration 31 would apply after migration 40/);
   assert.equal((await ahead.query("SELECT to_regclass('birbcrew_ts.usage_ledger') AS ledger")).rows[0].ledger, null);
+  // Releases before 27 shipped migration 22 after 26; a database from one still upgrades.
+  const shipped = await databaseAt(t, 26, [22]);
+  await new MemberStore(shipped).migrate();
+  assert.deepEqual((await shipped.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version IN (22,31) ORDER BY 1")).rows,
+    [{ version: 22 }, { version: 31 }]);
+});
+
+test("every firing reason the dispatcher names is one the routine firing CHECK allows", async () => {
+  // The reason CHECK repeats the code's lists; a stacked migration that drops a reason fails here.
+  const owner = await member(store);
+  const routine = await new RoutineApi(store, () => new Date("2031-01-06T10:00:00.000Z")).create(owner.ownerId, {
+    requestId: randomUUID(), memberId: owner.memberId, schedule: "*/15 * * * *", prompt: "reasons", approvalPolicy: "wait" });
+  const reasons = [...skipReasons.map(reason => ["skipped", reason]), ...failReasons.map(reason => ["failed", reason])];
+  for (const [index, [status, reason]] of reasons.entries()) {
+    const identity = status === "skipped" ? [null, null] : [randomUUID(), randomUUID()];
+    await pool.query(`INSERT INTO birbcrew_ts.routine_firings (routine_id,scheduled_for,status,reason,conversation_id,request_id,recorded_at,settled_at)
+      VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp(),clock_timestamp())`,
+    [routine.routineId, new Date(Date.parse("2031-01-07T00:00:00.000Z") + index * 900_000), status, reason, ...identity]);
+  }
+  await assert.rejects(pool.query(`INSERT INTO birbcrew_ts.routine_firings (routine_id,scheduled_for,status,reason,conversation_id,request_id,recorded_at,settled_at)
+    VALUES ($1,'2031-02-01T00:00:00Z','failed','usage_exceeded',$2,$3,clock_timestamp(),clock_timestamp())`,
+  [routine.routineId, randomUUID(), randomUUID()]), { code: "23514" });
 });
 
 test("migration 031 completes while a native turn holds its admission", async (t) => {

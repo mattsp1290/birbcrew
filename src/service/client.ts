@@ -7,7 +7,8 @@ import type { memberConversation } from "./workflow.ts";
 import { memberTaskQueue } from "./queues.ts";
 import { checkUsageAdmission } from "./usage.ts";
 
-/** The admission activity refused the request under its member's budget (ownerAdmissionActivity). */
+/** The admission activity refused the request under its member's budget (ownerAdmissionActivity).
+ * A refused admission closes the conversation's workflow, so the caller is told so. */
 function usageRefusal(error: unknown) {
   for (let cause = error; cause instanceof Error; cause = cause.cause) {
     if (cause instanceof ApplicationFailure && cause.type === "usage_limit") return true;
@@ -139,7 +140,7 @@ export class MemberClient {
       try {
         await this.throughRollover(conversation, handle => handle.executeUpdate<string, [typeof request]>("acceptTurn", { args: [request] }));
       } catch (error) {
-        if (usageRefusal(error)) throw new MemberStoreError("usage_limit");
+        if (usageRefusal(error)) throw new MemberStoreError("usage_limit_closed");
         if (!(error instanceof WorkflowNotFoundError)) throw error;
         if (await this.store.committedReply(request) === undefined) throw new MemberStoreError("conflict");
       }
@@ -157,7 +158,7 @@ export class MemberClient {
     try {
       return await this.throughRollover(conversation, handle => handle.executeUpdate<string, [typeof request]>("submitTurn", { args: [request] }));
     } catch (error) {
-      if (usageRefusal(error)) throw new MemberStoreError("usage_limit");
+      if (usageRefusal(error)) throw new MemberStoreError("usage_limit_closed");
       if (!(error instanceof WorkflowNotFoundError)) throw error;
       const settled = await this.store.committedReply(request);
       if (settled !== undefined) return settled;

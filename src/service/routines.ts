@@ -51,8 +51,11 @@ export const firingTransitions: Record<FiringStatus, readonly FiringStatus[]> = 
   succeeded: [], failed: [], skipped: [],
 };
 const settledStatuses: readonly FiringStatus[] = ["succeeded", "failed", "skipped"];
-type SkipReason = "missed" | "overlap" | "owner_unavailable";
-type FailReason = "rejected" | "approval_required" | "turn_failed" | "turn_cancelled" | "turn_uncertain" | "usage_limit";
+// The firing reason CHECK (routine_firings_reason_check) repeats both lists.
+export const skipReasons = ["missed", "overlap", "owner_unavailable"] as const;
+export const failReasons = ["rejected", "approval_required", "turn_failed", "turn_cancelled", "turn_uncertain", "usage_limit"] as const;
+type SkipReason = typeof skipReasons[number];
+type FailReason = typeof failReasons[number];
 type FiringReason = SkipReason | FailReason;
 
 export const routineCapabilities = {
@@ -457,7 +460,8 @@ export class RoutineDispatcher {
         await this.members.open({ ...key, memberId: claim.member_id }, deadline);
         await this.members.accept({ ...key, requestId: claim.request_id, text: claim.prompt }, deadline);
       } catch (error) {
-        refusal = error instanceof MemberStoreError && error.code === "usage_limit" ? "usage_limit" : refused(error) ? "rejected" : undefined;
+        refusal = error instanceof MemberStoreError && (error.code === "usage_limit" || error.code === "usage_limit_closed") ? "usage_limit"
+          : refused(error) ? "rejected" : undefined;
       }
       const now = this.clock();
       await this.transaction(async db => {

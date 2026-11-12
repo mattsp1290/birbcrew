@@ -112,9 +112,10 @@ through the pool still work. Allow the parameter in the pooler (PgBouncer's
 
 When the database is ready, `schemaVersion` is the highest migration number applied to
 it. It is `null` when the database is unavailable. Migration numbers are not
-contiguous, and a later release can add a migration numbered below one that an earlier
-release already applied, so a database can gain a migration without `schemaVersion`
-changing. `schemaVersion` therefore names the newest migration present, not the full
+contiguous. Up to migration 26, a later release could add a migration numbered below one
+that an earlier release had already applied (22 came after 26), so a database can gain a
+migration without `schemaVersion` changing. From migration 27 on, the gateway refuses to
+start rather than apply a migration below the newest applied one. `schemaVersion` therefore names the newest migration present, not the full
 applied set, and cannot by itself identify a release. The gateway applies its
 migrations at startup, so a value below the largest number in the deployed release's
 migration list (in `src/service/store.ts`) means the database is behind that release;
@@ -244,10 +245,11 @@ the cancellation fields, not an assumption that `completed` means a tool succeed
   reconcile that identity. Never silently generate a replacement UUID.
   `409 usage_limit` means the member has used its daily token budget: nothing was
   admitted, and the same request can be sent again once the window or the budget
-  allows it (see [usage metering](usage-metering.md)). In the rare case where usage
-  recorded between Crew's two budget checks makes the second one refuse, that
-  conversation is also closed to new turns, as after any refused admission; send the
-  request again in a new conversation.
+  allows it (see [usage metering](usage-metering.md)). `409 usage_limit_closed` is the
+  same refusal from Crew's second budget check, which only refuses when usage was
+  recorded, or the budget set or lowered, between the two checks. As after any refused
+  admission, that conversation is then closed to new turns; send the request again in a
+  new conversation.
 - `503 retry_same_request`, connection loss, timeout: the outcome may be ambiguous.
   GET the same identity, then retry the exact submission if needed. Do not infer a
   rejection from a lost acknowledgement. A validation/explicit rejected submission

@@ -1,4 +1,4 @@
-import type { PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { appendAudit } from "./audit.ts";
 import { MemberStoreError, type TurnRequest } from "./domain.ts";
@@ -25,7 +25,8 @@ export const usageCapabilities = {
     codex: { usage: "per-turn-from-thread-total", model: "not-reported", cost: "never" },
   },
   budget: { route: "/v1/usage/budgets/{memberId}", period: "utc_day", counts: "input+output", scope: "member",
-    enforcement: "admission-soft-cap", refusal: "usage_limit", tokenLimitMaximum: usageLimits.tokenLimitMaximum },
+    enforcement: "admission-soft-cap", refusal: "usage_limit", refusalClosingConversation: "usage_limit_closed",
+    tokenLimitMaximum: usageLimits.tokenLimitMaximum },
   recordPagination: "usage-id-keyset-newest-first", restore: "rewound-with-database; usage-ids-after-recovery-point-reissued",
 } as const;
 
@@ -35,12 +36,13 @@ type Queryable = Pick<PoolClient, "query">;
  * commits: the model work happened whether or not the commit that follows succeeds. A segment
  * whose driver reported nothing is recorded as unknown. The launch's execution identity must
  * match the reserved native_launches row. */
-export async function recordSegmentUsage(db: Queryable, launch: Launch, usage: SegmentUsage = { state: "unknown", model: null }) {
+export async function recordSegmentUsage(db: Pool, launch: Launch, usage: SegmentUsage = { state: "unknown", model: null }) {
   try { await insertUsage(db, launch, usage); }
   catch (error) {
     // Metering must not cost a finished segment its result: a row the ledger's CHECKs refuse
-    // is kept as unknown instead.
-    if (usage.state === "unknown" || !(error && typeof error === "object" && "code" in error && String(error.code).startsWith("23"))) throw error;
+    // is kept as unknown instead. Callers pass the pool, so the failed insert left no
+    // transaction to abort.
+    if (usage.state === "unknown" || !(error && typeof error === "object" && "code" in error && error.code === "23514")) throw error;
     await insertUsage(db, launch, { state: "unknown", model: null });
   }
 }

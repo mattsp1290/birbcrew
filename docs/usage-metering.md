@@ -165,9 +165,9 @@ records. Pass `nextAfter` as the next `after`, or `nextBefore` as the next `befo
 drawn before a row commits, so a row can commit after a later one. A records page you
 have already read past does not gain that row; the totals always include it. A
 coordinated restore reissues the IDs drawn after its recovery point to new rows (see
-[below](#upgrade-and-recovery)), so a consumer that mirrors records must, after a
-restore, drop the rows it holds above the restored installation's newest `usageId` and
-read again.
+[below](#upgrade-and-recovery)), so a consumer that mirrors records must read the
+restored installation's newest `usageId` while it is still held, before it resumes and
+draws new IDs, then drop the rows it holds above that ID and read again.
 
 `GET /v1/capabilities` describes the feature under `usage`: the states, the token and
 cost rules, what each engine reports, the budget period and refusal code, and that a
@@ -208,10 +208,11 @@ request can be sent again later. The check runs twice:
    answers in practice. The workflow never sees the request, and the conversation
    stays open.
 2. `recordAcceptance`, the admission transaction, after it has locked the
-   conversation. This is the enforcing check. It catches usage recorded between the
-   two checks. Its refusal fails the admission activity without retries, and
-   `MemberClient` reports it as the same `409 usage_limit`. Like any refused admission,
-   it then closes that conversation to new turns.
+   conversation. This is the enforcing check. It catches usage recorded, or a budget
+   set or lowered, between the two checks. Its refusal fails the admission activity
+   without retries. Like any refused admission, that closes the conversation to new
+   turns, so `MemberClient` reports it as `409 usage_limit_closed`: send the request
+   again in a new conversation. A routine firing fails `usage_limit` either way.
 
 The first check reads nothing more for a member without a budget, and leaves a
 trusted-context conversation to admission, which refuses it as before.
@@ -257,8 +258,9 @@ Migration 31 creates the two tables and replaces two CHECK constraints NOT VALID
 CHECK, which 025 left unnamed as `routine_firings_check4` and which becomes
 `routine_firings_reason_check` (adding the failure reason `usage_limit`). Existing
 rows are neither rewritten nor checked. Each replacement repeats the whole predicate,
-so `migrate()` now refuses to apply a migration whose version is below one already
-applied: applied later, it would silently drop what the newer one allowed. Until `migrate()` commits it holds `SHARE ROW EXCLUSIVE` on `members` and
+so `migrate()` now refuses to apply a migration numbered 27 or above whose version is
+below one already applied: applied later, it would silently drop what the newer one
+allowed. Releases up to 26 shipped migration 22 after 26, so earlier gaps still apply. Until `migrate()` commits it holds `SHARE ROW EXCLUSIVE` on `members` and
 `native_launches` for the foreign keys, and `ACCESS EXCLUSIVE` on `audit_events` and
 `routine_firings`. As in migration 25, it takes all four with `NOWAIT` and retries, so
 it never waits in a lock queue. A running native turn's admission transaction holds
@@ -331,7 +333,9 @@ UTC day window, and the mapping of the admission activity's failure; a routine f
 failing `usage_limit` until the routine is disabled; migration 31 on a version-26
 database, its locks, no rewrite, NOT VALID CHECKs, a reason CHECK a sibling migration
 already renamed, and no wait for a running turn; `migrate()` refusing to apply a
-migration below one already applied; and a held installation refusing usage writes.
+migration below one already applied, while a database that lacks migration 22, as
+releases before 27 left some, still upgrades; every firing reason the dispatcher names
+being one the reason CHECK allows; and a held installation refusing usage writes.
 
 `recovery.test.ts` (it needs PostgreSQL 17 `pg_dump`, as the other recovery tests do)
 restores a real dump taken after a budget and a segment were recorded. It checks that
