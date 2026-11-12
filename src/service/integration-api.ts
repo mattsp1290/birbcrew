@@ -148,6 +148,7 @@ export class IntegrationApi {
    */
   async listConversations(ownerId: string, query: unknown) {
     const { limit, after, memberId } = conversationListQuery.parse(query);
+    // Keep unnamed (no `name:`): PostgreSQL plans unnamed statements with the actual values, so the 022 indexes seek on memberId and the cursor; a generic plan seeks on owner_id alone.
     const { rows } = await this.store.pool.query<{ conversationId: string; memberId: string; engine: Engine; profile: string; phase: string | null }>(
       `SELECT c.conversation_id AS "conversationId",c.member_id AS "memberId",m.engine,m.profile,
          CASE WHEN s.conversation_id IS NULL THEN 'idle' WHEN s.history_complete THEN s.state->>'phase' END AS phase

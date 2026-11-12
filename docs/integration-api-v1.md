@@ -109,7 +109,7 @@ rows:
 
 | Parameter | Routes | Meaning |
 | --- | --- | --- |
-| `limit` | both | Decimal page size from 1 to 100; default 50 |
+| `limit` | both | Decimal page size from 1 to 100, without sign or leading zeros; default 50 |
 | `after` | both | The previous page's `next`, unchanged |
 | `memberId` | conversations | Only that member's conversations |
 
@@ -132,6 +132,13 @@ conversations and are listed like any other, including after their trusted sessi
 deleted. A
 `memberId` that is not the owner's, whether another owner's or nonexistent, returns an
 empty `200` page, exactly like an owned member without conversations.
+
+A rejected query parameter on the health or listing routes (unknown, repeated or
+invalid, including a malformed `after`, `limit` or `memberId`) returns
+`400 {"error":"invalid_input"}`. If PostgreSQL fails while a listing is read, the
+route returns `503 {"error":"retry_same_request"}`; listings are read-only, so
+repeating the request is safe. Health does not use that body: a failed dependency is
+reported in the health body itself.
 
 ### Identity and equivalence
 

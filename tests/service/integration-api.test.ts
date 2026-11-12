@@ -536,6 +536,16 @@ test("v1 health is not pinned by a database that accepts connections and never a
   assert.ok(await closes(relay.probes[1]), "a successful probe ends its connection");
 });
 
+// A listed phase is what the snapshot route reports, and null exactly where that route answers 409.
+async function assertSnapshotPhases(api: (path: string) => Promise<Response>, rows: Record<string, unknown>[]) {
+  for (const { conversationId, phase } of rows) {
+    const snapshot = await api(`/v1/conversations/${conversationId}`);
+    if (phase === null) { assert.equal(snapshot.status, 409, `${conversationId}`); continue; }
+    assert.equal(snapshot.status, 200);
+    assert.equal((await snapshot.json()).state.phase, phase, `${conversationId}`);
+  }
+}
+
 test("v1 listings page an owner's members and conversations without gaps, duplicates or text", async (t) => {
   const f = await fixture(); t.after(f.stop);
   const { memberId: first } = await store.getConversation({ ownerId: f.ownerId, conversationId: f.conversationId });
@@ -588,11 +598,21 @@ test("v1 listings page an owner's members and conversations without gaps, duplic
     assert.deepEqual(row, { conversationId: row.conversationId, memberId: member.memberId, engine: member.engine, profile: member.profile,
       phase: row.conversationId === f.conversationId ? "running" : row.conversationId === legacy ? null : "idle" });
   }
+  await assertSnapshotPhases(path => f.api(path), conversations.rows);
 
   const filtered = await all(`/v1/conversations?limit=1&memberId=${first.toUpperCase()}`, "conversations");
   assert.deepEqual(filtered.rows.map(row => row.conversationId),
     [...owned].filter(([, memberId]) => memberId === first).map(([id]) => id).sort());
   assert.ok(filtered.rows.every(row => row.memberId === first));
+  // A cursor does not record memberId: reused without it, or with another member, it continues that other listing.
+  const page = await (await f.api(`/v1/conversations?memberId=${first}&limit=1`)).json();
+  const position: string = page.conversations[0].conversationId;
+  for (const memberId of [undefined, second.memberId]) {
+    const response = await f.api(`/v1/conversations?after=${page.next}${memberId ? "&memberId=" + memberId : ""}`);
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).conversations.map((row: { conversationId: string }) => row.conversationId),
+      [...owned].filter(([id, owner]) => id > position && (!memberId || owner === memberId)).map(([id]) => id).sort(), memberId);
+  }
 
   // Another owner's rows never appear, and naming them is indistinguishable from naming nothing.
   const listed = JSON.stringify([(await all("/v1/members", "members")).rows, conversations.rows]);
@@ -625,6 +645,7 @@ test("v1 listings default to 50 rows, pass snapshot phases through and keep trus
   const listed = (await (await f.api(`/v1/conversations?memberId=${memberId}`)).json()).conversations as { conversationId: string; phase: string }[];
   assert.deepEqual(Object.fromEntries(listed.map(row => [row.conversationId, row.phase])),
     { [f.conversationId]: "idle", [waiting]: "waiting", [complete]: "complete", [trusted]: "idle" });
+  await assertSnapshotPhases(path => f.api(path), listed);
 
   const empty = await store.spawn({ ownerId: f.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture-v1" });
   assert.deepEqual(await (await f.api(`/v1/conversations?memberId=${empty.memberId}`)).json(),
