@@ -43,8 +43,8 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   names the owner ID. A request with no admission row is recorded as
   owner-initiated, as before migration 23: requests admitted by workflow histories
   older than `bounded-conversations-v1`, and trusted-context effects, whose lane
-  records no admission. `member.spawned`, `conversation.opened` and the routine
-  facts belong to no request and name the acting owner. Migration 25 adds the
+  records no admission. `member.spawned`, `conversation.opened`, the routine
+  facts and the memory facts belong to no request and name the acting owner. Migration 25 adds the
   second kind, `routine`, with the routine's ID: an admission records it only from
   the routine's firing row (see
   [scheduled routines](scheduled-routines.md#what-a-firing-records)). Named CHECK
@@ -71,8 +71,10 @@ database trigger rejects every `UPDATE`, `DELETE` and `TRUNCATE` on the table,
 including zero-row statements.
 
 Payloads contain identifiers, SHA-256 digests, choices and statuses only. They
-never contain prompt or reply text, tool arguments or results, notes, tokens or
-credentials. `src/service/audit.ts` validates each payload against a strict schema
+never contain prompt or reply text, tool arguments or results, notes, member memory
+text, tokens or credentials. Memory rows carry no digest of their text either: the
+owner can delete an entry, and a digest kept in this table would let an export holder
+confirm a guess of the deleted text. `src/service/audit.ts` validates each payload against a strict schema
 before insert, so extra fields are refused. The prompt digest is the hex SHA-256 of
 the exact UTF-8 text, the same digest that admission already stores. The argument
 digest is the one shown on the public approval card: a SHA-256 over the tool name,
@@ -89,7 +91,7 @@ audit version may switch to a keyed per-owner digest.
 
 The registry is the `auditEvents` object in `src/service/audit.ts`.
 `audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
-`024-standing-grants.sql` and then `025-routines.sql`, lists the same types.
+`024-standing-grants.sql`, `025-routines.sql` and then `026-memories.sql`, lists the same types.
 Each widening replaces the whole constraint, so the latest migration lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
@@ -112,6 +114,9 @@ A test checks that the two lists match. `GET /v1/capabilities` lists them under
 | `routine.disabled` | owner, or system after ten consecutive failures | a routine is disabled | routine + revision | `routineId`, `revision`, `reason` |
 | `routine.deleted` | owner | a routine is deleted | routine + revision | `routineId`, `revision` |
 | `routine.firing_settled` | system | a routine's window is skipped, or its firing succeeds or fails | routine + window | `routineId`, `scheduledFor`, `status`, optional `reason` |
+| `memory.created` | owner | a [member memory](memories.md) entry is created | entry | `memoryId` |
+| `memory.deleted` | owner | an entry is deleted and its text erased | entry | `memoryId` |
+| `memory.suspended` | system | a restored installation resumes and suspends an active entry | entry | `memoryId`, `reason` (`recovery_restore`) |
 
 `approval.decided` names the deciding owner as its actor. Through the gateway, the
 owner comes from the bearer token at `POST .../human`. The operator CLI names the
@@ -288,6 +293,11 @@ waits for a native turn; [scheduled routines](scheduled-routines.md#upgrade-and-
 lists its locks. The index builds read `audit_events` once each under its exclusive
 lock.
 
+Migration 26 replaces `audit_events_type_check` the same way, with every earlier
+type and the three memory types, and adds one partial unique index for them. It takes
+`audit_events` together with `members` and `conversations` without queueing, so it
+never waits for a native turn; [member memory](memories.md#upgrade) lists its locks.
+
 The audit table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest
 inventory counts its rows. `pg_dump`/`pg_restore` keep the rows and the identity
@@ -457,6 +467,7 @@ npm run build
 export BIRBCREW_TEST_DATABASE_URL='postgresql://birbcrew:fixture-only@127.0.0.1:55432/integration_test'
 npm run test:audit
 npm run test:routines
+npm run test:memories
 npm run test:api
 node --test tests/service/store.test.ts tests/service/rollover-client.test.ts
 npm run test:recovery

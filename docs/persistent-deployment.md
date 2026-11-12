@@ -179,7 +179,12 @@ Migration 25 (scheduled routines) takes its locks on `members`,
 `request_admissions` and `audit_events` without queueing: it retries for up to 60 s
 while other sessions hold them, then fails with `55P03` and the process exits
 without applying anything. Restart it once the other sessions are done (see
-[scheduled routines](scheduled-routines.md#upgrade-and-recovery)).
+[scheduled routines](scheduled-routines.md#upgrade-and-recovery)). Migration 26
+(member memory) does the same for `members`, `conversations` and `audit_events`.
+From version 24 both run in one transaction, and 26 retries while holding 25's
+locks, so admissions and audited writes wait meanwhile; an open of the previous
+release still in flight makes it fail after the 60 s (see
+[member memory](memories.md#upgrade)).
 
 A Kubernetes Deployment's default `RollingUpdate` strategy starts new pods while
 old ones still run, which is exactly what this forbids. Scale every Deployment

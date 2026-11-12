@@ -15,10 +15,11 @@ const requestFact = "(event_type, conversation_id, request_id) WHERE event_type 
 const routineFact = "((payload->>'routineId'), (payload->>'revision')) WHERE event_type IN ('routine.created', 'routine.enabled', 'routine.disabled', 'routine.deleted')";
 const routineChange = { routineId: uuid, revision: z.int().min(2).max(2_147_483_647) };
 const grantFact = "(event_type, (payload->>'grantId'), (payload->>'approvalId')) WHERE event_type IN ('approval.auto_approved', 'grant.created', 'grant.revoked')";
+const memoryFact = "((payload->>'memoryId'), event_type) WHERE event_type IN ('memory.created', 'memory.deleted', 'memory.suspended')";
 
 type Actor = "owner" | "system";
 /** The closed audit vocabulary. 021-audit.sql repeats these types in a CHECK, widened by
- * 024-standing-grants.sql and 025-routines.sql. Payloads are strict: identifiers, digests, choices and statuses only,
+ * 024-standing-grants.sql, 025-routines.sql and 026-memories.sql. Payloads are strict: identifiers, digests, choices and statuses only,
  * never prompt/reply text, tool arguments or secrets. An actor given as a function is
  * decided by the validated payload. A routine acts with its owner's authority, so rows its
  * firings cause name the owner; Crew's own decisions about a routine name the system. */
@@ -69,6 +70,13 @@ export const auditEvents = {
       reason: z.enum(["missed", "overlap", "owner_unavailable", "rejected", "approval_required", "turn_failed",
         "turn_cancelled", "turn_uncertain"]).optional(),
     }) },
+  // No digest of the text: an entry is deletable owner content, and an unsalted digest kept in
+  // this append-only table would let an export holder confirm a guess of deleted text.
+  "memory.created": { actor: "owner", key: memoryFact, payload: z.strictObject({ memoryId: uuid }) },
+  "memory.deleted": { actor: "owner", key: memoryFact, payload: z.strictObject({ memoryId: uuid }) },
+  // Crew suspends every active entry when a restored installation resumes.
+  "memory.suspended": { actor: "system", key: memoryFact,
+    payload: z.strictObject({ memoryId: uuid, reason: z.literal("recovery_restore") }) },
 } as const;
 export type AuditEventType = keyof typeof auditEvents;
 export const auditEventTypes = Object.keys(auditEvents) as AuditEventType[];

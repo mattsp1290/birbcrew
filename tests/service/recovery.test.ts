@@ -15,6 +15,7 @@ import {IntegrationApi} from '../../src/service/integration-api.ts';
 import {RoutineApi,RoutineDispatcher} from '../../src/service/routines.ts';
 import {ApprovalStore} from '../../src/service/approvals.ts';
 import {revokeGrant} from '../../src/service/grants.ts';
+import {conversationContext,MemoryApi} from '../../src/service/memories.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 const exec=promisify(execFile);
@@ -371,6 +372,76 @@ test('a restored installation revokes every standing grant as it resumes; a held
  assert.equal((await restored.query("SELECT count(*)::integer AS n FROM birbcrew_ts.audit_events WHERE event_type='grant.revoked'")).rows[0].n,2);
  // The restored installation asks again.
  assert.equal((await call(new MemberStore(restored),restored)).grantId,undefined);
+});
+
+test('capture accepts the memory tables, and a held installation refuses every memory write',async context=>{
+ const t=await setup(context);
+ const {memberId}=await spawn(t.store);const api=new MemoryApi(t.store);
+ const kept=await api.create('owner',{requestId:randomUUID(),memberId,text:'kept'});
+ await t.store.openConversation({ownerId:'owner',memberId,conversationId:randomUUID()});
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);
+ assert.deepEqual([manifest.inventory.member_memories,manifest.inventory.conversation_memories],[1,1]);
+ const conversationId=randomUUID();
+ for(const write of [()=>api.create('owner',{requestId:randomUUID(),memberId,text:'held'}),()=>api.delete('owner',kept.memoryId),
+  ()=>t.store.openConversation({ownerId:'owner',memberId,conversationId}),
+  ()=>t.pool.query(`INSERT INTO birbcrew_ts.member_memories(owner_id,member_id,create_request_id,body) VALUES('owner',$1,$2,'direct')`,[memberId,randomUUID()]),
+  ()=>t.pool.query(`INSERT INTO birbcrew_ts.conversation_memories SELECT conversation_id,2,$1 FROM birbcrew_ts.conversations LIMIT 1`,[kept.memoryId])]) {
+  await assert.rejects(write(),{code:'55000'});
+ }
+ assert.deepEqual(await api.get('owner',kept.memoryId),kept,'reads still work');
+ await t.recovery.resume(t.hooks);
+ assert.equal((await api.delete('owner',kept.memoryId)).state,'deleted');
+});
+
+test('a restored installation suspends every active memory as it resumes; a held source keeps its own',async context=>{
+ const t=await setup(context);
+ const {memberId}=await spawn(t.store);const api=new MemoryApi(t.store);
+ const [alpha,bravo]=[await api.create('owner',{requestId:randomUUID(),memberId,text:'alpha'}),await api.create('owner',{requestId:randomUUID(),memberId,text:'bravo'})];
+ const conversation=await t.store.openConversation({ownerId:'owner',memberId,conversationId:randomUUID()});
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);
+ await t.recovery.resume(t.hooks);
+ // The owner deletes one after the recovery point; a restore brings it back, text and all.
+ await api.delete('owner',alpha.memoryId);
+ const states=async(pool:Pool)=>(await pool.query('SELECT memory_id,state,body FROM birbcrew_ts.member_memories ORDER BY created_at')).rows;
+ assert.deepEqual(await states(t.pool),[{memory_id:alpha.memoryId,state:'deleted',body:null},{memory_id:bravo.memoryId,state:'active',body:'bravo'}]);
+ await t.recovery.holdForRestore(manifest.generation,t.hooks);
+ const restored=await restoreBundle(t);const recovery=new InstallationRecovery(restored,t.fence);
+ await recovery.acceptRestore(t.bundle,pins,randomUUID());
+ assert.deepEqual(await states(restored),[{memory_id:alpha.memoryId,state:'active',body:'alpha'},{memory_id:bravo.memoryId,state:'active',body:'bravo'}]);
+ // A delete holding its row when the resume starts cannot deadlock it: the delete's write still sees
+ // the hold and fails, and the resume, waiting on that row, goes on.
+ const deleter=await restored.connect();t.defer(async()=>deleter.release());
+ await deleter.query('BEGIN');
+ await deleter.query('SELECT 1 FROM birbcrew_ts.member_memories WHERE memory_id=$1 FOR NO KEY UPDATE',[alpha.memoryId]);
+ const resuming=recovery.resume(t.hooks,manifest);
+ let waited=false;
+ for(let i=0;i<300&&!waited;i++) {
+  waited=!!(await restored.query("SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'")).rowCount;
+  if(!waited) await new Promise(r=>setTimeout(r,10));
+ }
+ assert.ok(waited,'the resume waits for the locked memory');
+ await assert.rejects(deleter.query("UPDATE birbcrew_ts.member_memories SET state='deleted',body=NULL,changed_at=now() WHERE memory_id=$1",[alpha.memoryId]),{code:'55000'});
+ await deleter.query('ROLLBACK');
+ await resuming;
+ const restoredApi=new MemoryApi(new MemberStore(restored));
+ assert.deepEqual((await states(restored)).map(row=>[row.state,row.body]),[['suspended','alpha'],['suspended','bravo']]);
+ const {rows:audit}=await restored.query(`SELECT actor_kind,actor_id,conversation_id,request_id,payload FROM birbcrew_ts.audit_events
+  WHERE event_type='memory.suspended' ORDER BY event_id`);
+ assert.deepEqual(audit,[alpha,bravo].map(m=>({actor_kind:'system',actor_id:null,conversation_id:null,request_id:null,
+  payload:{memoryId:m.memoryId,reason:'recovery_restore'}})));
+ assert.equal(await conversationContext(restored,conversation),undefined,'a suspended entry reaches no launch');
+ await assert.rejects(recovery.resume(t.hooks,manifest),/Not held/);
+ assert.equal((await restored.query("SELECT count(*)::integer AS n FROM birbcrew_ts.audit_events WHERE event_type='memory.suspended'")).rows[0].n,2);
+ // A suspended entry cannot come back; the owner reads it, deletes it and creates it again.
+ await assert.rejects(restored.query("UPDATE birbcrew_ts.member_memories SET state='active',changed_at=NULL WHERE memory_id=$1",[bravo.memoryId]),{code:'23514'});
+ assert.deepEqual([(await restoredApi.get('owner',bravo.memoryId)).text,(await restoredApi.delete('owner',alpha.memoryId)).text],['bravo',null]);
+ const again=await restoredApi.create('owner',{requestId:randomUUID(),memberId,text:'bravo'});
+ const later=await new MemberStore(restored).openConversation({ownerId:'owner',memberId,conversationId:randomUUID()});
+ assert.match((await conversationContext(restored,later))!,new RegExp(again.memoryId));
+ // The source, which resumed without a restore, kept its active entry.
+ assert.deepEqual((await states(t.pool)).map(row=>row.state),['deleted','active']);
 });
 
 test('a restore past the fence epoch, its epoch file missing or behind, starts above every ID the restored identity drew',async context=>{

@@ -6,6 +6,7 @@ import { initiatorColumns, initiatorFromColumns, initiatorKinds, MemberStoreErro
 import { standingChoice } from "./deferral.ts";
 import { grantListLimit } from "./grants.ts";
 import { conversationTurnLimit, workflowGenerationTurnLimit } from "./limits.ts";
+import { memoryCapabilities } from "./memories.ts";
 import { routineCapabilities } from "./routines.ts";
 import type { MemberStore } from "./store.ts";
 
@@ -30,6 +31,7 @@ export const integrationCapabilities = {
     initiatorKinds: ["owner"], route: "/v1/members/{memberId}/grants", inactiveListLimit: grantListLimit,
     revocation: "later-proposals-only",
   },
+  memories: memoryCapabilities,
 } as const;
 
 const keySchema = turnKey;
