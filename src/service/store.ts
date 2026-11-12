@@ -74,7 +74,7 @@ export async function admittedInitiator(
  * attests the owner. recordAcceptance records a routine instead only when a routine firing row
  * names the request, and a handoff only for the request a handoff row reserved. The initiator
  * is not a workflow or update argument, so recorded histories replay unchanged.
- * A seal never lifts, so retrying it only delays the failure the workflow reaches anyway; and a
+ * A seal lifts only through a recovery restore, so retrying it only delays the failure the workflow reaches anyway; and a
  * request that reached admission ahead of its target's reserved one must not slip in once that
  * one is admitted. Either refusal fails at once. The workflow does not inspect why an activity
  * failed, and a failure is history data, not a command, so replay is unaffected. */

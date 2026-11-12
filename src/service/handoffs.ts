@@ -154,8 +154,8 @@ export class HandoffApi {
   constructor(store: MemberStore, members: Pick<MemberClient, "open" | "accept">) { this.store = store; this.members = members; }
 
   /** Idempotent by requestId: a retry returns the same handoff and drives its reserved request again
-   * while that request is unadmitted, so a crash or refusal between the commit and the admission
-   * heals on retry. */
+   * while that request is unadmitted, so a crash between the commit and the admission heals on
+   * retry. A target whose workflow has closed is not healed: it stays unadmitted. */
   async create(ownerId: string, sourceId: string, input: unknown) {
     const body = createSchema.parse(input);
     const sourceConversationId = lowerUuid.parse(sourceId);
@@ -218,8 +218,8 @@ export class HandoffApi {
         await this.members.accept({ ...target, requestId: row.first_request_id, text: row.transcript });
       } catch (error) {
         // The handoff is committed, so a refusal here is not one that wrote nothing: answer with the
-        // record, whose firstRequestAdmitted tells the client to retry with the same requestId.
-        if (!(error instanceof MemberStoreError)) throw error;
+        // record, whose firstRequestAdmitted says the reserved request is not admitted.
+        if (!(error instanceof MemberStoreError) || !["busy", "conflict", "request_rejected"].includes(error.code)) throw error;
       }
       view = await this.viewRow(ownerId, row.handoff_id);
     }

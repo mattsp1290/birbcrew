@@ -33,19 +33,22 @@ The target may be any member of the owner, including the source's own member. Af
 the commit the handler submits the reserved request to the target through the normal
 request path (`MemberClient.open`, then `accept`), as the routine dispatcher submits a
 firing. A `201` means the handoff is committed. With `firstRequestAdmitted: true` the
-reserved request is admitted too, and the target's worker runs it like any other turn.
-With `firstRequestAdmitted: false` its submission was refused after the commit, for
-example as `busy` while the target's workflow rolled over: retry with the same
-`requestId`.
+reserved request has an admission record. An accepted admission runs like any other
+turn; a rejected one never runs. The request's receipt says which.
+With `firstRequestAdmitted: false` its submission was refused after the commit. Retry
+with the same `requestId` a bounded number of times, for example three times over a
+minute. If it stays `false`, the target's workflow has most likely closed, and no retry
+heals that (see [Costs](#costs)).
 
 `requestId` makes the POST idempotent. The same owner sending the same `requestId`,
 source and `memberId` gets the same handoff back and never a second target. While the
 reserved request has no admission, each retry submits it again. Once it has one, the
 target's workflow owns it: a retry sends nothing to the target and returns the record,
 and the request's receipt reports how it ended, which may be `failed` or `uncertain`.
-So when a POST fails after its commit (the gateway died, Temporal was unreachable) or
-answers `firstRequestAdmitted: false`, retry it with the same `requestId`: the retry
-completes the submission. The same `requestId` with another `memberId` or another
+So when a POST fails after its commit (the gateway died, Temporal was unreachable),
+retry it with the same `requestId`: the retry submits the reserved request again. When
+it answers `firstRequestAdmitted: false`, a retry helps only if the target's workflow
+is still open. The same `requestId` with another `memberId` or another
 source is `409 conflict`. A second handoff of a sealed source under any other
 `requestId` is `409 handed_off`.
 
@@ -107,7 +110,7 @@ target's first user message in its snapshot, and the reserved request's receipt 
 | `409` | `memory_limit` | the target member's notes and memory would not fit its engine, as for any open |
 | `409` | `conflict` | the `requestId` was used with another source or member; on the target's request routes, the reserved request's ID sent with other text |
 | `409` | `handoff_pending` | on the target's request routes: its reserved request is not admitted yet |
-| `409` | `update_rejected` | after the commit: the target's workflow refused the reserved request's update, as a previous-release worker does with one over 16 KiB (see [Upgrade](#upgrade)); retry with the same `requestId` |
+| `409` | `update_rejected` | after the commit: the target's workflow refused the reserved request's update, as a previous-release worker does with one over 16 KiB (see [Upgrade](#upgrade)); a retry with the same `requestId` succeeds only once that cause is removed |
 | `503` | `retry_same_request` | the outcome may be unknown; retry with the same `requestId` |
 
 The POST's refusals, `400`, `404` and the `409`s from `busy` to `conflict`, come before

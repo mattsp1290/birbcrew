@@ -412,8 +412,8 @@ submits that request through the normal path; the target model gets the transcri
 user message, quoted as data. The source keeps its snapshot and receipts but admits no
 new request (`409 handed_off`), and the target admits no other request before the
 reserved one (`409 handoff_pending`). Every other request keeps the 16 KiB limit. Retry a
-POST with the same `requestId`: it returns the same handoff and completes a submission a
-failure interrupted. See [conversation handoff](handoffs.md) for what is carried, the
+POST with the same `requestId`: it returns the same handoff and submits the reserved request again
+if a failure interrupted it. A target whose workflow has closed stays unadmitted. See [conversation handoff](handoffs.md) for what is carried, the
 errors, costs and the trust boundary.
 
 ## Validation
