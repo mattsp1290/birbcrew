@@ -1,7 +1,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import type { PoolClient } from "pg";
 import { z } from "zod";
-import { appendAudit, stableHorizon, type AuditEventType } from "./audit.ts";
+import { appendAudit, settledHorizon, stableHorizon, type AuditEventType } from "./audit.ts";
 import { toolNameSchema } from "./deferral.ts";
 import { MemberStoreError } from "./domain.ts";
 import type { MemberStore } from "./store.ts";
@@ -371,19 +371,21 @@ export class WebhookDispatcher {
   }
 
   /** With no endpoint enabled, no event that has occurred can ever be delivered (an endpoint gets
-   * only events from when it is enabled), so the cursor moves to the end of the trail, at most once
-   * a minute, and the first endpoint enabled later does not scan the idle stretch. The cursor is
-   * taken first and the check reads after it: an enable holds the cursor until it commits, so it is
-   * either seen here or sets its time after this commits. */
+   * only events from when it is enabled), so the cursor moves to the audit horizon, at most once a
+   * minute, and the first endpoint enabled later does not scan the idle stretch. Every event at or
+   * below the horizon had committed, with its time, when the horizon was read. The cursor is taken
+   * next and the check reads after it: an enable holds the cursor until it commits, so it is either
+   * seen here or reads its time after this commits. One try, so this never waits on audit writers. */
   private async advanceIdle(now: Date) {
     if (now.getTime() - this.idleAdvancedAt < 60_000) return;
     this.idleAdvancedAt = now.getTime();
+    const horizon = await settledHorizon(this.store.pool);
+    if (horizon === null) return;
     await this.transaction(async db => {
       const { rowCount } = await db.query("SELECT 1 FROM birbcrew_ts.webhook_cursor WHERE singleton FOR UPDATE SKIP LOCKED");
       if (!rowCount) return;
-      await db.query(`UPDATE birbcrew_ts.webhook_cursor SET last_event_id=greatest(last_event_id,
-          (SELECT coalesce(max(event_id), 0) FROM birbcrew_ts.audit_events))
-        WHERE singleton AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.webhook_endpoints WHERE state='enabled')`);
+      await db.query(`UPDATE birbcrew_ts.webhook_cursor SET last_event_id=greatest(last_event_id, $1::bigint)
+        WHERE singleton AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.webhook_endpoints WHERE state='enabled')`, [horizon]);
     });
   }
 

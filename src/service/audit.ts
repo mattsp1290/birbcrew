@@ -173,15 +173,20 @@ export class AuditUnsettledError extends Error {
 // its maximum is a safe horizon. Polling with try-lock never queues ahead of writers.
 // The lock is global, so one stalled writer makes every owner's read wait out the window.
 // The backoff keeps those waiting readers from crowding the gateway's small pool.
-// The webhook dispatcher reads its fan-out horizon the same way. Never call it inside a
+// The webhook dispatcher reads its horizons the same way. Never call these inside a
 // transaction: the exclusive lock would then be held, against every writer, until commit.
+/** One try: the horizon, or null while an audited writer is in flight. */
+export async function settledHorizon(pool: Pool): Promise<string | null> {
+  const { rows: [row] } = await pool.query<{ horizon: string | null }>(`SELECT CASE
+    WHEN pg_try_advisory_xact_lock(hashtextextended('birbcrew_ts.audit_events', 0))
+    THEN (SELECT coalesce(max(event_id), 0) FROM birbcrew_ts.audit_events)::text END AS horizon`);
+  return row.horizon;
+}
 export async function stableHorizon(pool: Pool): Promise<string> {
   const deadline = Date.now() + auditSettleWindowMs;
   for (let wait = 10; ; wait = Math.min(wait * 2, 200)) {
-    const { rows: [row] } = await pool.query<{ horizon: string | null }>(`SELECT CASE
-      WHEN pg_try_advisory_xact_lock(hashtextextended('birbcrew_ts.audit_events', 0))
-      THEN (SELECT coalesce(max(event_id), 0) FROM birbcrew_ts.audit_events)::text END AS horizon`);
-    if (row.horizon !== null) return row.horizon;
+    const horizon = await settledHorizon(pool);
+    if (horizon !== null) return horizon;
     const left = deadline - Date.now();
     if (left <= 0) throw new AuditUnsettledError();
     await delay(Math.min(wait, left));

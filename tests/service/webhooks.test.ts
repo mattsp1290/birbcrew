@@ -467,7 +467,7 @@ test("a slow or dead endpoint holds up only its own deliveries, and a timeout is
   const fast = await h.create(r.url("fast"), ["request.finished"]);
   const conversationId = await h.conversation();
   await h.finished(conversationId);
-  const dispatcher = h.dispatcher({ timeouts: { connectMs: 1_000, totalMs: 1_500 } });
+  const dispatcher = h.dispatcher({ timeouts: { connectMs: 1_000, totalMs: 3_000 } });
   const started = Date.now();
   await dispatcher.tick();
   // The pass does not wait for the hanging endpoint, and the other endpoint already has its delivery.
@@ -696,11 +696,13 @@ test("an abandoned attempt is retried after its lease, a stale holder records no
   for (let i = 0; i < 50 && r.received.length < 2; i++) await delay(20);
   [delivery] = await h.deliveries(endpoint.webhookId);
   assert.deepEqual([delivery.state, delivery.attempts], ["delivering", 2]);
-  // The first holder, settling late, matches nothing: the row's attempt count and lease are no longer its own.
-  const { rowCount } = await h.db.query(`UPDATE birbcrew_ts.webhook_deliveries SET state='pending', next_attempt_at=now(), lease_until=NULL,
-      last_outcome='timeout' WHERE webhook_id=$1 AND state='delivering' AND attempts=1 AND lease_until=$2`, [endpoint.webhookId, lease]);
-  assert.equal(rowCount, 0);
-  assert.deepEqual((await h.deliveries(endpoint.webhookId)).map(d => [d.state, d.attempts]), [["delivering", 2]]);
+  // The first holder, settling late through the real settle, matches nothing: the row's attempt count
+  // and lease are no longer its own, so it neither reschedules the row nor counts a failure.
+  const stale = { webhook_id: endpoint.webhookId, event_id: delivery.eventId, attempts: 1, prior_attempts: 0, lease_until: lease,
+    body: "{}", url: r.url("in"), secret: endpoint.secret };
+  await (first as unknown as { settle(claim: unknown, result: unknown): Promise<void> }).settle(stale, { outcome: "timeout" });
+  assert.deepEqual((await h.deliveries(endpoint.webhookId)).map(d => [d.state, d.attempts, d.outcome]), [["delivering", 2, null]]);
+  assert.equal((await h.endpoint(endpoint.webhookId)).consecutive_failures, 0);
   await second.stop();
   r.state.reply = () => 200;
   h.advance(webhookLimits.leaseMs);
@@ -754,6 +756,18 @@ test("with no endpoint enabled the cursor moves to the end of the trail, and a l
   const cursor = async () => (await h.db.query(`SELECT c.last_event_id::text AS cursor, (SELECT max(event_id) FROM birbcrew_ts.audit_events)::text AS max
     FROM birbcrew_ts.webhook_cursor c`)).rows[0];
   const dispatcher = h.dispatcher();
+  // An enable in progress holds the cursor: the pass neither waits for it nor moves the cursor.
+  const enabling = await h.db.connect();
+  const before = await cursor();
+  try {
+    await enabling.query("BEGIN");
+    await enabling.query("SELECT 1 FROM birbcrew_ts.webhook_cursor FOR SHARE");
+    const started = Date.now();
+    await pass(dispatcher);
+    assert.ok(Date.now() - started < 2_000);
+    assert.equal((await cursor()).cursor, before.cursor);
+  } finally { await enabling.query("ROLLBACK"); enabling.release(); }
+  h.advance(60_000);
   await pass(dispatcher);
   let position = await cursor();
   assert.equal(position.cursor, position.max);
@@ -767,8 +781,27 @@ test("with no endpoint enabled the cursor moves to the end of the trail, and a l
   assert.equal(position.cursor, position.max);
   await h.create(r.url("in"), ["request.finished"]);
   const later = await h.finished(conversationId);
+  // With an endpoint enabled the idle move does nothing, even if asked directly.
+  const unsent = await cursor();
+  h.advance(60_000);
+  await (dispatcher as unknown as { advanceIdle(now: Date): Promise<void> }).advanceIdle(h.clock());
+  assert.deepEqual(await cursor(), unsent);
   await pass(dispatcher);
   assert.deepEqual(r.received.map(item => JSON.parse(item.body).requestId), [later]);
+});
+
+test("an audit row that does not fit its kind is skipped, and later events still reach the endpoint", async (t) => {
+  const h = await harness(t);
+  const r = await receiver(t);
+  const endpoint = await h.create(r.url("in"), ["routine.firing_settled", "request.finished"]);
+  // Written past the TypeScript schema, as only direct SQL could: a scheduledFor no body may carry.
+  await h.db.query(`INSERT INTO birbcrew_ts.audit_events (owner_id,actor_kind,actor_id,initiator_kind,initiator_id,event_type,member_id,payload)
+    VALUES ($1,'system',NULL,'owner',$1,'routine.firing_settled',$2,$3)`,
+    [h.ownerId, h.member.memberId, { routineId: randomUUID(), scheduledFor: "2031-01-06T10:15:00.000Z" + "x".repeat(800), status: "failed" }]);
+  const later = await h.finished(await h.conversation());
+  await pass(h.dispatcher());
+  assert.deepEqual(r.received.map(item => JSON.parse(item.body).requestId), [later]);
+  assert.deepEqual((await h.deliveries(endpoint.webhookId)).map(d => [d.kind, d.state]), [["request.finished", "delivered"]]);
 });
 
 test("the database keeps endpoints and deliveries as history and refuses a member on a webhook audit row", async (t) => {
