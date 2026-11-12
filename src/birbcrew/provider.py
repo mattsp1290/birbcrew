@@ -61,8 +61,10 @@ def read_key_file(path: Path) -> str:
             or info.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
         ):
             raise ValueError("OpenCode Go key file must be private to this user")
+        # The longest valid file is 4097 bytes (token and newline); reading one more
+        # byte makes any longer file fail the match below instead of being truncated.
         data = b""
-        while len(data) <= 4096 and (chunk := os.read(descriptor, 4097 - len(data))):
+        while len(data) <= 4097 and (chunk := os.read(descriptor, 4098 - len(data))):
             data += chunk
     finally:
         os.close(descriptor)

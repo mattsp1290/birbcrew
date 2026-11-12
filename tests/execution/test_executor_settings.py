@@ -110,7 +110,26 @@ def test_key_file_rejects_group_or_other_bits(tmp_path, mode):
         provider.read_key_file(path)
 
 
-@pytest.mark.parametrize("text", ["", "\n", "two tokens\n", "token\nsecond\n", "token\n\n", " t"])
+@pytest.mark.parametrize("text", ["a" * 4096, "a" * 4096 + "\n"])
+def test_key_file_accepts_the_longest_token(tmp_path, text):
+    path = write_key(tmp_path / "key", text)
+    assert provider.read_key_file(path) == "a" * 4096
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "\n",
+        "two tokens\n",
+        "token\nsecond\n",
+        "token\n\n",
+        " t",
+        "a" * 4096 + "\nx",
+        "a" * 4096 + "\n\n",
+        "a" * 4096 + "\nsecond token\n",
+    ],
+)
 def test_key_file_requires_exactly_one_token(tmp_path, text):
     path = write_key(tmp_path / "key", text)
     with pytest.raises(ValueError, match="one token"):
