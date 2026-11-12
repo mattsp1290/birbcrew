@@ -18,6 +18,7 @@ import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
 import { MemberStore } from "./store.ts";
 import { IntegrationApi, integrationCapabilities } from "./integration-api.ts";
+import { firingParameterNames, RoutineApi, RoutineDispatcher, routineListParameterNames, type Clock } from "./routines.ts";
 import { TemporalSettingsError, temporalConnectionOptions, temporalSettings } from "./temporal-config.ts";
 
 const credentials = z.record(z.string().regex(/^[0-9a-f]{64}$/), z.string().min(1));
@@ -120,9 +121,19 @@ async function observe(
   }
 }
 
-export function createGateway(store: MemberStore, members: MemberClient, owners: Record<string, string>) {
+function queryOf(url: URL, names: readonly string[]) {
+  const given = [...url.searchParams.keys()];
+  if (new Set(given).size !== given.length || !given.every(name => names.includes(name))) throw new HttpError(400, "invalid_input");
+  return Object.fromEntries(url.searchParams);
+}
+
+/** `clock` drives routine schedules; tests inject one. */
+export function createGateway(store: MemberStore, members: MemberClient, owners: Record<string, string>,
+  { clock = () => new Date() }: { clock?: Clock } = {}) {
   const integration = new IntegrationApi(store, members);
   const accounts = Object.entries(credentials.parse(owners)).map(([hash, actor]) => ({ digest: Buffer.from(hash, "hex"), actor }));
+  const routines = new RoutineApi(store, clock);
+  const dispatcher = new RoutineDispatcher({ store, members, integration, owners: accounts.map(({ actor }) => actor), clock });
   async function route(request: IncomingMessage, response: ServerResponse) {
     const auth = request.headers.authorization;
     if (!auth?.startsWith("Bearer ") || auth.length === 7) throw new HttpError(401, "authentication_required");
@@ -135,16 +146,32 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
     if (versioned && path === "/capabilities" && request.method === "GET") return json(response, 200, integrationCapabilities);
     if (versioned && path === "/audit") {
       if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
-      const names = [...url.searchParams.keys()];
-      if (new Set(names).size !== names.length || !names.every(name => auditParameterNames.includes(name))) {
-        throw new HttpError(400, "invalid_input");
-      }
-      const query = auditQuerySchema.parse(Object.fromEntries(url.searchParams));
+      const query = auditQuerySchema.parse(queryOf(url, auditParameterNames));
       const page = await readAudit(store.pool, ownerId, query);
       if (query.format === "json") return json(response, 200, { apiVersion: "1", ...page });
       response.writeHead(200, { "Content-Type": "text/csv; charset=utf-8", "Cache-Control": "no-store",
         "Content-Disposition": 'attachment; filename="audit.csv"', "Audit-Next-After": page.nextAfter, "Audit-Has-More": String(page.hasMore) });
       return response.end(auditCsv(page.events));
+    }
+    const routineRoute = versioned && /^\/routines(?:\/([^/]+)(?:\/(enable|disable|firings))?)?$/.exec(path);
+    if (routineRoute) {
+      const [, id, action] = routineRoute;
+      if (id === undefined) {
+        if (request.method === "POST") return json(response, 201, await routines.create(ownerId, await body(request)));
+        if (request.method === "GET") return json(response, 200, await routines.list(ownerId, queryOf(url, routineListParameterNames)));
+        throw new HttpError(405, "method_not_allowed");
+      }
+      const routineId = z.uuid().parse(id);
+      if (action === "firings" && request.method === "GET") {
+        return json(response, 200, await routines.firings(ownerId, routineId, queryOf(url, firingParameterNames)));
+      }
+      if ((action === "enable" || action === "disable") && request.method === "POST") {
+        z.strictObject({}).parse(await body(request));
+        return json(response, 200, await routines.change(ownerId, routineId, action));
+      }
+      if (action === undefined && request.method === "GET") return json(response, 200, await routines.get(ownerId, routineId));
+      if (action === undefined && request.method === "DELETE") return json(response, 200, await routines.change(ownerId, routineId, "delete"));
+      throw new HttpError(405, "method_not_allowed");
     }
     const requestRoute = versioned && /^\/conversations\/([^/]+)\/requests(?:\/([^/]+)(\/cancel)?)?$/.exec(path);
     if (requestRoute) {
@@ -228,14 +255,23 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       return json(response, 503, { error: "retry_same_request" });
     });
   });
-  let timer: ReturnType<typeof setInterval> | undefined;
+  // Background loops: the cancellation outbox and the routine dispatcher. Neither keeps the
+  // process alive; each skips a beat while its previous pass still runs.
+  const timers: ReturnType<typeof setInterval>[] = [];
   server.once("listening", () => {
     const flush = () => { void integration.flushCancellations().catch(() => {}); };
-    timer = setInterval(flush, 1000);
-    timer.unref();
-    flush();
+    const dispatch = () => { void dispatcher.tick().catch(() => {}); };
+    for (const loop of [flush, dispatch]) {
+      const timer = setInterval(loop, 1000);
+      timer.unref();
+      timers.push(timer);
+      loop();
+    }
   });
-  server.once("close", () => { if (timer) clearInterval(timer); });
+  server.once("close", () => {
+    for (const timer of timers) clearInterval(timer);
+    void dispatcher.stop();
+  });
   return server;
 }
 

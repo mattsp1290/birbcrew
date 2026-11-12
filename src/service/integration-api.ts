@@ -4,6 +4,7 @@ import type { MemberClient } from "./client.ts";
 import { initiatorColumns, initiatorFromColumns, initiatorKinds, MemberStoreError, ownerInitiator, submitSchema, turnKey,
   type RequestInitiator } from "./domain.ts";
 import { conversationTurnLimit, workflowGenerationTurnLimit } from "./limits.ts";
+import { routineCapabilities } from "./routines.ts";
 import type { MemberStore } from "./store.ts";
 
 export const integrationCapabilities = {
@@ -21,6 +22,7 @@ export const integrationCapabilities = {
     version: 1, route: "/v1/audit", eventTypes: auditEventTypes, pagination: "event-id-keyset-no-skipped-commits",
     formats: ["json", "csv"], limits: auditLimits, retention: "append-only-with-database; no-automatic-TTL",
   },
+  routines: routineCapabilities,
 } as const;
 
 const keySchema = turnKey;
@@ -97,7 +99,8 @@ export class IntegrationApi {
     };
   }
 
-  async cancel(input: unknown): Promise<RequestReceipt> {
+  /** `policy` marks an intent a routine's fail_closed policy requested rather than the owner. */
+  async cancel(input: unknown, policy?: "fail_closed"): Promise<RequestReceipt> {
     const key = keySchema.parse(input);
     // Backfill active legacy turns created after migration17, without inventing an
     // admission for an unknown UUID or accepting a new payload. Such turns come from
@@ -121,7 +124,7 @@ export class IntegrationApi {
         WHERE c.owner_id=$1 AND a.conversation_id=$2 AND a.request_id=$3
         ON CONFLICT(conversation_id,request_id) DO NOTHING RETURNING receipt_id`, [key.ownerId,key.conversationId,key.requestId]);
       if (intent) await appendAudit(db, { type: "request.cancellation_requested", ownerId: key.ownerId, memberId: conversation.member_id,
-        conversationId: key.conversationId, requestId: key.requestId, payload: { receiptId: intent.receipt_id } });
+        conversationId: key.conversationId, requestId: key.requestId, payload: { receiptId: intent.receipt_id, ...(policy && { policy }) } });
     });
     return this.status(key);
   }

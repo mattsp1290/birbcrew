@@ -179,7 +179,7 @@ test("v1 HTTP contract enforces ownership, strict identity, capability version a
   assert.equal((await f.api(path + "/" + requestId, undefined, "invalid")).status, 401);
   const capabilities = await (await f.api("/v1/capabilities")).json();
   assert.equal(capabilities.apiVersion, "1");
-  assert.deepEqual(capabilities.initiatorKinds, ["owner"]);
+  assert.deepEqual(capabilities.initiatorKinds, ["owner", "routine"]);
   const before = f.counts();
   assert.deepEqual(await (await f.api(path + "/" + requestId)).json(), receipt);
   assert.deepEqual(f.counts(), before);
