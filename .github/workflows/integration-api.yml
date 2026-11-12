@@ -63,3 +63,6 @@ jobs:
       - run: npm run test:api:service
         env:
           TEMPORAL_CLI: ${{ github.workspace }}/.proof/bin/temporal
+      - run: npm run test:temporal:tls
+        env:
+          TEMPORAL_CLI: ${{ github.workspace }}/.proof/bin/temporal

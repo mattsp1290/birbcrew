@@ -9,16 +9,18 @@ import type { MemberProfile } from "./profiles.ts";
 import { memberActivities } from "./activities.ts";
 import { memberTaskQueue, activityQueue } from "./queues.ts";
 import type { MemberStore } from "./store.ts";
+import { temporalConnectionOptions, type TemporalSettings } from "./temporal-config.ts";
 
-export async function runMemberWorker(store: MemberStore, address: string, profiles: ReadonlyMap<string, MemberProfile>,
+export async function runMemberWorker(store: MemberStore, temporal: TemporalSettings, profiles: ReadonlyMap<string, MemberProfile>,
   configPath: string, stateDir: string) {
-  const connection = await NativeConnection.connect({ address });
+  const connection = await NativeConnection.connect(await temporalConnectionOptions(temporal));
+  const { namespace } = temporal;
   const workers: Worker[] = [];
   let supervisor;
   try {
     const children = new ChildStore(store.pool);
     workers.push(await Worker.create({
-      connection, taskQueue: memberTaskQueue,
+      connection, namespace, taskQueue: memberTaskQueue,
       activities: { rejectUnstartedAdmission:store.rejectUnstartedAdmission.bind(store), recordAcceptance:store.recordAcceptance.bind(store), rejectAccepted:store.rejectAccepted.bind(store), conversationProgress:progressActivity(store), cancelGenerating:store.cancelGenerating.bind(store), decideLive:answerLive.bind(null,store.pool), cancelLive:cancelLive.bind(null,store.pool),
         reconcileTurn: store.reconcileTurn.bind(store), reconcileChild:children.reconcile.bind(children),
         closeExitedChild: children.closeExitedChild.bind(children), quarantineDelegation: children.quarantineDelegation.bind(children) },
@@ -30,7 +32,7 @@ export async function runMemberWorker(store: MemberStore, address: string, profi
         if (!engines[engine]) continue;
         const activities = memberActivities(store, supervisor, profiles, stateDir, engine);
         workers.push(await Worker.create({
-          connection, activities, taskQueue: activityQueue(engine, profile),
+          connection, namespace, activities, taskQueue: activityQueue(engine, profile),
           ...(engine === "codex" && { maxConcurrentActivityTaskExecutions: 2 }),
         }));
       }
