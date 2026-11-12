@@ -51,6 +51,11 @@ export class MemberClient {
     }
   }
 
+  /** Readiness probe: the same frontend RPC Temporal's own connect check uses. Never touches a workflow. */
+  async temporalReachable(deadline: number): Promise<void> {
+    await this.temporal.connection.withDeadline(deadline, () => this.temporal.connection.workflowService.getSystemInfo({}));
+  }
+
   async open(input: unknown) {
     const conversation = await this.store.openConversation(openSchema.parse(input));
     await this.workflow(conversation);

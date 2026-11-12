@@ -52,6 +52,35 @@ function isEmpty(value: unknown) {
   return value == null || (typeof value === "object" && !Array.isArray(value) && !Object.keys(value).length);
 }
 
+// Strict schemas see every parameter; a repeated one is ambiguous, not last-wins.
+function searchParams(url: URL): Record<string, string> {
+  const entries = [...url.searchParams];
+  if (new Set(entries.map(([key]) => key)).size !== entries.length) throw new HttpError(400, "invalid_input");
+  return Object.fromEntries(entries);
+}
+
+const probeTimeout = 2_000;
+// A slow or failing dependency becomes undefined, so no driver text or address is reported.
+async function probe<T>(check: () => Promise<T>): Promise<T | undefined> {
+  const timer = new AbortController();
+  try { return await Promise.race([check(), delay(probeTimeout, undefined, { signal: timer.signal })]); }
+  catch { return undefined; }
+  finally { timer.abort(); }
+}
+
+async function health(store: MemberStore, members: MemberClient) {
+  const [schemaVersion, temporal] = await Promise.all([
+    probe(async () => (await store.pool.query<{ version: number | null }>(
+      "SELECT max(version) AS version FROM birbcrew_ts.schema_versions")).rows[0].version),
+    probe(async () => { await members.temporalReachable(Date.now() + probeTimeout); return true; }),
+  ]);
+  const database = typeof schemaVersion === "number" ? "ready" : "unavailable";
+  return {
+    apiVersion: "1", status: database === "ready" && temporal ? "ready" : "not_ready",
+    dependencies: { database: { status: database, schemaVersion: schemaVersion ?? null }, temporal: { status: temporal ? "ready" : "unavailable" } },
+  } as const;
+}
+
 async function observe(
   pool: Pool, owner: string, snapshot: PublicSnapshot, runId: string, response: ServerResponse,
 ) {
@@ -131,6 +160,11 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
     const versioned = url.pathname.startsWith("/v1/");
     const path = versioned ? url.pathname.slice(3) : url.pathname;
     if (versioned && path === "/capabilities" && request.method === "GET") return json(response, 200, integrationCapabilities);
+    if (versioned && path === "/health" && request.method === "GET") {
+      z.strictObject({}).parse(searchParams(url));
+      const report = await health(store, members);
+      return json(response, report.status === "ready" ? 200 : 503, report);
+    }
     const requestRoute = versioned && /^\/conversations\/([^/]+)\/requests(?:\/([^/]+)(\/cancel)?)?$/.exec(path);
     if (requestRoute) {
       const conversationId = z.uuid().parse(requestRoute[1]);

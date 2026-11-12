@@ -14,6 +14,7 @@ export const integrationCapabilities = {
   proxy: { version: 1, protocols: ["anthropic-messages", "openai-responses", "openai-chat-completions"] },
   trustedContext: { version: 1, transport: "operator-configured-local-runtime", httpSubmission: false },
   observation: { version: 1, protocol: "AG-UI", mode: "snapshot-and-bounded-tail", cursorExpiry: "reconnect-for-snapshot" },
+  health: { version: 1, dependencies: ["database", "temporal"] },
 } as const;
 
 const keySchema = turnKey;

@@ -378,3 +378,55 @@ test("v1 status reconciles an unstarted admission after terminal workflow withou
   assert.equal(describes, 1, "wrong-owner reads and terminal retries cannot dispatch");
   assert.equal((await pool.query("SELECT count(*)::integer n FROM birbcrew_ts.turns WHERE conversation_id=$1", [key.conversationId])).rows[0].n, 0);
 });
+
+async function serve(gatewayStore: MemberStore, members: MemberClient) {
+  const token: string = randomUUID();
+  const server = createGateway(gatewayStore, members, { [createHash("sha256").update(token).digest("hex")]: randomUUID() });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  return {
+    get: (path: string, credential = token) => fetch(`http://127.0.0.1:${address.port}${path}`, { headers: { Authorization: "Bearer " + credential } }),
+    async stop() { const closed = once(server, "close"); server.close(); server.closeAllConnections(); await closed; },
+  };
+}
+
+test("v1 health is authenticated, strict and reports every ready dependency", async (t) => {
+  const { rows: [{ version }] } = await pool.query("SELECT max(version)::integer AS version FROM birbcrew_ts.schema_versions");
+  const gateway = await serve(store, { async temporalReachable() {} } as unknown as MemberClient); t.after(gateway.stop);
+  assert.equal((await gateway.get("/v1/health", "invalid")).status, 401);
+  const response = await gateway.get("/v1/health");
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { apiVersion: "1", status: "ready", dependencies: {
+    database: { status: "ready", schemaVersion: version }, temporal: { status: "ready" } } });
+  assert.equal((await gateway.get("/v1/health?verbose=1")).status, 400);
+  assert.equal((await gateway.get("/health")).status, 404, "health is versioned-only");
+});
+
+test("v1 health answers 503 with the same shape, bounded and without dependency detail", { timeout: 20_000 }, async (t) => {
+  const { rows: [{ version }] } = await pool.query("SELECT max(version)::integer AS version FROM birbcrew_ts.schema_versions");
+  const secret = "do-not-leak-" + randomUUID();
+  const refused = new Pool({ connectionString: `postgresql://probe:${secret}@127.0.0.1:1/absent` });
+  t.after(() => refused.end());
+  const cases = [
+    { store, members: { async temporalReachable() { throw new Error("connect ECONNREFUSED " + secret); } },
+      dependencies: { database: { status: "ready", schemaVersion: version }, temporal: { status: "unavailable" } } },
+    { store: new MemberStore(refused), members: { async temporalReachable() {} },
+      dependencies: { database: { status: "unavailable", schemaVersion: null }, temporal: { status: "ready" } } },
+    // Both dependencies hang: the probes run concurrently and each is cut off.
+    { store: new MemberStore({ query: () => new Promise(() => {}) } as unknown as Pool), members: { temporalReachable: () => new Promise(() => {}) },
+      dependencies: { database: { status: "unavailable", schemaVersion: null }, temporal: { status: "unavailable" } } },
+  ];
+  for (const { store: target, members, dependencies } of cases) {
+    const gateway = await serve(target, members as unknown as MemberClient);
+    try {
+      const started = Date.now();
+      const response = await gateway.get("/v1/health");
+      assert.ok(Date.now() - started < 4_000, "each dependency probe is bounded");
+      assert.equal(response.status, 503);
+      const report = await response.json();
+      assert.deepEqual(report, { apiVersion: "1", status: "not_ready", dependencies });
+      const text = JSON.stringify(report);
+      assert.ok(!text.includes(secret) && !text.includes("ECONNREFUSED") && !text.includes("127.0.0.1"), text);
+    } finally { await gateway.stop(); }
+  }
+});
