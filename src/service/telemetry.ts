@@ -166,7 +166,9 @@ export async function flushTelemetry(budgetMs = 1_000) {
   clearTimeout(timer);
 }
 
-export function traced<T>(name: Operation, scope: Scope, work: () => Promise<T>): Promise<T> {
+/** `outcome` adds attributes from a successful result; callers pass only counts and closed enums. */
+export function traced<T>(name: Operation, scope: Scope, work: () => Promise<T>,
+  outcome?: (result: T) => Record<string, string | number>): Promise<T> {
   if (!tracer) return work();
   // An activity can receive additional fields at runtime. Only validated correlation IDs enter the exporter.
   const { engine, conversationId, requestId, workflowRunId, childId } = scope;
@@ -180,6 +182,7 @@ export function traced<T>(name: Operation, scope: Scope, work: () => Promise<T>)
     const span = tracer.startSpan(name, { attributes }, context);
     try {
       const result = await active.run({ traceId, context: trace.setSpan(context, span) }, work);
+      if (outcome) span.setAttributes(outcome(result));
       span.setStatus({ code: SpanStatusCode.OK });
       return result;
     } catch (error) {
