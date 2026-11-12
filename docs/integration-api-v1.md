@@ -244,7 +244,10 @@ the cancellation fields, not an assumption that `completed` means a tool succeed
   reconcile that identity. Never silently generate a replacement UUID.
   `409 usage_limit` means the member has used its daily token budget: nothing was
   admitted, and the same request can be sent again once the window or the budget
-  allows it (see [usage metering](usage-metering.md)).
+  allows it (see [usage metering](usage-metering.md)). In the rare case where usage
+  recorded between Crew's two budget checks makes the second one refuse, that
+  conversation is also closed to new turns, as after any refused admission; send the
+  request again in a new conversation.
 - `503 retry_same_request`, connection loss, timeout: the outcome may be ambiguous.
   GET the same identity, then retry the exact submission if needed. Do not infer a
   rejection from a lost acknowledgement. A validation/explicit rejected submission

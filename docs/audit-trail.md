@@ -42,9 +42,11 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   caller chooses it. An owner admission stores no `initiator_id`; the audit row
   names the owner ID. A request with no admission row is recorded as
   owner-initiated, as before migration 23: requests admitted by workflow histories
-  older than `bounded-conversations-v1`, and trusted-context effects, whose lane
-  records no admission. `member.spawned`, `conversation.opened`, the routine
-  facts and the memory facts belong to no request and name the acting owner. Migration 25 adds the
+  older than `bounded-conversations-v1`, trusted-context effects, whose lane
+  records no admission, and a request refused under its member's usage budget
+  (`usage.request_refused`, which names a routine's firing in its payload instead).
+  `member.spawned`, `conversation.opened`, the routine facts, the memory facts and
+  the budget facts belong to no request and name the acting owner. Migration 25 adds the
   second kind, `routine`, with the routine's ID: an admission records it only from
   the routine's firing row (see
   [scheduled routines](scheduled-routines.md#what-a-firing-records)). Named CHECK
@@ -300,6 +302,12 @@ Migration 26 replaces `audit_events_type_check` the same way, with every earlier
 type and the three memory types, and adds one partial unique index for them. It takes
 `audit_events` together with `members` and `conversations` without queueing, so it
 never waits for a native turn; [member memory](memories.md#upgrade) lists its locks.
+
+Migration 31 replaces `audit_events_type_check` the same way, with every earlier type
+and the three usage types, and adds two partial unique indexes for them. It takes
+`audit_events` and `routine_firings` together with `members` and `native_launches`
+without queueing, so it never waits for a native turn;
+[usage metering](usage-metering.md#upgrade-and-recovery) lists its locks.
 
 The audit table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest

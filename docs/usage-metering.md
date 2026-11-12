@@ -81,7 +81,8 @@ by the identity that already makes the effect happen once.
 The supervisor host writes the row after the runner returns a confirmed result and
 before it commits that result (the reply, the card, the delegation or the child's
 outcome). The model work has happened even if the commit then fails. A segment whose
-driver returned no usage gets an `unknown` row. A segment that failed, was cancelled
+driver returned no usage gets an `unknown` row, and so does one whose counts the
+ledger's CHECKs would refuse: metering never costs a segment its result. A segment that failed, was cancelled
 or whose runner died gets no row.
 
 **Per segment, not per request.** Each SDK reports usage per invocation: Pi per
@@ -162,11 +163,15 @@ A record is:
 records. Pass `nextAfter` as the next `after`, or `nextBefore` as the next `before`;
 `hasMore` says whether another page exists. `usageId` is a decimal string. IDs are
 drawn before a row commits, so a row can commit after a later one. A records page you
-have already read past does not gain that row; the totals always include it.
+have already read past does not gain that row; the totals always include it. A
+coordinated restore reissues the IDs drawn after its recovery point to new rows (see
+[below](#upgrade-and-recovery)), so a consumer that mirrors records must, after a
+restore, drop the rows it holds above the restored installation's newest `usageId` and
+read again.
 
 `GET /v1/capabilities` describes the feature under `usage`: the states, the token and
 cost rules, what each engine reports, the budget period and refusal code, and that a
-restore rewinds the ledger.
+restore rewinds the ledger and reissues record IDs.
 
 ## Budgets
 
@@ -208,6 +213,9 @@ request can be sent again later. The check runs twice:
    `MemberClient` reports it as the same `409 usage_limit`. Like any refused admission,
    it then closes that conversation to new turns.
 
+The first check reads nothing more for a member without a budget, and leaves a
+trusted-context conversation to admission, which refuses it as before.
+
 A request that already has an admission row or a turn is never refused, so a retry
 gets the answer it got before. A request already running is never interrupted, and its
 usage is recorded when its segments return. Usage arrives only after a segment, so the
@@ -245,9 +253,12 @@ The `model.invoke` span gains `usage.state` and, when the segment reported count
 ## Upgrade and recovery
 
 Migration 31 creates the two tables and replaces two CHECK constraints NOT VALID:
-`audit_events_type_check` (adding the three types) and `routine_firings_check4`
-(adding the failure reason `usage_limit`). Existing rows are neither rewritten nor
-checked. Until `migrate()` commits it holds `SHARE ROW EXCLUSIVE` on `members` and
+`audit_events_type_check` (adding the three types) and the routine firings' reason
+CHECK, which 025 left unnamed as `routine_firings_check4` and which becomes
+`routine_firings_reason_check` (adding the failure reason `usage_limit`). Existing
+rows are neither rewritten nor checked. Each replacement repeats the whole predicate,
+so `migrate()` now refuses to apply a migration whose version is below one already
+applied: applied later, it would silently drop what the newer one allowed. Until `migrate()` commits it holds `SHARE ROW EXCLUSIVE` on `members` and
 `native_launches` for the foreign keys, and `ACCESS EXCLUSIVE` on `audit_events` and
 `routine_firings`. As in migration 25, it takes all four with `NOWAIT` and retries, so
 it never waits in a lock queue. A running native turn's admission transaction holds
@@ -261,13 +272,16 @@ database, and Crew changes neither when the restored installation resumes:
 - **Ledger.** Rows recorded after the recovery point are gone. Those tokens were spent,
   so until the window ends the budget counts less than the member used. Crew cannot
   rebuild them: the native sessions do not hold reliable counts. The provider's own
-  bill stays the source of truth.
+  bill stays the source of truth. The ledger's identity resumes at the recovery point,
+  so new rows get `usageId`s the discarded rows had. Unlike the audit trail, whose
+  identity a restore moves past every earlier ID, the ledger keeps no fence epoch.
 - **Budgets.** A budget set, changed or cleared after the recovery point returns to its
-  earlier state. Unlike a standing grant, which a restore could bring back after the
-  owner revoked it and which Crew therefore revokes on resume, a budget only limits. A
-  restore can still bring back a higher limit or none at all. Crew does not guess
-  the newer limit. After a restore, check each member's budget with
-  `GET /v1/usage/budgets/{memberId}` and set it again.
+  earlier state, so a restore can bring back a higher limit or none at all. A standing
+  grant restored that way is revoked on resume, because revoking is always safe. A
+  budget has no safe value to fall back to: Crew cannot know the newer limit, and
+  inventing one could stop work the owner allowed. So it leaves budgets as restored.
+  After a restore, check each member's budget with `GET /v1/usage/budgets/{memberId}`
+  and set it again.
 
 ## Not covered
 
@@ -307,15 +321,17 @@ no second row for a repeated start, and the `model.invoke` attributes. It also c
 the mapping rules: cost kept only when billed, counts that go down or cannot be read.
 
 `usage.test.ts` runs against PostgreSQL. It checks one row per launch, bound to the
-launch's execution, and the append-only ledger; the totals, routine subtotal, pages,
+launch's execution, the CHECKs on `reported` and `unknown` rows, a refused row kept as
+`unknown`, and the append-only ledger; the totals, routine subtotal, pages,
 time ranges and strict queries of every route, with another owner seeing nothing and
 getting 404 for this owner's IDs; setting, repeating, changing and clearing a budget
 and their audit rows; refusal at both checks and through the gateway, one audit row
 per refused request, no refusal of an admitted or running request, the soft cap, the
 UTC day window, and the mapping of the admission activity's failure; a routine firing
 failing `usage_limit` until the routine is disabled; migration 31 on a version-26
-database, its locks, no rewrite, NOT VALID CHECKs and no wait for a running turn; and a
-held installation refusing usage writes.
+database, its locks, no rewrite, NOT VALID CHECKs, a reason CHECK a sibling migration
+already renamed, and no wait for a running turn; `migrate()` refusing to apply a
+migration below one already applied; and a held installation refusing usage writes.
 
 `recovery.test.ts` (it needs PostgreSQL 17 `pg_dump`, as the other recovery tests do)
 restores a real dump taken after a budget and a segment were recorded. It checks that
