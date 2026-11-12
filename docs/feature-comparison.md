@@ -202,7 +202,7 @@ Each line states what Crew does at `47f3c0f` and where the feature stops.
 | --- | --- | --- |
 | 36 | Part | The gateway maps static bearer-token digests to owner IDs. Crew has no sign-in provider, no session, no role, and no user management. |
 | 37 | Part | The repository builds a service image and an executor image and supports Temporal mTLS. It has no Kubernetes manifest and no Helm chart, and a rolling update is documented as unsafe. See [persistent deployment](persistent-deployment.md) and [the in-cluster executor](in-cluster-executor.md). |
-| 38 | Part | Crew exports four trace span names over OTLP. It records no token count and no cost, and it has no spend limit. |
+| 38 | Part | Crew exports four trace span names over OTLP. It records the token counts each engine reports for every native segment, totals them per member and conversation through `/v1/usage`, and lets an owner give a member a daily token budget that admission enforces as a soft cap. It keeps a cost only when a Pi provider reports a billed one, so Claude and Codex usage has no cost, and Crew never estimates one. See [usage metering](usage-metering.md). |
 | 39 | Yes | An operator can take a quiesced backup of the whole installation and restore it behind a fence. The procedure stops the whole installation. See [coordinated recovery](coordinated-recovery.md). |
 | 40 | Yes | MIT. |
 

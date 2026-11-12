@@ -116,6 +116,11 @@ it covers proceed without a card and name the grant. Grants are listed and revok
 through `/v1/members/{memberId}/grants`. Crew cannot tell a person from an automated
 client holding the owner's token, so a grant covers both.
 
+[Usage metering](docs/usage-metering.md) records the token counts each engine reports
+for every native segment, never an estimated cost. An owner reads totals per member and
+conversation through `/v1/usage` and can give a member a daily token budget; a member at
+its budget is refused new requests with `409 usage_limit`, as a soft cap.
+
 An owner can save [member memory](docs/memories.md) through `/v1/memories`: up to 32
 short facts per member. Each conversation of the member gets the facts that were
 active when it opened, as system context framed as reference data. Only the owner

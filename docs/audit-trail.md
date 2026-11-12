@@ -91,7 +91,7 @@ audit version may switch to a keyed per-owner digest.
 
 The registry is the `auditEvents` object in `src/service/audit.ts`.
 `audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
-`024-standing-grants.sql`, `025-routines.sql` and then `026-memories.sql`, lists the same types.
+`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql` and then `031-usage.sql`, lists the same types.
 Each widening replaces the whole constraint, so the latest migration lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
@@ -117,6 +117,9 @@ A test checks that the two lists match. `GET /v1/capabilities` lists them under
 | `memory.created` | owner | a [member memory](memories.md) entry is created | entry | `memoryId` |
 | `memory.deleted` | owner | an entry is deleted and its text erased | entry | `memoryId` |
 | `memory.suspended` | system | a restored installation resumes and suspends an active entry | entry | `memoryId`, `reason` (`recovery_restore`) |
+| `usage.budget_set` | owner | a member's [usage budget](usage-metering.md) is set or its limit changes | member + revision | `revision`, `tokenLimit`, `period` |
+| `usage.budget_cleared` | owner | a member's usage budget is cleared | member + revision | `revision` |
+| `usage.request_refused` | system | admission refuses a request because its member used its budget; the only refused call the trail records | conversation + request | `tokenLimit`, `usedTokens`, `period`, `windowStart`, `budgetRevision`, optional `routineId` |
 
 `approval.decided` names the deciding owner as its actor. Through the gateway, the
 owner comes from the bearer token at `POST .../human`. The operator CLI names the

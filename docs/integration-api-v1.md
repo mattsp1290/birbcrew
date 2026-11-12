@@ -16,7 +16,8 @@ contract (event types, page limits, formats) and the scheduled-routine limits an
 policies (`routines`), `standingGrants` (the standing
 choices, the card and state fields, the grantable tool, policy version and
 initiator kinds, the grants route and the inactive-list limit), `memories` (the
-member memory route, limits, injection and deletion semantics per engine), health
+member memory route, limits, injection and deletion semantics per engine), `usage`
+(the ledger states, what each engine reports, the budget period and refusal code), health
 dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
@@ -44,6 +45,9 @@ proof of the operator's provider access or configured profile availability.
 | `POST /v1/members/{memberId}/grants/{grantId}/revoke` | Revoke a standing grant for later calls, body `{}`; repeating returns the same grant |
 | `POST /v1/memories`, `GET /v1/memories` | Create (`requestId`, `memberId`, `text`) and list member memory entries |
 | `GET`/`DELETE /v1/memories/{memoryId}` | Read one entry, or erase its text and keep a tombstone |
+| `GET /v1/usage`, `GET /v1/usage/members`, `GET /v1/usage/conversations` | Token totals for the owner, per member (with its budget) and per conversation, over an optional time range |
+| `GET /v1/usage/records` | Usage ledger rows, one per native segment, newest first |
+| `GET`/`PUT`/`DELETE /v1/usage/budgets/{memberId}` | Read, set (`tokenLimit`) or clear a member's daily token budget |
 
 Authentication is required even for capabilities and health. There is no
 unauthenticated route. A request without a valid token gets `401` before the gateway
@@ -238,6 +242,9 @@ the cancellation fields, not an assumption that `completed` means a tool succeed
   **not** proof it can never appear; retry the same identity/payload.
 - `409`: explicit conflict, capacity limit, or rejected request. Inspect the error and
   reconcile that identity. Never silently generate a replacement UUID.
+  `409 usage_limit` means the member has used its daily token budget: nothing was
+  admitted, and the same request can be sent again once the window or the budget
+  allows it (see [usage metering](usage-metering.md)).
 - `503 retry_same_request`, connection loss, timeout: the outcome may be ambiguous.
   GET the same identity, then retry the exact submission if needed. Do not infer a
   rejection from a lost acknowledgement. A validation/explicit rejected submission
@@ -393,6 +400,18 @@ conversation's first turn, and Claude's SDK may resend the prompt it recorded th
 on those engines a deletion may reach only conversations that have not run a turn.
 `capabilities.memories.startedConversations` says which. See
 [member memory](memories.md) for the trust boundary and what deletion does not erase.
+
+## Usage metering
+
+Crew records one ledger row for each native segment with the token counts the engine's
+SDK reported, or `unknown` when it reported none. It keeps a cost only when the
+provider billed it; it never estimates one. The `/v1/usage` routes total an owner's
+rows, per member and per conversation, and mark the part that routines started. An
+owner can set one daily token budget per member (`PUT /v1/usage/budgets/{memberId}`).
+While the member's input and output tokens for the UTC day are at or over it, a new
+request, the owner's or a routine's, fails `409 usage_limit`; a request already
+admitted is never refused or interrupted, so the cap can be passed by what running
+requests use. See [usage metering](usage-metering.md).
 
 ## Validation
 

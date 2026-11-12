@@ -98,6 +98,7 @@ trigger keeps a firing's identity fixed.
 | `rejected` | `failed`: opening or admitting was refused for good | yes |
 | `approval_required` | `failed` (or `waiting` until then): a `fail_closed` request reached a human decision | yes |
 | `turn_failed`, `turn_cancelled`, `turn_uncertain` | `failed`: the request's receipt ended `failed`, `cancelled` or `uncertain` | yes |
+| `usage_limit` | `failed`: admission refused the request because the member used its daily [usage budget](usage-metering.md) | yes |
 
 An open refused with `409 memory_limit`, because the member's [memory](memories.md)
 with the project notes would not fit its engine, is such a refusal: the firing fails
