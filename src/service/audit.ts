@@ -12,16 +12,22 @@ export const trustedToolName = /^[a-z][a-z0-9_]{0,63}$/;
 // Each key names one partial unique index in 021-audit.sql. A naming mismatch fails
 // loudly, and unrelated conflicts (such as a primary key) still raise errors.
 const requestFact = "(event_type, conversation_id, request_id) WHERE event_type IN ('request.accepted', 'request.cancellation_requested', 'request.finished')";
+const routineFact = "((payload->>'routineId'), (payload->>'revision')) WHERE event_type IN ('routine.created', 'routine.enabled', 'routine.disabled', 'routine.deleted')";
+const routineChange = { routineId: uuid, revision: z.int().min(2).max(2_147_483_647) };
 const grantFact = "(event_type, (payload->>'grantId'), (payload->>'approvalId')) WHERE event_type IN ('approval.auto_approved', 'grant.created', 'grant.revoked')";
 
-/** The closed audit vocabulary. 021-audit.sql, as widened by 024-standing-grants.sql, repeats these types in a CHECK.
- * Payloads are strict: identifiers, digests, choices and statuses only, never
- * prompt/reply text, tool arguments or secrets. */
+type Actor = "owner" | "system";
+/** The closed audit vocabulary. 021-audit.sql repeats these types in a CHECK, widened by
+ * 024-standing-grants.sql and 025-routines.sql. Payloads are strict: identifiers, digests, choices and statuses only,
+ * never prompt/reply text, tool arguments or secrets. An actor given as a function is
+ * decided by the validated payload. A routine acts with its owner's authority, so rows its
+ * firings cause name the owner; Crew's own decisions about a routine name the system. */
 export const auditEvents = {
   "member.spawned": { actor: "owner", key: "(member_id) WHERE event_type = 'member.spawned'",
     payload: z.strictObject({ spawnRequestId: uuid, engine: engineSchema, profile: z.string().min(1) }) },
+  // routineId: the routine firing that opened it, read from the firing row.
   "conversation.opened": { actor: "owner", key: "(conversation_id) WHERE event_type = 'conversation.opened'",
-    payload: z.strictObject({}) },
+    payload: z.strictObject({ routineId: uuid.optional() }) },
   "request.accepted": { actor: "owner", key: requestFact, payload: z.strictObject({ promptDigest: sha256 }) },
   "approval.decided": { actor: "owner", key: "((payload->>'approvalId')) WHERE event_type = 'approval.decided'",
     payload: z.strictObject({
@@ -38,16 +44,33 @@ export const auditEvents = {
     payload: z.strictObject({ grantId: uuid, reason: z.enum(["owner", "recovery_restore"]) }) },
   "work_item.committed": { actor: "system", key: "((payload->>'receiptId')) WHERE event_type = 'work_item.committed'",
     payload: z.strictObject({ receiptId: uuid, approvalId: uuid }) },
-  "request.cancellation_requested": { actor: "owner", key: requestFact, payload: z.strictObject({ receiptId: uuid.optional() }) },
+  // `policy` marks an intent a routine's fail_closed policy requested with its owner's authority.
+  "request.cancellation_requested": { actor: "owner", key: requestFact,
+    payload: z.strictObject({ receiptId: uuid.optional(), policy: z.literal("fail_closed").optional() }) },
   "request.finished": { actor: "system", key: requestFact, payload: z.strictObject({
     status: z.enum(["completed", "failed", "cancelled", "uncertain"]),
     reason: z.enum(["predecessor_failed", "predecessor_cancelled", "admission_unconfirmed"]).optional(),
   }) },
   "trusted_effect.completed": { actor: "system", key: "((payload->>'operationId')) WHERE event_type = 'trusted_effect.completed'",
     payload: z.strictObject({ operationId: uuid, toolName: z.string().regex(trustedToolName) }) },
+  "routine.created": { actor: "owner", key: routineFact, payload: z.strictObject({
+    routineId: uuid, revision: z.literal(1), schedule: z.string().min(9).max(128),
+    approvalPolicy: z.enum(["wait", "fail_closed"]), promptDigest: sha256,
+  }) },
+  "routine.enabled": { actor: "owner", key: routineFact, payload: z.strictObject(routineChange) },
+  // The owner disables a routine; Crew does after its tenth consecutive failure.
+  "routine.disabled": { actor: (payload: { reason: string }): Actor => payload.reason === "owner" ? "owner" : "system",
+    key: routineFact, payload: z.strictObject({ ...routineChange, reason: z.enum(["owner", "consecutive_failures"]) }) },
+  "routine.deleted": { actor: "owner", key: routineFact, payload: z.strictObject(routineChange) },
+  "routine.firing_settled": { actor: "system",
+    key: "((payload->>'routineId'), (payload->>'scheduledFor')) WHERE event_type = 'routine.firing_settled'",
+    payload: z.strictObject({
+      routineId: uuid, scheduledFor: z.iso.datetime(), status: z.enum(["succeeded", "failed", "skipped"]),
+      reason: z.enum(["missed", "overlap", "owner_unavailable", "rejected", "approval_required", "turn_failed",
+        "turn_cancelled", "turn_uncertain"]).optional(),
+    }) },
 } as const;
 export type AuditEventType = keyof typeof auditEvents;
-type Actor = "owner" | "system";
 export const auditEventTypes = Object.keys(auditEvents) as AuditEventType[];
 
 export interface AuditFact<T extends AuditEventType> {

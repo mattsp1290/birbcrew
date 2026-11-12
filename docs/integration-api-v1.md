@@ -11,8 +11,9 @@ trusted scopes, tool registries, or engine configuration in a turn request.
 `GET /v1/capabilities` returns `apiVersion: "1"`, request and cancellation contract
 identifiers, proxy protocol versions, conversation/generation limits, trusted-context
 transport availability, observation limits, receipt retention semantics, the
-request initiator kinds (`initiatorKinds`, today `["owner"]`), the audit
-contract (event types, page limits, formats), and `standingGrants` (the standing
+request initiator kinds (`initiatorKinds`, today `["owner", "routine"]`), the audit
+contract (event types, page limits, formats) and the scheduled-routine limits and
+policies (`routines`), and `standingGrants` (the standing
 choices, the card and state fields, the grantable tool, policy version and
 initiator kinds, the grants route and the inactive-list limit). Additive
 response fields are compatible; consumers must reject an unsupported major version.
@@ -31,6 +32,9 @@ proof of the operator's provider access or configured profile availability.
 | `POST /v1/conversations/{conversationId}/events` | Independent, read-only AG-UI observation |
 | `POST /v1/conversations/{conversationId}/human` | Existing explicit human-decision contract |
 | `GET /v1/audit` | Owner-scoped, append-only audit events; keyset pages as JSON or CSV export |
+| `POST /v1/routines`, `GET /v1/routines` | Create (`requestId`, `memberId`, `schedule`, `prompt`, `approvalPolicy`) and list scheduled routines |
+| `GET`/`DELETE /v1/routines/{routineId}`, `POST .../enable`, `POST .../disable` | Read, tombstone, enable or disable one routine |
+| `GET /v1/routines/{routineId}/firings` | Firing history, newest first, with each firing's conversation and request |
 | `GET /v1/members/{memberId}/grants` | The member's active standing grants and up to 20 ended ones |
 | `POST /v1/members/{memberId}/grants/{grantId}/revoke` | Revoke a standing grant for later calls, body `{}`; repeating returns the same grant |
 
@@ -69,11 +73,15 @@ A successful submit returns `202` with a receipt:
 ```
 
 `initiator` is read-only: what started the request, recorded once when Crew
-admitted it. Requests submitted through this API are always started by the
-authenticated owner, so the owner kind carries no ID. No request body can set it.
-A later release that adds a kind lists it in `initiatorKinds`. The field is absent
-for a request admitted before admissions were durable (a workflow history older
-than bounded conversations) until a cancellation intent records its admission.
+admitted it. Requests submitted through this API are started by the authenticated
+owner, so the owner kind carries no ID. A request a scheduled routine submitted
+reports `{"kind": "routine", "id": "<routineId>"}`; only the routine's firing record
+can make an admission say so (see [scheduled routines](scheduled-routines.md)), and
+a request sent here under a claimed firing's conversation and request UUIDs with
+exactly the routine's prompt is that firing's request. No request body can set it. A later release that adds a kind lists it in
+`initiatorKinds`. The field is absent for a request admitted before admissions were
+durable (a workflow history older than bounded conversations) until a cancellation
+intent records its admission.
 
 The successful boundary means the admission identity/payload digest is committed in
 Crew PostgreSQL and the Temporal workflow owns the queued work. It does **not**
@@ -232,6 +240,18 @@ it.
 Payloads hold identifiers, digests, choices and statuses only, never prompt or
 reply text, tool arguments or credentials. See [the audit trail](audit-trail.md)
 for the event registry, field semantics and limits.
+
+## Scheduled routines
+
+An owner can define a routine: a five-field UTC cron schedule, one of their members
+and a fixed prompt. The gateway submits the prompt at each window in a new
+conversation, through the same admission as a request sent here, with nobody
+present. Windows are at least 15 minutes apart and an owner has at most 20 enabled
+routines. Missed windows are skipped, never replayed. A routine's request that
+reaches a human decision either waits for it (`wait`) or is cancelled through the
+durable intent above (`fail_closed`). The routes, firing statuses, limits and costs
+are in [scheduled routines](scheduled-routines.md). Like the other routes, bodies
+are strict and the owner comes only from the bearer token.
 
 ## Validation
 

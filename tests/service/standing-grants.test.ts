@@ -362,20 +362,20 @@ async function databaseAt(t: TestContext, version: number) {
 }
 
 test("a request admitted by any initiator but the owner is never granted", async (t) => {
-  // Only the owner kind exists in this release. An admission recording a kind it cannot read (as
-  // after a rollback) fails the proposal closed, before any call is inserted, instead of matching
-  // the owner's grant. A release that knows another kind gets a card from the same check.
-  const separate = await databaseAt(t, 24);
+  // A routine's request gets a card even under the owner's allow_always grant. An admission
+  // recording a kind this release cannot read (as after a rollback) fails the proposal closed,
+  // before any call is inserted, instead of matching the grant.
+  const separate = await databaseAt(t, Infinity);
   await separate.query("ALTER TABLE birbcrew_ts.request_admissions DROP CONSTRAINT request_admissions_initiator_kind_check");
   const local = new MemberStore(separate), ledger = new ApprovalStore(separate);
   const ownerId = "owner-" + randomUUID();
   const { memberId } = await local.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
-  async function call(initiator: "owner" | "fixture_kind") {
+  async function call(initiator: "owner" | "routine" | "fixture_kind") {
     const conversationId = randomUUID(), requestId = randomUUID(), text = "record " + requestId;
     await local.openConversation({ ownerId, memberId, conversationId });
     if (initiator === "owner") await local.recordAcceptance({ ownerId, conversationId, requestId, text }, ownerInitiator);
     else await separate.query(`INSERT INTO birbcrew_ts.request_admissions (conversation_id,request_id,prompt_digest,initiator_kind,initiator_id)
-      VALUES ($1,$2,$3,$4,'fixture-1')`, [conversationId, requestId, createHash("sha256").update(text).digest(), initiator]);
+      VALUES ($1,$2,$3,$4,$5)`, [conversationId, requestId, createHash("sha256").update(text).digest(), initiator, randomUUID()]);
     const start = await local.beginTurn({ ownerId, conversationId, requestId, text });
     assert.equal(start.kind, "start"); if (start.kind !== "start") throw new Error("unreachable");
     const proposal = ledger.propose({ ownerId, memberId, conversationId, requestId, token: start.token, invocationId: requestId,
@@ -385,6 +385,8 @@ test("a request admitted by any initiator but the owner is never granted", async
   const card = await (await call("owner")).proposal;
   await ledger.decide(answer(card, "allow_always"));
   assert.ok((await (await call("owner")).proposal).grantId);
+  const scheduled = await (await call("routine")).proposal;
+  assert.equal(scheduled.grantId, undefined);
   const other = await call("fixture_kind");
   await assert.rejects(other.proposal, /Unknown request initiator/);
   const { rows } = await separate.query("SELECT 1 FROM birbcrew_ts.deferred_calls WHERE conversation_id=$1", [other.conversationId]);

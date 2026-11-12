@@ -30,7 +30,10 @@ Each row in `birbcrew_ts.audit_events` records one fact:
 - `occurred_at`: the database clock (`clock_timestamp()`) when the row was
   inserted, inside the state change's transaction. It is not the commit time.
 - `actor_kind`/`actor_id`: who performed the action. Today this is `owner` (with
-  the owner ID) or `system` (with no ID) for work Crew carries out itself.
+  the owner ID) or `system` (with no ID) for work Crew carries out itself. A
+  scheduled routine acts with its owner's authority, so the rows its firings cause
+  name the owner; Crew's own decisions about a routine (a skipped or settled window,
+  disabling it after ten failures) name the system.
 - `initiator_kind`/`initiator_id`: what started the request the action belongs to.
   Migration 23 records it on the request's durable admission
   (`request_admissions.initiator_kind`/`initiator_id`) once, when the request is
@@ -40,15 +43,18 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   names the owner ID. A request with no admission row is recorded as
   owner-initiated, as before migration 23: requests admitted by workflow histories
   older than `bounded-conversations-v1`, and trusted-context effects, whose lane
-  records no admission. `member.spawned` and `conversation.opened` belong to no
-  request and name the acting owner. The owner is the only kind today. A named
-  CHECK constraint (`audit_events_initiator_check`) allows only it, as
-  `request_admissions_initiator_kind_check` does for admissions. Scheduled
-  routines or member handoff must widen both in their own migration. Standing
-  grants (migration 24) did not: a call a grant approves keeps its request's
-  initiator, and `approval.auto_approved` names the system as its actor. No
-  operator or application kind exists yet. Operator CLI commands
-  (`npm run members`) act as the owner they name.
+  records no admission. `member.spawned`, `conversation.opened` and the routine
+  facts belong to no request and name the acting owner. Migration 25 adds the
+  second kind, `routine`, with the routine's ID: an admission records it only from
+  the routine's firing row (see
+  [scheduled routines](scheduled-routines.md#what-a-firing-records)). Named CHECK
+  constraints (`audit_events_initiator_check` and
+  `request_admissions_initiator_kind_check`) allow only these two kinds, and a
+  routine only on a request-tied audit row. Member handoff must widen both in its
+  own migration. No operator or application kind exists
+  yet. Operator CLI commands (`npm run members`) act as the owner they name.
+  Standing grants (migration 24) added no kind: a call a grant approves keeps its
+  request's initiator, and `approval.auto_approved` names the system as its actor.
 - `event_type`, `member_id`, `conversation_id`, `request_id` and a small
   `payload` object.
 
@@ -82,24 +88,30 @@ audit version may switch to a keyed per-owner digest.
 ## Event types
 
 The registry is the `auditEvents` object in `src/service/audit.ts`.
-`audit_events_type_check` in `src/service/sql/021-audit.sql`, as widened by
-`src/service/sql/024-standing-grants.sql`, lists the same types.
+`audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
+`024-standing-grants.sql` and then `025-routines.sql`, lists the same types.
+Each widening replaces the whole constraint, so the latest migration lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
 
 | Type | Actor | Recorded when | One row per | Payload |
 | --- | --- | --- | --- | --- |
 | `member.spawned` | owner | `spawn` inserts a member | member | `spawnRequestId`, `engine`, `profile` |
-| `conversation.opened` | owner | `openConversation` inserts a conversation | conversation | `{}` |
+| `conversation.opened` | owner | `openConversation` inserts a conversation | conversation | `{}`, or `routineId` when a routine firing opened it |
 | `request.accepted` | owner | `recordAcceptance` commits the durable admission | conversation + request | `promptDigest` |
 | `approval.decided` | owner | `decideLocked` stores a choice: Claude/Pi cards, Pi child cards and Codex live calls. `choice` may be a standing choice | `approvalId` | `approvalId`, `invocationId`, `toolName`, `argumentDigest`, `choice` |
 | `grant.created` | owner | A standing choice creates a grant; on the card's conversation and request | `grantId` | `grantId`, `approvalId`, `scope` |
 | `approval.auto_approved` | system | `proposeLocked` inserts a call a standing grant approved, with no card | `approvalId` | `approvalId`, `invocationId`, `toolName`, `argumentDigest`, `grantId` |
 | `grant.revoked` | owner, or system for `recovery_restore` | The owner revokes a grant, or a restored installation resumes; on its conversation for a conversation grant | `grantId` | `grantId`, `reason` |
 | `work_item.committed` | system | `settleLocked` inserts the work-item receipt, including Codex live dispatch | `receiptId` | `receiptId`, `approvalId` |
-| `request.cancellation_requested` | owner | First durable cancellation fact: the v1 intent, or the cancellation marker written by the legacy cancel route | conversation + request | `receiptId` when the v1 intent came first |
+| `request.cancellation_requested` | owner | First durable cancellation fact: the v1 intent, or the cancellation marker written by the legacy cancel route | conversation + request | `receiptId` when the v1 intent came first; `policy: "fail_closed"` when a routine's policy requested it |
 | `request.finished` | system | `commitTurn` (`completed`), `rejectAccepted` (`cancelled`/`failed`), `rejectUnstartedAdmission` (`failed`), final `reconcileTurn` or delegation quarantine (`uncertain`) | conversation + request | `status`, optional `reason` |
 | `trusted_effect.completed` | system | The trusted-context lane records that an `effect` tool completed | `operationId` | `operationId`, `toolName` |
+| `routine.created` | owner | a routine is created | routine + revision | `routineId`, `revision`, `schedule`, `approvalPolicy`, `promptDigest` |
+| `routine.enabled` | owner | a routine is enabled | routine + revision | `routineId`, `revision` |
+| `routine.disabled` | owner, or system after ten consecutive failures | a routine is disabled | routine + revision | `routineId`, `revision`, `reason` |
+| `routine.deleted` | owner | a routine is deleted | routine + revision | `routineId`, `revision` |
+| `routine.firing_settled` | system | a routine's window is skipped, or its firing succeeds or fails | routine + window | `routineId`, `scheduledFor`, `status`, optional `reason` |
 
 `approval.decided` names the deciding owner as its actor. Through the gateway, the
 owner comes from the bearer token at `POST .../human`. The operator CLI names the
@@ -267,6 +279,14 @@ in one `ALTER TABLE`, and adds one partial unique index for the three
 on `audit_events` until the migration commits, so audited writes and audit reads wait
 for it. The constraint is not checked against existing rows. Building the index reads
 the table once.
+
+Migration 25 widens `audit_events_initiator_check` and `audit_events_type_check`
+the same way, adds two partial unique indexes for the routine facts and widens the
+admission CHECK. It takes `request_admissions` and `audit_events` together without
+queueing for either, so it never deadlocks with an admission or a commit and never
+waits for a native turn; [scheduled routines](scheduled-routines.md#upgrade-and-recovery)
+lists its locks. The index builds read `audit_events` once each under its exclusive
+lock.
 
 The audit table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest
@@ -436,6 +456,7 @@ npm ci
 npm run build
 export BIRBCREW_TEST_DATABASE_URL='postgresql://birbcrew:fixture-only@127.0.0.1:55432/integration_test'
 npm run test:audit
+npm run test:routines
 npm run test:api
 node --test tests/service/store.test.ts tests/service/rollover-client.test.ts
 npm run test:recovery

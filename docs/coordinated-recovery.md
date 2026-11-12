@@ -11,7 +11,7 @@ Keep all of the following at the same quiesced boundary:
 
 | Artifact | Required contents |
 | --- | --- |
-| `application-postgres` | Entire Crew application database: schema/version table, members/profiles, volume identities and account digests, conversation mappings, native checkpoints, admissions/turns, effect and delivery receipts, decisions, observation snapshots/events/cursors, append-only audit events, trusted sessions/generations and historical receipt authority, and recovery control row. |
+| `application-postgres` | Entire Crew application database: schema/version table, members/profiles, volume identities and account digests, conversation mappings, native checkpoints, admissions/turns, effect and delivery receipts, decisions, observation snapshots/events/cursors, append-only audit events, scheduled routines and their firings, trusted sessions/generations and historical receipt authority, and recovery control row. |
 | `native-volumes` | Full private Claude and Codex native session trees, SQLite indexes and sidecars (after teardown), rollout/transcript bytes, identity markers, and any consumer-owned native stores. A checkpoint digest is not the underlying file. Pi context normally lives in application checkpoints. |
 | `temporal-persistence` | Supported consistent backup of the actual self-hosted Temporal persistence, visibility and required cluster/configuration state. Include all relevant stores in one opaque archive or provider snapshot export. A workflow-history export is insufficient to recreate the service's execution identities, queues and cluster persistence. |
 | `configuration` | Non-secret deployment configuration, application commit, lockfile, image/package/native pins, profile identities, models/tool schemas, logical native mount paths, PostgreSQL/Temporal server versions and store layout. |
@@ -52,7 +52,8 @@ export const operator = {
   },
   hooks: {
     async quiesce() {
-      // Stop admission at consumer ingress; stop/drain consumers and all worker,
+      // Stop admission at consumer ingress, including every gateway (each runs the
+      // scheduled-routine dispatcher); stop/drain consumers and all worker,
       // supervisor, SDK descendant processes. Await termination, then stop the
       // Temporal server. Throw if teardown or the consumer boundary is uncertain.
     },
@@ -314,6 +315,33 @@ before any recovery command runs against the fence. `$FENCE` is the
    `resume` of a held installation or `initialize-fence` on an active one, which
    changes nothing, now succeeds, and the next transfer gets epoch `N + 1`.
 
+## Scheduled routines are consumer ingress
+
+Every gateway runs the [scheduled-routine](scheduled-routines.md) dispatcher, which
+submits turns with nobody present. Treat the gateways as consumer ingress: the
+`quiesce` hook stops them with the other consumers, and after `resume` they stay
+stopped while the restarted workers reconcile lost native processes, until the last
+step of the restore procedure in [source fencing and restore](#source-fencing-and-restore)
+(its step 5, not the fence-epoch repair steps) allows consumer ingress. A Temporal
+Schedule would fire whenever the Temporal server runs, including before `resume`;
+the dispatcher instead runs only in a gateway and checks the recovery phase before
+every pass, and both routine tables carry the write barrier, so a held or restored
+installation records no firing even if a gateway was left running.
+
+Windows that fall while the installation is held or its gateways are stopped are
+never run late. The first gateway to start is armed from then on; a window it was not
+armed for is recorded as skipped (`missed`) once it is 5 minutes late. A firing that
+was `claimed` at the recovery point, so its conversation and request UUIDs are in the
+database but its admission may or may not be, is restored `claimed`. The first
+gateway after `resume` retries it with those stored UUIDs once its 2-minute lease has
+expired, never under new ones, so it runs once whether or not its admission reached
+the recovery point. Unlike a window, such a firing is not dropped for being late: it
+starts when the first gateway does, however long after its window that is, and even
+if its owner's token was removed meanwhile. A firing waiting on an approval is restored `waiting`, under the
+same rules as any other pending decision. There is no gateway option to run without
+the dispatcher, and disabling a routine needs a gateway, so the first gateway after a
+restore fires any routine due from the moment it starts.
+
 ## Temporal responsibilities and qualification
 
 Production uses a persistent self-hosted Temporal deployment with explicit server
@@ -348,7 +376,9 @@ npm run test:recovery:coordinated
 ```
 
 The database suite exercises actual dump/restore to a second database, preserved
-conversation/checkpoint/observation state, completed replay and held pending work,
+conversation/checkpoint/observation state, completed replay and held pending work, a
+routine firing claimed at the recovery point and retried after restore with its
+stored identity,
 write/native fences, interrupted capture, checksums, version mismatch and source /
 clone overlap. It also checks that audit event IDs are never reissued when one
 generation is restored twice and the first target drew its whole ID range; that

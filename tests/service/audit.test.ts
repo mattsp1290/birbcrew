@@ -398,6 +398,7 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
   try {
     await db.query("BEGIN");
     const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), digest = "0".repeat(64);
+    const routineId = randomUUID();
     const { rows: [{ member_id: memberId }] } = await db.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
       (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi',$3) RETURNING member_id`, [ownerId, randomUUID(), profile]);
     await db.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)",
@@ -413,6 +414,11 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
       "request.cancellation_requested": { conversationId, requestId, payload: {} },
       "request.finished": { conversationId, requestId, payload: { status: "completed" } },
       "trusted_effect.completed": { conversationId, requestId, payload: { operationId: randomUUID(), toolName: "fixture_effect" } },
+      "routine.created": { payload: { routineId, revision: 1, schedule: "*/15 * * * *", approvalPolicy: "wait", promptDigest: digest } },
+      "routine.enabled": { payload: { routineId, revision: 3 } },
+      "routine.disabled": { payload: { routineId, revision: 2, reason: "owner" } },
+      "routine.deleted": { payload: { routineId, revision: 4 } },
+      "routine.firing_settled": { payload: { routineId, scheduledFor: "2031-01-01T00:15:00.000Z", status: "skipped", reason: "missed" } },
       "approval.auto_approved": { conversationId, requestId, payload: { approvalId: randomUUID(), invocationId: requestId,
         toolName: "record_work_item", argumentDigest: digest, grantId: randomUUID() } },
       "grant.created": { conversationId, requestId, payload: { grantId: randomUUID(), approvalId: randomUUID(), scope: "member" } },
@@ -699,7 +705,8 @@ test("migration 23 records a v21 database's admissions as owner-initiated withou
   await assert.rejects(upgraded.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest)
     SELECT t.conversation_id,t.request_id,t.prompt_digest FROM birbcrew_ts.turns t WHERE t.conversation_id=$1 AND t.request_id=$2
     ON CONFLICT(conversation_id,request_id) DO NOTHING`, [conversationId, running.requestId]), { code: "23502" });
-  for (const [kind, id, constraint] of [["routine", "routine-1", "request_admissions_initiator_kind_check"],
+  // migrate() also applied 025, which admits routines; an unknown kind is still refused.
+  for (const [kind, id, constraint] of [["operator", "operator-1", "request_admissions_initiator_kind_check"],
     ["owner", ownerId, "request_admissions_initiator_id_check"]]) {
     await assert.rejects(upgraded.query(insert.replace("%s", ",initiator_kind,initiator_id").replace("%s", ",$4,$5"),
       [conversationId, randomUUID(), digest, kind, id]), { code: "23514", constraint });
@@ -720,9 +727,11 @@ test("migration 24 adds standing grants to a v23 database without rewriting or s
   const current = new MemberStore(upgraded);
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID();
   const { memberId } = await current.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
-  await current.openConversation({ ownerId, memberId, conversationId });
+  // Seeded in SQL: this release's open and admission read tables a later migration adds.
+  await upgraded.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)", [ownerId, memberId, conversationId]);
   const running = { ownerId, conversationId, requestId: randomUUID(), text: "running at upgrade" };
-  await current.recordAcceptance(running, ownerInitiator);
+  await upgraded.query(`INSERT INTO birbcrew_ts.request_admissions (conversation_id,request_id,prompt_digest,initiator_kind)
+    VALUES ($1,$2,$3,'owner')`, [conversationId, running.requestId, createHash("sha256").update(running.text).digest()]);
   const execution = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
   const start = await current.beginTurn(running, execution);
   assert.equal(start.kind, "start"); if (start.kind !== "start") return;
@@ -806,9 +815,9 @@ test("a request's audit rows carry the initiator its admission recorded; one wit
   assert.equal(await admittedInitiator(pool, legacy), null);
   assert.deepEqual(await admittedInitiator(pool, admitted), { kind: "owner" });
 
-  // No other kind exists yet. Widening both CHECKs, as a later migration would, shows the row is
-  // copied from the admission rather than assumed. A separate database keeps the DDL's locks
-  // away from other suites.
+  // A version-23 database with both CHECKs dropped admits any kind, which shows the row is copied
+  // from the admission rather than assumed. routines.test.ts checks real routine admissions. A
+  // separate database keeps the DDL's locks away from other suites.
   const widened = await databaseAt(t, 23);
   await widened.query(`ALTER TABLE birbcrew_ts.request_admissions DROP CONSTRAINT request_admissions_initiator_kind_check;
     ALTER TABLE birbcrew_ts.audit_events DROP CONSTRAINT audit_events_initiator_check`);

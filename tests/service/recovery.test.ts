@@ -9,8 +9,11 @@ import {MemberStore} from '../../src/service/store.ts';
 import {InstallationRecovery,readRecoveryManifest,RecoveryRefusedError,type RecoveryPins,type RecoveryHooks} from '../../src/service/recovery.ts';
 import {FileRecoveryFence,fenceEpochLimit} from '../../src/service/recovery-fence.ts';
 import {auditQuerySchema,readAudit} from '../../src/service/audit.ts';
+import type {MemberClient} from '../../src/service/client.ts';
+import {ownerInitiator,type TurnRequest} from '../../src/service/domain.ts';
+import {IntegrationApi} from '../../src/service/integration-api.ts';
+import {RoutineApi,RoutineDispatcher} from '../../src/service/routines.ts';
 import {ApprovalStore} from '../../src/service/approvals.ts';
-import {ownerInitiator} from '../../src/service/domain.ts';
 import {revokeGrant} from '../../src/service/grants.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
@@ -178,6 +181,41 @@ test('real PostgreSQL archive restores mappings, checkpoint, committed replay an
  assert.ok(BigInt(next.id)>BigInt(audit.at(-1)!.event_id),'restored identity continues after the restored rows');
  assert.deepEqual(await store.beginTurn(request),{kind:'replay',reply:'recorded'});
  assert.equal((await restored.query('SELECT phase FROM birbcrew_ts.turns WHERE request_id=$1',[pending.requestId])).rows[0].phase,'started');
+});
+
+test('capture accepts the routine tables, and a firing claimed at capture is re-driven after restore with its stored identity',async context=>{
+ const t=await setup(context);
+ const ownerId='owner-'+randomUUID();const member=await t.store.spawn({ownerId,requestId:randomUUID(),engine:'pi',profile:'fixture'});
+ let now=new Date('2031-01-06T10:00:00Z');const clock=()=>new Date(now);
+ await new RoutineApi(t.store,clock).create(ownerId,{requestId:randomUUID(),memberId:member.memberId,schedule:'*/15 * * * *',prompt:'scheduled',approvalPolicy:'wait'});
+ const accepted:TurnRequest[]=[];
+ const dispatcher=(store:MemberStore,admits:boolean)=>{
+  const members={async open(input:Parameters<MemberStore['openConversation']>[0]){return store.openConversation(input);},
+   async accept(input:TurnRequest){accepted.push(input);if(!admits) throw new Error('gateway stopped before admission');await store.recordAcceptance(input,ownerInitiator);return {requestId:input.requestId};},
+   async requestStatus(input:Parameters<MemberStore['requestStatus']>[0]){return store.requestStatus(input);},async cancelPending(){}} as unknown as MemberClient;
+  return new RoutineDispatcher({store,members,integration:new IntegrationApi(store,members),owners:[ownerId],clock});
+ };
+ const source=dispatcher(t.store,false);await source.tick();now=new Date('2031-01-06T10:15:00Z');await source.tick();
+ const firing=(await t.pool.query('SELECT routine_id,scheduled_for,status,conversation_id,request_id FROM birbcrew_ts.routine_firings')).rows;
+ assert.deepEqual(firing.map(row=>row.status),['claimed']);
+ const sourceUrl=new URL(url!);sourceUrl.pathname='/'+t.name;
+ await t.recovery.capture(t.bundle,pins,{...t.hooks,snapshot:async dir=>{
+  const artifacts=await t.hooks.snapshot(dir);
+  await writeFile(join(dir,'application-postgres.fixture'),await postgresTool('pg_dump',['--dbname',sourceUrl.toString(),'--format=custom','--no-owner']));
+  return artifacts;
+ }});
+ const manifest=await readRecoveryManifest(t.bundle);
+ assert.deepEqual([manifest.inventory.routines,manifest.inventory.routine_firings],[1,1]);
+ const restored=await restoreBundle(t);const recovery=new InstallationRecovery(restored,t.fence);const store=new MemberStore(restored);
+ await recovery.acceptRestore(t.bundle,pins,randomUUID());
+ await recovery.resume(t.hooks,manifest);
+ now=new Date('2031-01-06T10:20:00Z');
+ await dispatcher(store,true).tick();
+ const after=(await restored.query('SELECT routine_id,scheduled_for,status,conversation_id,request_id FROM birbcrew_ts.routine_firings')).rows;
+ assert.deepEqual(after,[{...firing[0],status:'admitted'}]);
+ assert.deepEqual(accepted.map(({conversationId,requestId})=>[conversationId,requestId]),
+  [[firing[0].conversation_id,firing[0].request_id],[firing[0].conversation_id,firing[0].request_id]]);
+ assert.equal((await restored.query('SELECT count(*)::integer AS n FROM birbcrew_ts.request_admissions')).rows[0].n,1);
 });
 
 test('SIGKILL after external activation before database activation is safely retryable on restored instance',async context=>{

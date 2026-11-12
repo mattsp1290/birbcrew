@@ -42,8 +42,12 @@ export const commitSchema = claimSchema.extend({ reply: boundedText(65_536), che
 /** What started a request, recorded once with its durable admission. The closed set of kinds:
  * a later kind is a new member here, a case in initiatorColumns, and a migration widening
  * request_admissions_initiator_kind_check and audit_events_initiator_check. The owner carries
- * no id because the conversation's owner_id already names them. */
-export const requestInitiator = z.discriminatedUnion("kind", [z.strictObject({ kind: z.literal("owner") })]);
+ * no id because the conversation's owner_id already names them. A routine is named by its id;
+ * only its firing row can make an admission record it (025-routines.sql). */
+export const requestInitiator = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("owner") }),
+  z.strictObject({ kind: z.literal("routine"), id: z.uuid() }),
+]);
 export type RequestInitiator = z.infer<typeof requestInitiator>;
 export const initiatorKinds = requestInitiator.options.map(option => option.shape.kind.value);
 export const ownerInitiator: RequestInitiator = Object.freeze({ kind: "owner" });
@@ -52,6 +56,7 @@ export const ownerInitiator: RequestInitiator = Object.freeze({ kind: "owner" })
 export function initiatorColumns(initiator: RequestInitiator): [kind: RequestInitiator["kind"], id: string | null] {
   switch (initiator.kind) {
     case "owner": return ["owner", null];
+    case "routine": return ["routine", initiator.id];
   }
 }
 
@@ -73,7 +78,8 @@ export type BeginTurn =
   | { kind: "uncertain" };
 
 export class MemberStoreError extends Error {
-  readonly code: "not_found" | "conflict" | "busy" | "stale" | "input_limit" | "history_unavailable" | "request_rejected";
+  readonly code: "not_found" | "conflict" | "busy" | "stale" | "input_limit" | "history_unavailable" | "request_rejected"
+    | "routine_limit" | "routine_deleted";
 
   constructor(code: MemberStoreError["code"]) {
     super(code);

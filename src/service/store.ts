@@ -8,6 +8,7 @@ import type { ChildOutcome } from "@birbcrew/pi-subagents";
 import { childrenFor } from "./children.ts";
 import { savedProposal, type Approval } from "./approvals.ts";
 import { appendAudit } from "./audit.ts";
+import { firingConversation, firingInitiator } from "./routines.ts";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Pool, PoolClient } from "pg";
@@ -65,9 +66,11 @@ export async function admittedInitiator(
 }
 
 /** The member workflow's recordAcceptance activity. Only MemberClient issues that workflow's
- * acceptTurn and submitTurn updates, for the owner-authenticated gateway and the operator CLI
- * acting as the owner, so it admits owner-initiated requests. The initiator is not a workflow
- * or update argument, so recorded histories replay unchanged. */
+ * acceptTurn and submitTurn updates, for the owner-authenticated gateway, the operator CLI
+ * acting as the owner and the gateway's routine dispatcher, so the caller attests the owner.
+ * recordAcceptance records a routine instead only when a routine firing row names the
+ * request. The initiator is not a workflow or update argument, so recorded histories replay
+ * unchanged. */
 export function ownerAdmissionActivity(store: MemberStore) {
   return (request: TurnRequest): Promise<void> => store.recordAcceptance(request, ownerInitiator);
 }
@@ -99,7 +102,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [23, "023-request-initiator.sql"], [24, "024-standing-grants.sql"]] as const;
+      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [23, "023-request-initiator.sql"], [24, "024-standing-grants.sql"], [25, "025-routines.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -144,8 +147,9 @@ export class MemberStore {
         const capture = await captureProjectNotes(key.ownerId);
         if (capture) await db.query("INSERT INTO birbcrew_ts.conversation_notes (conversation_id,capture) VALUES ($1,$2)",
           [key.conversationId, JSON.stringify(capture)]);
+        const routineId = await firingConversation(db, key);
         await appendAudit(db, { type: "conversation.opened", ownerId: key.ownerId, memberId: key.memberId,
-          conversationId: key.conversationId, payload: {} });
+          conversationId: key.conversationId, payload: routineId ? { routineId } : {} });
       }
       return conversation;
     });
@@ -166,10 +170,12 @@ export class MemberStore {
     return {phase:row.phase,reason:row.reason};
   }
 
-  /** A replay of an admitted request keeps the initiator its first admission recorded. */
+  /** A replay of an admitted request keeps the initiator its first admission recorded. A routine
+   * is recorded only from its firing row, read in this transaction; a caller cannot name one. */
   async recordAcceptance(input: z.input<typeof submitSchema>, initiator: RequestInitiator): Promise<void> {
     const key=submitSchema.parse(input);
-    const [initiatorKind,initiatorId]=initiatorColumns(requestInitiator.parse(initiator));
+    const attested=requestInitiator.parse(initiator);
+    if(attested.kind!=="owner")throw new MemberStoreError("conflict");
     const digest=createHash("sha256").update(key.text).digest();
     return this.transaction(async db=>{
       const conversation=await conversationFor(db,key,true);
@@ -191,6 +197,7 @@ export class MemberStore {
           FROM birbcrew_ts.conversations WHERE conversation_id=$1`,[key.conversationId]);
         if(budget.used>=budget.limit)throw new MemberStoreError("input_limit");
       }
+      const [initiatorKind,initiatorId]=initiatorColumns(await firingInitiator(db,key,conversation)??attested);
       await db.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest,initiator_kind,initiator_id)
         VALUES($1,$2,$3,$4,$5)`,[key.conversationId,key.requestId,digest,initiatorKind,initiatorId]);
       await appendAudit(db,{type:"request.accepted",ownerId:key.ownerId,memberId:conversation.memberId,
