@@ -39,7 +39,12 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:api
+      - run: npm run test:audit
+      - run: npm run test:routines
+      - run: npm run test:memories
+      - run: npm run test:grants
       - run: node --test tests/service/store.test.ts tests/service/rollover-client.test.ts
+      - run: node --test tests/service/approvals.test.ts tests/service/codex-calls.test.ts tests/service/codex-registration.test.ts
   actual-service:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

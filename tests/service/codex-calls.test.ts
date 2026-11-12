@@ -9,6 +9,7 @@ import {requestNativeStop,withNativeAdmission} from "../../src/service/native-ad
 import {readSnapshot} from "../../src/service/observation.ts";
 import {MemberStore} from "../../src/service/store.ts";
 import type {DeferredTool} from "../../src/service/deferral.ts";
+import {ownerInitiator} from "../../src/service/domain.ts";
 
 const pool = new Pool({connectionString:process.env.BIRBCREW_TEST_DATABASE_URL});
 const store = new MemberStore(pool);
@@ -23,12 +24,13 @@ async function member(tool:DeferredTool) {
   return store.spawn({ownerId,requestId:randomUUID(),engine:"codex",profile});
 }
 
-async function conversation(m: Awaited<ReturnType<typeof member>>) {
+async function conversation(m: Awaited<ReturnType<typeof member>>, admitted = false) {
   const {ownerId,memberId} = m;
   const conversationId=randomUUID(), requestId=randomUUID(), scope={ownerId,memberId,conversationId,requestId};
   await store.openConversation({ownerId,memberId,conversationId});
   const execution={workflowRunId:randomUUID(),activityId:"sdk",attempt:1};
   const request={ownerId,conversationId,requestId,text:"one live turn"};
+  if (admitted) await store.recordAcceptance(request,ownerInitiator);
   const start=await store.beginTurn(request,execution);
   assert.equal(start.kind,"start");
   const launch={...request,execution,token:start.token};
@@ -237,4 +239,52 @@ test("a projected native item commits only against its original UTF-8 bytes", as
   const snapshot = await view();
   assert.equal(snapshot.state.phase,"idle");
   assert.equal(snapshot.messages.at(-1)?.content,item);
+});
+
+test("a standing grant approves a Codex live call at its first poll; the deadline and member capacity still apply", async () => {
+  const m=await member("record_work_item");
+  const first=await conversation(m,true);
+  const card=await proposeLive(pool,first.launch,first.proposal());
+  assert.deepEqual((await first.view()).state.pendingApprovals[0].standingChoices,["allow_conversation","allow_always"]);
+  assert.equal(await answerLive(pool,decision(card,"allow_always")),"allow_always");
+  assert.equal(await answerLive(pool,decision(card,"allow_always")),"allow_always");
+  await assert.rejects(answerLive(pool,decision(card,"approve")),{code:"conflict"});
+  assert.equal((await settleLive(pool,first.launch,card.approvalId)).kind,"recorded");
+  await confirmDelivery(pool,first.launch,card.approvalId);
+  const {rows:[grant]}=await pool.query("SELECT grant_id FROM birbcrew_ts.tool_grants WHERE member_id=$1",[m.memberId]);
+
+  const second=await conversation(m,true);
+  const granted=await proposeLive(pool,second.launch,second.proposal());
+  assert.equal(granted.grantId,grant.grant_id);
+  const view=await second.view();
+  assert.deepEqual(view.state.pendingApprovals,[]);
+  assert.deepEqual(view.state.grantedCalls,[{requestId:second.scope.requestId,approvalId:granted.approvalId,grantId:grant.grant_id,scope:"member"}]);
+  const settled=await settleLive(pool,second.launch,granted.approvalId);
+  assert.equal(settled.kind,"recorded");
+  const [receipt]=await second.writes();
+  assert.deepEqual((await second.view()).state.liveOperations,[{requestId:second.scope.requestId,approvalId:granted.approvalId,
+    effect:"committed",delivery:"unknown",receiptId:receipt.receipt_id}]);
+  await confirmDelivery(pool,second.launch,granted.approvalId);
+
+  // An expired granted call is interrupted, not dispatched.
+  const late=await conversation(m,true);
+  const expired=await proposeLive(pool,late.launch,late.proposal());
+  assert.ok(expired.grantId);
+  await pool.query("UPDATE birbcrew_ts.codex_live_calls SET expires_at=clock_timestamp() WHERE approval_id=$1",[expired.approvalId]);
+  assert.equal((await settleLive(pool,late.launch,expired.approvalId)).kind,"interrupted");
+  assert.deepEqual(await late.writes(),[]);
+
+  // A request with no admission row asks, with no standing choice, even under the member's grant.
+  const legacy=await conversation(m);
+  const asked=await proposeLive(pool,legacy.launch,legacy.proposal());
+  assert.equal(asked.grantId,undefined);
+  assert.equal((await legacy.view()).state.pendingApprovals[0].standingChoices,undefined);
+  await assert.rejects(answerLive(pool,decision(asked,"allow_conversation")),{code:"conflict"});
+  await pool.query("UPDATE birbcrew_ts.codex_live_calls SET expires_at=clock_timestamp() WHERE approval_id=$1",[asked.approvalId]);
+
+  // Granted calls count toward the member's two open live calls until they are settled.
+  const open=await Promise.all([conversation(m,true),conversation(m,true),conversation(m,true)]);
+  const calls=[await proposeLive(pool,open[0].launch,open[0].proposal()),await proposeLive(pool,open[1].launch,open[1].proposal())];
+  assert.ok(calls.every(call=>call.grantId));
+  await assert.rejects(proposeLive(pool,open[2].launch,open[2].proposal()),{code:"input_limit"});
 });

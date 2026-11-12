@@ -10,7 +10,7 @@ import { ApprovalStore } from "../../src/service/approvals.ts";
 import { MemberStore } from "../../src/service/store.ts";
 import { createGateway } from "../../src/service/gateway.ts";
 import { IntegrationApi } from "../../src/service/integration-api.ts";
-import type { TurnRequest } from "../../src/service/domain.ts";
+import { ownerInitiator, type TurnRequest } from "../../src/service/domain.ts";
 
 const url = process.env.BIRBCREW_TEST_DATABASE_URL;
 if (!url) throw new Error("Set BIRBCREW_TEST_DATABASE_URL to a disposable PostgreSQL database.");
@@ -57,7 +57,7 @@ async function fixture(automaticallyComplete = false) {
   const members = {
     async accept(input: TurnRequest) {
       accepts++;
-      await store.recordAcceptance(input);
+      await store.recordAcceptance(input, ownerInitiator);
       if (automaticallyComplete) await finish(input);
       return { requestId: input.requestId };
     },
@@ -164,15 +164,22 @@ test("v1 HTTP contract enforces ownership, strict identity, capability version a
   const receipt = await response.json();
   assert.equal(receipt.apiVersion, "1"); assert.equal(receipt.status, "accepted");
   assert.equal(receipt.acceptance.boundary, "sql_admission_and_temporal_queue");
+  assert.deepEqual(receipt.initiator, { kind: "owner" });
   assert.deepEqual(await (await f.api(path, body)).json(), receipt);
   assert.equal((await f.api(path, { ...body, text: body.text.trim() })).status, 409);
   assert.equal((await f.api(path, { ...body, ownerId: f.ownerId })).status, 400);
+  // No body can choose what started a request: the admission records it.
+  const initiator = { kind: "owner" };
+  assert.equal((await f.api(path, { requestId: randomUUID(), text: "set initiator", initiator })).status, 400);
+  assert.equal((await f.api(path + "/" + requestId + "/cancel", { initiator })).status, 400);
+  assert.equal((await f.api(`/conversations/${f.conversationId}/inputs`, { requestId: randomUUID(), text: "set initiator", initiator })).status, 400);
   assert.equal((await f.api(path + "/" + requestId, undefined, f.stranger)).status, 404);
   assert.equal((await f.api(path, body, f.stranger)).status, 404);
   assert.equal((await f.api(path + "/" + requestId + "/cancel", {}, f.stranger)).status, 404);
   assert.equal((await f.api(path + "/" + requestId, undefined, "invalid")).status, 401);
   const capabilities = await (await f.api("/v1/capabilities")).json();
   assert.equal(capabilities.apiVersion, "1");
+  assert.deepEqual(capabilities.initiatorKinds, ["owner", "routine"]);
   const before = f.counts();
   assert.deepEqual(await (await f.api(path + "/" + requestId)).json(), receipt);
   assert.deepEqual(f.counts(), before);
@@ -227,7 +234,7 @@ test("ambiguous cancellation delivery retries the original durable intent", asyn
   const f = await fixture();
   await f.stop(); // Own the pump explicitly; no background gateway delivery race.
   const input = { ownerId: f.ownerId, conversationId: f.conversationId, requestId: randomUUID(), text: "retry intent" };
-  await store.recordAcceptance(input);
+  await store.recordAcceptance(input, ownerInitiator);
   let deliveries = 0;
   const api = new IntegrationApi(store, { accept: f.members.accept.bind(f.members), requestStatus: f.members.requestStatus.bind(f.members), async cancelPending() {
     if (++deliveries === 1) throw new Error("ambiguous transport failure");
@@ -257,7 +264,7 @@ test("failing older cancellation intents cannot starve a later healthy request",
   } });
   try {
     for (const requestId of ids) {
-      await store.recordAcceptance({ ownerId: f.ownerId, conversationId: f.conversationId, requestId, text: "cancel fairness" });
+      await store.recordAcceptance({ ownerId: f.ownerId, conversationId: f.conversationId, requestId, text: "cancel fairness" }, ownerInitiator);
       await api.cancel({ ownerId: f.ownerId, conversationId: f.conversationId, requestId });
     }
     await api.flushCancellations();
@@ -310,12 +317,14 @@ test("legacy committed turn without an admission retains result and cancellation
   const result = await response.json();
   assert.equal(result.status, "completed");
   assert.equal(result.result.text, "legacy original result");
+  assert.equal(result.initiator, undefined, "no admission recorded what started it");
   const before = f.counts();
   const cancel = await f.api(path + "/cancel", {}); assert.equal(cancel.status, 202);
   const receipt = await cancel.json();
   assert.equal(receipt.status, "completed");
   assert.deepEqual(receipt.result, result.result);
   assert.ok(receipt.cancellation.receiptId);
+  assert.deepEqual(receipt.initiator, { kind: "owner" }, "the backfilled admission records the owner");
   assert.equal((await pool.query("SELECT count(*)::integer n FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2", [f.conversationId, requestId])).rows[0].n, 1);
   const repeated = await (await f.api(path + "/cancel", {})).json();
   assert.equal(repeated.cancellation.receiptId, receipt.cancellation.receiptId);
@@ -357,7 +366,7 @@ test("v1 status reconciles an unstarted admission after terminal workflow withou
   const f = await fixture(); t.after(f.stop);
   const key = { ownerId: f.ownerId, conversationId: f.conversationId, requestId: randomUUID() };
   const input = { ...key, text: "SQL commit before admission acknowledgement was lost" };
-  await store.recordAcceptance(input);
+  await store.recordAcceptance(input, ownerInitiator);
   let describes = 0;
   const temporal = {
     connection: { async withDeadline(deadline: number, action: () => Promise<unknown>) {

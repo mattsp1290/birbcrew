@@ -1,5 +1,6 @@
-import {acquireRecoveryNativeLease,requireRecoveryActive} from "./recovery-admission.ts";
 /** Trusted backend-only API. Never construct authority from an observer request. */
+import {acquireRecoveryNativeLease,requireRecoveryActive} from "./recovery-admission.ts";
+import { appendAudit, trustedToolName } from "./audit.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { Client, type Pool, type PoolClient } from "pg";
 import { z } from "zod";
@@ -49,7 +50,7 @@ export function toolManifest(app: TrustedApplication) {
   if (typeof app.authorize !== "function" || app.tools.length > 8) throw new TrustedContextError("limit");
   const names = new Set<string>();
   return app.tools.map(tool => {
-    if (!/^[a-z][a-z0-9_]{0,63}$/.test(tool.name) || names.has(tool.name)) throw new TrustedContextError("conflict");
+    if (!trustedToolName.test(tool.name) || names.has(tool.name)) throw new TrustedContextError("conflict");
     names.add(tool.name); text(2048).parse(tool.description);
     if (tool.kind !== "read" && tool.kind !== "effect") throw new TrustedContextError("conflict");
     for (const [n,max] of [[tool.maxArgumentBytes,16_384],[tool.maxResultBytes,65_536],[tool.deadlineMs,30_000]]) {
@@ -274,12 +275,21 @@ export class TrustedContextStore {
           if (Buffer.byteLength(canonical(value)) > tool.maxResultBytes) throw new TrustedContextError("limit");
           // Record an outcome even after revocation; it is NOT released to the SDK.
           await this.transaction(async db => {
+            // Lock the conversation before the session, as open() does: the audit row's
+            // foreign key needs the conversation, and the opposite order can deadlock.
+            const {rows:[owner]} = await db.query<{owner_id:string;member_id:string}>(
+              "SELECT owner_id,member_id FROM birbcrew_ts.conversations WHERE conversation_id=$1 FOR KEY SHARE",[claim.conversationId]);
+            // Unreachable while trusted_sessions references conversations; never commit an effect without its audit row.
+            if (!owner) throw new TrustedContextError("stale");
             // Even a callback surviving a dropped DB lease cannot resurrect erased data.
             const {rows:[session]} = await db.query<{phase:string}>("SELECT phase FROM birbcrew_ts.trusted_sessions WHERE conversation_id=$1 FOR UPDATE",[claim.conversationId]);
             if (session?.phase === "deleted") throw new TrustedContextError("stale");
-            await db.query(`UPDATE birbcrew_ts.trusted_tool_calls SET outcome='completed',result=$4
+            const completed = await db.query(`UPDATE birbcrew_ts.trusted_tool_calls SET outcome='completed',result=$4
               WHERE conversation_id=$1 AND request_id=$2 AND native_call_id=$3 AND outcome IN ('admitted','uncertain')`,
               [claim.conversationId,claim.requestId,nativeCallId,JSON.stringify(value)]);
+            if (completed.rowCount && tool.kind === "effect") await appendAudit(db, {type:"trusted_effect.completed",
+              ownerId:owner.owner_id,memberId:owner.member_id,conversationId:claim.conversationId,requestId:claim.requestId,
+              payload:{operationId:admission.operationId,toolName}});
           });
           return value;
         });

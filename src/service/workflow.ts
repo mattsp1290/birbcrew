@@ -9,7 +9,7 @@ import type { Approval, Decision, Choice } from "./approvals.ts";
 import type { ChildKey, ChildStore } from "./children.ts";
 import type { MemberActivities, Resume } from "./activities.ts";
 
-import type { MemberStore } from "./store.ts";
+import type { MemberStore, ownerAdmissionActivity } from "./store.ts";
 import { activityQueue, memberTaskQueue } from "./queues.ts";
 
 export const submitTurn = defineUpdate<string, [TurnRequest]>("submitTurn");
@@ -58,7 +58,8 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   const rollover = patched("bounded-conversations-v1");
   const generationLimit = rollover ? workflowGenerationTurnLimit : 4;
   const historyBoundary = () => rollover && historyRequiresRollover(workflowInfo());
-  const { conversationProgress, recordAcceptance, rejectAccepted, rejectUnstartedAdmission } = proxyActivities<Pick<MemberStore, "conversationProgress" | "recordAcceptance" | "rejectAccepted" | "rejectUnstartedAdmission">>({
+  const { conversationProgress, recordAcceptance, rejectAccepted, rejectUnstartedAdmission } = proxyActivities<Pick<MemberStore, "conversationProgress" | "rejectAccepted" | "rejectUnstartedAdmission">
+    & { recordAcceptance: ReturnType<typeof ownerAdmissionActivity> }>({
     taskQueue: memberTaskQueue, startToCloseTimeout: "20 seconds", scheduleToCloseTimeout: "60 seconds",
   });
   const { executeTurn, decideApproval, settleApproval, cancelPending } = actions(activityQueue(conversation.engine, conversation.profile));
@@ -222,7 +223,9 @@ export async function memberConversation(conversation: Conversation): Promise<vo
     }
     pending = first.approval;
     answered = false;
-    await condition(() => answered);
+    // A standing grant approved the call when it was proposed, so no answer will come. Testing
+    // the field first keeps the patch marker out of every history without such a call.
+    if (!first.approval.grantId || !patched("standing-grants-v1")) await condition(() => answered);
     const outcome = await settleApproval(first.approval);
     const resumed = await segment(request, { approval: first.approval, outcome });
     pending = undefined;

@@ -174,6 +174,9 @@ if (process.argv.includes("--fixture-effect-child")) {
     assert.equal(row.outcome,"completed"); assert.equal(row.released,true); assert.equal(row.acknowledged,false);
     assert.deepEqual(await store.dispatch(turn.claim,"effect-1","record_effect",{note},noAbort()),result);
     assert.equal((await pool.query("SELECT 1 FROM birbcrew_ts.test_trusted_effects WHERE note=$1",[note])).rowCount,1);
+    // Only the effect is audited, once, by receipt and tool name; never its arguments or result.
+    const audit = await pool.query("SELECT actor_kind,request_id,payload FROM birbcrew_ts.audit_events WHERE conversation_id=$1 AND event_type='trusted_effect.completed'",[key.conversationId]);
+    assert.deepEqual(audit.rows,[{actor_kind:"system",request_id:turn.claim.requestId,payload:{operationId:row.operation_id,toolName:"record_effect"}}]);
     await assert.rejects(store.dispatch(turn.claim,"effect-1","record_effect",{note:"changed"},noAbort()),errorCode("conflict"));
     await assert.rejects(store.acknowledge(turn.claim,"effect-1","read_context"),errorCode("conflict"));
     await store.acknowledge(turn.claim,"effect-1","record_effect");

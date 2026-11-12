@@ -12,8 +12,12 @@ export const toolChoices = {
   record_work_item: ["approve", "deny"],
   choose_next_step: nextStep.options,
 } as const;
+/** Approve this call and grant later ones (docs/standing-grants.md). A card offers these in its
+ * separate standingChoices field, never in choices, so a client that renders choices cannot pick one. */
+export const standingChoice = z.enum(["allow_conversation", "allow_always"]);
 export function acceptsChoice(tool: DeferredTool, choice: string) {
-  return toolChoices[tool].some((allowed) => allowed === choice);
+  return toolChoices[tool].some((allowed) => allowed === choice)
+    || (tool === "record_work_item" && standingChoice.options.some((allowed) => allowed === choice));
 }
 export const emptyToolArguments = z.strictObject({});
 

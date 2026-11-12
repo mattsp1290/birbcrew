@@ -103,3 +103,23 @@ even if the original hub is removed.
 
 Use the [HTTP gateway guide](docs/member-gateway.md) to submit turns, decide
 protected tool requests and attach independent AG-UI observers to these members.
+The [audit trail](docs/audit-trail.md) records who spawned, opened, submitted,
+decided, cancelled and completed what, and when. Each owner can page or export
+their own trail as CSV through `GET /v1/audit`.
+[Scheduled routines](docs/scheduled-routines.md) let an owner give a member a cron
+schedule and a fixed prompt; the gateway submits each run in a new conversation,
+with nobody present, and records the routine as the request's initiator.
+
+An owner can answer a work-item approval with a [standing grant](docs/standing-grants.md)
+for the rest of the conversation or for every conversation of the member. Later calls
+it covers proceed without a card and name the grant. Grants are listed and revoked
+through `/v1/members/{memberId}/grants`. Crew cannot tell a person from an automated
+client holding the owner's token, so a grant covers both.
+
+An owner can save [member memory](docs/memories.md) through `/v1/memories`: up to 32
+short facts per member. Each conversation of the member gets the facts that were
+active when it opened, as system context framed as reference data. Only the owner
+writes memory; the model cannot. Deleting a fact erases its text, but Codex, and
+Claude where its SDK records the prompt, keep the context a conversation's first turn
+saw, and native session files and Pi checkpoints keep copies. Memory reaches every
+later conversation of the member, so whoever holds the owner's token can steer them all.

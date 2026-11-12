@@ -2,9 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, open, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import { Client, type Pool } from 'pg';
+import { Client, type Pool, type PoolClient } from 'pg';
 import { z } from 'zod';
-import type { RecoveryFence } from './recovery-fence.ts';
+import { fenceEpochLimit, RecoveryRefusedError, type RecoveryFence } from './recovery-fence.ts';
+import { appendAudit } from './audit.ts';
+export { RecoveryRefusedError } from './recovery-fence.ts';
 
 const id=z.uuid();
 const digest=z.string().regex(/^[a-f0-9]{64}$/);
@@ -23,6 +25,42 @@ export const recoveryManifest=z.strictObject({
 export type RecoveryManifest=z.infer<typeof recoveryManifest>;
 export type RecoveryPins=Pick<RecoveryManifest,'applicationCommit'|'lockfileSha256'|'temporal'|'logicalNativeRoot'>;
 type Control={installation:string;instance:string;phase:'active'|'frozen'|'restored';generation:string|null};
+// A restored timeline's audit IDs are [epoch<<44, (epoch+1)<<44). Epochs below fenceEpochLimit keep the last one within 2^63-1.
+const auditEpochBits=44n;
+// The highest audit ID the identity has drawn. Committed rows count because the identity's
+// last value is null when nothing was drawn since a setval(...,false), as after an earlier
+// acceptance. Its last value counts IDs whose transactions rolled back: no consumer saw them,
+// but they place the dump's timeline in its epoch, and it may have committed more there after
+// the capture. Either raises the epoch only when the fence lost its epoch or a timeline
+// overran its range.
+const restoredAuditId=`greatest(coalesce(pg_sequence_last_value(pg_get_serial_sequence('birbcrew_ts.audit_events','event_id')::regclass),0),
+  (SELECT coalesce(max(event_id),0) FROM birbcrew_ts.audit_events))`;
+/** A restore can bring back grants revoked after its recovery point, and member memories deleted
+ * after it, text and all. So a restored installation revokes every standing grant and suspends
+ * every active memory as it resumes. It runs in the activation's transaction: the write barrier
+ * admits it only once `activate` has made the installation active there, and a crash leaves
+ * neither. Conversations are locked first, before the activation, as every revocation locks a
+ * conversation before its grant (grants.ts). Memories need no such order: until this transaction
+ * commits, any other write meets the barrier and fails, so a delete holding an entry's row lock
+ * rolls back and releases it. */
+async function settleRestoredState(db:PoolClient,activate:()=>Promise<boolean>) {
+ await db.query(`SELECT 1 FROM birbcrew_ts.conversations WHERE conversation_id IN
+  (SELECT conversation_id FROM birbcrew_ts.tool_grants WHERE revoked_at IS NULL) ORDER BY conversation_id FOR UPDATE`);
+ if(!await activate()) return;
+ const {rows}=await db.query<{grant_id:string;owner_id:string;member_id:string;conversation_id:string|null}>(`WITH revoked AS
+  (UPDATE birbcrew_ts.tool_grants SET revoked_at=clock_timestamp(),revocation_reason='recovery_restore' WHERE revoked_at IS NULL
+   RETURNING grant_id,owner_id,member_id,conversation_id,created_at)
+  SELECT grant_id,owner_id,member_id,conversation_id FROM revoked ORDER BY created_at,grant_id`);
+ for(const grant of rows) await appendAudit(db,{type:'grant.revoked',ownerId:grant.owner_id,memberId:grant.member_id,
+  conversationId:grant.conversation_id??undefined,payload:{grantId:grant.grant_id,reason:'recovery_restore'}});
+ // Suspended, not deleted: the owner can read what came back, then delete it and create again.
+ const {rows:memories}=await db.query<{memory_id:string;owner_id:string;member_id:string}>(`WITH suspended AS
+  (UPDATE birbcrew_ts.member_memories SET state='suspended',changed_at=clock_timestamp() WHERE state='active'
+   RETURNING memory_id,owner_id,member_id,created_at)
+  SELECT memory_id,owner_id,member_id FROM suspended ORDER BY created_at,memory_id`);
+ for(const memory of memories) await appendAudit(db,{type:'memory.suspended',ownerId:memory.owner_id,memberId:memory.member_id,
+  payload:{memoryId:memory.memory_id,reason:'recovery_restore'}});
+}
 export type SnapshotArtifact={kind:RecoveryManifest['artifacts'][number]['kind'];file:string};
 /** Hooks are trusted operator code, not user/AG-UI input. They must stop ALL
  * consumers/workers/native descendants and await teardown, and stop/fence the
@@ -164,9 +202,40 @@ export class InstallationRecovery {
   // preserve the manifest digest in the operator's independent backup catalog.
   const restoredInventory=await this.inventory();
   if(JSON.stringify(restoredInventory)!==JSON.stringify(manifest.inventory)) throw new Error("Restored inventory does not match generation");
-  await this.fence.transfer(c.installation,sourceInstance,targetInstance,manifest.generation);
+  // Every refusal that can be decided from the restored database comes before the transfer,
+  // which fences out the source for good.
+  const {restored,minimumEpoch}=await this.restoredAuditIdentity();
+  if(minimumEpoch>=fenceEpochLimit) throw new RecoveryRefusedError(`The restored audit identity has drawn event ID ${restored}, so this restore needs audit identity epoch ${minimumEpoch}, past the last, ${fenceEpochLimit-1}. Nothing was transferred: authority stays with the held source, which can resume.`);
+  const epoch=await this.fence.transfer(c.installation,sourceInstance,targetInstance,manifest.generation,minimumEpoch);
+  await this.advanceAuditIdentity(epoch,minimumEpoch,targetInstance);
   await this.pool.query(`UPDATE birbcrew_ts.recovery_control SET instance_id=$1,phase='restored' WHERE singleton`,[targetInstance]);
   return {generation:manifest.generation,instance:targetInstance,phase:'restored' as const};
+ }
+ /** The lowest epoch whose range lies above every audit ID the restored identity drew. The
+  * held database draws none (its write barrier refuses an audit insert before the identity
+  * is evaluated), and an acceptance's own setval leaves nothing drawn, so a retried
+  * acceptance never needs a higher epoch than its first attempt. */
+ private async restoredAuditIdentity() {
+  const {rows:[row]}=await this.pool.query<{restored:string}>(`SELECT ${restoredAuditId}::text AS restored`);
+  return {restored:row.restored,minimumEpoch:Number((BigInt(row.restored)>>auditEpochBits)+1n)};
+ }
+ /** The dump resumes the audit identity at the recovery point, so it would reissue IDs a
+  * later timeline already gave consumers, who would then skip the new events. Each restored
+  * timeline starts at its fence epoch times 2^44 instead. The fence is never restored and
+  * every transfer raises its epoch, so a later restore, even of the same generation, starts
+  * above every ID an earlier timeline drew, whatever the database clocks say. setval is not
+  * a table write, so the held installation allows it. is_called=false leaves no drawn ID,
+  * so a retry in the same epoch sets the same value again. */
+ private async advanceAuditIdentity(epoch:number,minimumEpoch:number,target:string) {
+  // Only a fence that ignores minimumEpoch or fenceEpochLimit gets here, and authority has already moved.
+  if(!Number.isSafeInteger(epoch)||epoch<minimumEpoch) throw new RecoveryRefusedError(`The recovery fence returned ${Number.isSafeInteger(epoch)?`epoch ${epoch}`:'no epoch'} for this transfer, but this restore needs at least epoch ${minimumEpoch}. Authority has moved to target ${target}, whose database stays held, so the source cannot resume. Upgrade the fence so that RecoveryFence.transfer honours minimumEpoch and returns the epoch (see docs/coordinated-recovery.md), then retry accept-restore with the same target instance, ${target}.`);
+  if(epoch>=fenceEpochLimit) throw new RecoveryRefusedError(`The recovery fence moved authority to target ${target} at epoch ${epoch}, past the last audit identity epoch, ${fenceEpochLimit-1}, instead of refusing the transfer. No epoch is left for new audit IDs, so no restore of this installation can be accepted without reissuing IDs consumers may hold.`);
+  const floor=(BigInt(epoch)<<auditEpochBits).toString();
+  const {rows:[identity]}=await this.pool.query<{moved:string|null}>(`SELECT CASE WHEN ${restoredAuditId}<$1::bigint
+    THEN setval(pg_get_serial_sequence('birbcrew_ts.audit_events','event_id'),$1::bigint,false) END::text AS moved`,[floor]);
+  // The write barrier refuses audit inserts before they draw, so only something outside Crew,
+  // such as a direct nextval or setval, gets here. A retry recomputes the minimum past it.
+  if(identity.moved===null) throw new RecoveryRefusedError(`The restored audit identity drew an ID in or past epoch ${epoch}'s range after acceptance checked it, while the installation was held, so acceptance left it unchanged. Authority has moved to target ${target}, whose database stays held, so the source cannot resume. Stop whatever is drawing from the audit identity outside Crew, then retry accept-restore with the same target instance, ${target}.`);
  }
  private async resumeImpl(hooks:Pick<RecoveryHooks,'reconcile'>,manifest:RecoveryManifest|null=null) {
   const {control:c}=await this.status();
@@ -175,6 +244,13 @@ export class InstallationRecovery {
   await this.fence.verifyActivation(c.installation,c.instance,c.generation);
   await hooks.reconcile(manifest);
   await this.fence.activate(c.installation,c.instance,c.generation);
-  await this.pool.query(`UPDATE birbcrew_ts.recovery_control SET phase='active',generation=NULL WHERE singleton AND instance_id=$1 AND generation=$2`,[c.instance,c.generation]);
+  const db=await this.pool.connect();
+  try {
+   await db.query('BEGIN');
+   await db.query("SET LOCAL lock_timeout='10s'");
+   const activate=async()=>Boolean((await db.query(`UPDATE birbcrew_ts.recovery_control SET phase='active',generation=NULL WHERE singleton AND instance_id=$1 AND generation=$2`,[c.instance,c.generation])).rowCount);
+   if(c.phase==='restored') await settleRestoredState(db,activate); else await activate();
+   await db.query('COMMIT');
+  } catch(e) {await db.query('ROLLBACK');throw e;} finally {db.release();}
  }
 }

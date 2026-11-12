@@ -7,14 +7,17 @@ import { publishObservation } from "./observation.ts";
 import type { ChildOutcome } from "@birbcrew/pi-subagents";
 import { childrenFor } from "./children.ts";
 import { savedProposal, type Approval } from "./approvals.ts";
+import { appendAudit } from "./audit.ts";
+import { firingConversation, firingInitiator } from "./routines.ts";
+import { snapshotMemories } from "./memories.ts";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Pool, PoolClient } from "pg";
 import type { z } from "zod";
 import {
-  checkpointSchema, claimSchema, commitSchema, conversationKey, executionSchema, MemberStoreError,
-  openSchema, spawnSchema, submitSchema,
-  type BeginTurn, type Conversation, type Member, type TurnRequest,
+  checkpointSchema, claimSchema, commitSchema, conversationKey, executionSchema, initiatorColumns, initiatorFromColumns,
+  MemberStoreError, openSchema, ownerInitiator, requestInitiator, spawnSchema, submitSchema,
+  type BeginTurn, type Conversation, type Member, type RequestInitiator, type TurnRequest,
 } from "./domain.ts";
 
 type ConversationKey = z.input<typeof conversationKey>;
@@ -47,13 +50,39 @@ async function conversationFor(
   return result.rows[0];
 }
 
+/** The initiator a request's admission recorded, read inside the caller's open transaction,
+ * which has already checked that the conversation is its owner's (as proposeLocked's lockTurn
+ * does). The trigger in 023-request-initiator.sql keeps it from changing, so no row lock is needed.
+ * Null when the request has no admission row: one admitted by a workflow history older than
+ * bounded-conversations-v1, before admissions were durable, or one Crew never admitted.
+ * Null is not the owner: policy must decide it explicitly. Audit rows for such a request
+ * record the owner, as before admissions recorded an initiator. */
+export async function admittedInitiator(
+  db: Pick<PoolClient, "query">, key: { conversationId: string; requestId: string },
+): Promise<RequestInitiator | null> {
+  const { rows: [row] } = await db.query<{ initiator_kind: string; initiator_id: string | null }>(
+    "SELECT initiator_kind,initiator_id FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",
+    [key.conversationId, key.requestId]);
+  return row ? initiatorFromColumns(row.initiator_kind, row.initiator_id) : null;
+}
+
+/** The member workflow's recordAcceptance activity. Only MemberClient issues that workflow's
+ * acceptTurn and submitTurn updates, for the owner-authenticated gateway, the operator CLI
+ * acting as the owner and the gateway's routine dispatcher, so the caller attests the owner.
+ * recordAcceptance records a routine instead only when a routine firing row names the
+ * request. The initiator is not a workflow or update argument, so recorded histories replay
+ * unchanged. */
+export function ownerAdmissionActivity(store: MemberStore) {
+  return (request: TurnRequest): Promise<void> => store.recordAcceptance(request, ownerInitiator);
+}
+
 export class MemberStore {
   readonly pool: Pool;
   constructor(pool: Pool) {
     this.pool = pool;
   }
 
-  private async transaction<T>(action: (db: PoolClient) => Promise<T>): Promise<T> {
+  async transaction<T>(action: (db: PoolClient) => Promise<T>): Promise<T> {
     const db = await this.pool.connect();
     try {
       await db.query("BEGIN");
@@ -74,7 +103,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"]] as const;
+      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [23, "023-request-initiator.sql"], [24, "024-standing-grants.sql"], [25, "025-routines.sql"], [26, "026-memories.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -87,7 +116,7 @@ export class MemberStore {
   async spawn(input: z.input<typeof spawnSchema>): Promise<Member> {
     const { ownerId, requestId, engine, profile } = spawnSchema.parse(input);
     return this.transaction(async (db) => {
-      await db.query(
+      const inserted = await db.query(
         `INSERT INTO birbcrew_ts.members (owner_id, spawn_request_id, engine, profile)
          VALUES ($1, $2, $3, $4) ON CONFLICT (owner_id, spawn_request_id) DO NOTHING`,
         [ownerId, requestId, engine, profile],
@@ -98,6 +127,8 @@ export class MemberStore {
         [ownerId, requestId],
       );
       if (member.engine !== engine || member.profile !== profile) throw new MemberStoreError("conflict");
+      if (inserted.rowCount) await appendAudit(db, { type: "member.spawned", ownerId, memberId: member.memberId,
+        payload: { spawnRequestId: requestId, engine, profile } });
       return member;
     });
   }
@@ -117,6 +148,10 @@ export class MemberStore {
         const capture = await captureProjectNotes(key.ownerId);
         if (capture) await db.query("INSERT INTO birbcrew_ts.conversation_notes (conversation_id,capture) VALUES ($1,$2)",
           [key.conversationId, JSON.stringify(capture)]);
+        await snapshotMemories(db, conversation);
+        const routineId = await firingConversation(db, key);
+        await appendAudit(db, { type: "conversation.opened", ownerId: key.ownerId, memberId: key.memberId,
+          conversationId: key.conversationId, payload: routineId ? { routineId } : {} });
       }
       return conversation;
     });
@@ -137,11 +172,15 @@ export class MemberStore {
     return {phase:row.phase,reason:row.reason};
   }
 
-  async recordAcceptance(input: z.input<typeof submitSchema>): Promise<void> {
+  /** A replay of an admitted request keeps the initiator its first admission recorded. A routine
+   * is recorded only from its firing row, read in this transaction; a caller cannot name one. */
+  async recordAcceptance(input: z.input<typeof submitSchema>, initiator: RequestInitiator): Promise<void> {
     const key=submitSchema.parse(input);
+    const attested=requestInitiator.parse(initiator);
+    if(attested.kind!=="owner")throw new MemberStoreError("conflict");
     const digest=createHash("sha256").update(key.text).digest();
     return this.transaction(async db=>{
-      await conversationFor(db,key,true);
+      const conversation=await conversationFor(db,key,true);
       const {rows:[prior]}=await db.query<{phase:"accepted"|"rejected";reason:string|null;prompt_digest:Buffer}>(
         "SELECT phase,reason,prompt_digest FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
       if(prior){
@@ -153,18 +192,18 @@ export class MemberStore {
         "SELECT prompt_digest FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
       if(existingTurn) {
         if(!existingTurn.prompt_digest.equals(digest))throw new MemberStoreError("conflict");
-        await db.query("INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest) VALUES($1,$2,$3)",
-          [key.conversationId,key.requestId,digest]);
-        return;
+      } else {
+        const {rows:[budget]}=await db.query<{limit:number;used:number}>(`SELECT turn_limit AS "limit",
+          (SELECT count(*) FROM (SELECT request_id FROM birbcrew_ts.request_admissions WHERE conversation_id=$1
+           UNION SELECT request_id FROM birbcrew_ts.turns WHERE conversation_id=$1) ids)::integer AS used
+          FROM birbcrew_ts.conversations WHERE conversation_id=$1`,[key.conversationId]);
+        if(budget.used>=budget.limit)throw new MemberStoreError("input_limit");
       }
-      const {rows:[budget]}=await db.query<{limit:number;used:number}>(`SELECT turn_limit AS "limit",
-        (SELECT count(*) FROM (SELECT request_id FROM birbcrew_ts.request_admissions WHERE conversation_id=$1
-         UNION SELECT request_id FROM birbcrew_ts.turns WHERE conversation_id=$1) ids)::integer AS used
-        FROM birbcrew_ts.conversations WHERE conversation_id=$1`,[key.conversationId]);
-      if(budget.used>=budget.limit)throw new MemberStoreError("input_limit");
-      await db.query("INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest) VALUES($1,$2,$3)",
-        [key.conversationId,key.requestId,digest]);
-      return;
+      const [initiatorKind,initiatorId]=initiatorColumns(await firingInitiator(db,key,conversation)??attested);
+      await db.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest,initiator_kind,initiator_id)
+        VALUES($1,$2,$3,$4,$5)`,[key.conversationId,key.requestId,digest,initiatorKind,initiatorId]);
+      await appendAudit(db,{type:"request.accepted",ownerId:key.ownerId,memberId:conversation.memberId,
+        conversationId:key.conversationId,requestId:key.requestId,payload:{promptDigest:digest.toString("hex")}});
     });
   }
 
@@ -172,13 +211,15 @@ export class MemberStore {
     const key=submitSchema.parse(input);
     if(reason!=="predecessor_failed"&&reason!=="predecessor_cancelled")throw new MemberStoreError("conflict");
     await this.transaction(async db=>{
-      await conversationFor(db,key,true);
+      const conversation=await conversationFor(db,key,true);
       const result=await db.query(`UPDATE birbcrew_ts.request_admissions a SET phase='rejected',reason=$4
         WHERE conversation_id=$1 AND request_id=$2 AND prompt_digest=$3
         AND (phase='accepted' OR reason=$4)
         AND NOT EXISTS(SELECT 1 FROM birbcrew_ts.turns t WHERE t.conversation_id=a.conversation_id AND t.request_id=a.request_id)`,
         [key.conversationId,key.requestId,createHash("sha256").update(key.text).digest(),reason]);
       if(!result.rowCount)throw new MemberStoreError("conflict");
+      await appendAudit(db,{type:"request.finished",ownerId:key.ownerId,memberId:conversation.memberId,conversationId:key.conversationId,
+        requestId:key.requestId,payload:{status:reason==="predecessor_cancelled"?"cancelled":"failed",reason}});
     });
   }
 
@@ -189,12 +230,14 @@ export class MemberStore {
     const key=parsed.success?parsed.data:claimSchema.omit({token:true}).parse(input);
     const digest=parsed.success?createHash("sha256").update(parsed.data.text).digest():null;
     await this.transaction(async db=>{
-      await conversationFor(db,key,true);
-      await db.query(`UPDATE birbcrew_ts.request_admissions a SET phase='rejected',reason='admission_unconfirmed'
+      const conversation=await conversationFor(db,key,true);
+      const rejected=await db.query(`UPDATE birbcrew_ts.request_admissions a SET phase='rejected',reason='admission_unconfirmed'
         WHERE conversation_id=$1 AND request_id=$2 AND phase='accepted'
         AND ($3::bytea IS NULL OR prompt_digest=$3)
         AND NOT EXISTS(SELECT 1 FROM birbcrew_ts.turns t WHERE t.conversation_id=a.conversation_id AND t.request_id=a.request_id)`,
         [key.conversationId,key.requestId,digest]);
+      if(rejected.rowCount)await appendAudit(db,{type:"request.finished",ownerId:key.ownerId,memberId:conversation.memberId,
+        conversationId:key.conversationId,requestId:key.requestId,payload:{status:"failed",reason:"admission_unconfirmed"}});
     });
   }
 
@@ -261,8 +304,10 @@ export class MemberStore {
       if (waiting.rowCount) return false;
       // Stop publication cannot wait for the SDK's shared grant on the turn row.
       await db.query("INSERT INTO birbcrew_ts.native_stop_requests VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",[...args,turn.token]);
-      await db.query("INSERT INTO birbcrew_ts.tool_cancellations VALUES ($1,$2) ON CONFLICT DO NOTHING",args);
+      const marked = await db.query("INSERT INTO birbcrew_ts.tool_cancellations VALUES ($1,$2) ON CONFLICT DO NOTHING",args);
       await publishObservation(db,key.conversationId,{kind:"cancelled",requestId:key.requestId});
+      if (marked.rowCount) await appendAudit(db,{type:"request.cancellation_requested",ownerId:key.ownerId,memberId:member.memberId,
+        conversationId:key.conversationId,requestId:key.requestId,payload:{}});
       return true;
     });
   }
@@ -315,6 +360,9 @@ export class MemberStore {
         AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.native_launches WHERE conversation_id=$1 AND request_id=$2 AND NOT stopped)`,
         [key.conversationId,key.requestId]);
       await publishObservation(db, key.conversationId, { kind: stopped.rowCount ? "stopped" : "failed", requestId:key.requestId });
+      // recovery_closed above makes this uncertain outcome final; the "recover" return is not.
+      await appendAudit(db, { type: "request.finished", ownerId: key.ownerId, memberId: conversation.memberId,
+        conversationId: key.conversationId, requestId: key.requestId, payload: { status: "uncertain" } });
       return null;
     });
   }
@@ -541,6 +589,8 @@ export class MemberStore {
         const cancelled = await db.query("SELECT 1 FROM birbcrew_ts.tool_cancellations WHERE conversation_id=$1 AND request_id=$2",
           [key.conversationId,key.requestId]);
         await publishObservation(db, key.conversationId, { kind: "reply", requestId: key.requestId, ...content, cancelled:!!cancelled.rowCount });
+        await appendAudit(db, { type: "request.finished", ownerId: key.ownerId, memberId: conversation.memberId,
+          conversationId: key.conversationId, requestId: key.requestId, payload: { status: "completed" } });
         return key.reply;
       }
       const replay = await db.query<{ reply: string }>(
