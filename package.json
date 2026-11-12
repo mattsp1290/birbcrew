@@ -29,6 +29,7 @@
     "test:recovery:native": "node tests/proof/recovery-native.mts",
     "test:rollover": "node tests/proof/rollover.mts",
     "test:api": "node --test tests/service/integration-api.test.ts",
+    "test:audit": "node --test tests/service/audit.test.ts",
     "test:api:service": "node tests/proof/integration-api.mts",
     "test:recovery:coordinated": "node tests/proof/coordinated-recovery.mts",
     "test:temporal:tls": "node tests/proof/temporal-tls.mts"

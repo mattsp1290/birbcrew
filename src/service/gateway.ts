@@ -12,6 +12,7 @@ import { Client, Connection, WorkflowUpdateFailedError } from "@temporalio/clien
 import { Pool } from "pg";
 import { z } from "zod";
 import { decisionSchema } from "./approvals.ts";
+import { AuditUnsettledError, auditCsv, auditParameterNames, auditQuerySchema, readAudit } from "./audit.ts";
 import { MemberClient } from "./client.ts";
 import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from "./domain.ts";
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
@@ -44,8 +45,8 @@ async function body(request: IncomingMessage): Promise<unknown> {
   catch { throw new HttpError(400, "invalid_json"); }
 }
 
-function json(response: ServerResponse, status: number, data: unknown) {
-  response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+function json(response: ServerResponse, status: number, data: unknown, headers: Record<string, string> = {}) {
+  response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
   response.end(JSON.stringify(data));
 }
 
@@ -132,6 +133,19 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
     const versioned = url.pathname.startsWith("/v1/");
     const path = versioned ? url.pathname.slice(3) : url.pathname;
     if (versioned && path === "/capabilities" && request.method === "GET") return json(response, 200, integrationCapabilities);
+    if (versioned && path === "/audit") {
+      if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
+      const names = [...url.searchParams.keys()];
+      if (new Set(names).size !== names.length || !names.every(name => auditParameterNames.includes(name))) {
+        throw new HttpError(400, "invalid_input");
+      }
+      const query = auditQuerySchema.parse(Object.fromEntries(url.searchParams));
+      const page = await readAudit(store.pool, ownerId, query);
+      if (query.format === "json") return json(response, 200, { apiVersion: "1", ...page });
+      response.writeHead(200, { "Content-Type": "text/csv; charset=utf-8", "Cache-Control": "no-store",
+        "Content-Disposition": 'attachment; filename="audit.csv"', "Audit-Next-After": page.nextAfter, "Audit-Has-More": String(page.hasMore) });
+      return response.end(auditCsv(page.events));
+    }
     const requestRoute = versioned && /^\/conversations\/([^/]+)\/requests(?:\/([^/]+)(\/cancel)?)?$/.exec(path);
     if (requestRoute) {
       const conversationId = z.uuid().parse(requestRoute[1]);
@@ -210,6 +224,7 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       if (error instanceof z.ZodError) return json(response, 400, { error: "invalid_input" });
       if (error instanceof MemberStoreError) return json(response, error.code === "not_found" ? 404 : 409, { error: error.code });
       if (error instanceof WorkflowUpdateFailedError) return json(response, 409, { error: "update_rejected" });
+      if (error instanceof AuditUnsettledError) return json(response, 503, { error: "audit_unsettled" }, { "Retry-After": "1" });
       return json(response, 503, { error: "retry_same_request" });
     });
   });

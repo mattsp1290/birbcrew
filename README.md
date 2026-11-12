@@ -103,3 +103,6 @@ even if the original hub is removed.
 
 Use the [HTTP gateway guide](docs/member-gateway.md) to submit turns, decide
 protected tool requests and attach independent AG-UI observers to these members.
+The [audit trail](docs/audit-trail.md) records who spawned, opened, submitted,
+decided, cancelled and completed what, and when. Each owner can page or export
+their own trail as CSV through `GET /v1/audit`.

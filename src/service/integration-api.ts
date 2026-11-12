@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { appendAudit, auditEventTypes, auditLimits } from "./audit.ts";
 import type { MemberClient } from "./client.ts";
 import { MemberStoreError, submitSchema, turnKey } from "./domain.ts";
 import { conversationTurnLimit, workflowGenerationTurnLimit } from "./limits.ts";
@@ -14,6 +15,10 @@ export const integrationCapabilities = {
   proxy: { version: 1, protocols: ["anthropic-messages", "openai-responses", "openai-chat-completions"] },
   trustedContext: { version: 1, transport: "operator-configured-local-runtime", httpSubmission: false },
   observation: { version: 1, protocol: "AG-UI", mode: "snapshot-and-bounded-tail", cursorExpiry: "reconnect-for-snapshot" },
+  audit: {
+    version: 1, route: "/v1/audit", eventTypes: auditEventTypes, pagination: "event-id-keyset-no-skipped-commits",
+    formats: ["json", "csv"], limits: auditLimits, retention: "append-only-with-database; no-automatic-TTL",
+  },
 } as const;
 
 const keySchema = turnKey;
@@ -97,11 +102,21 @@ export class IntegrationApi {
       WHERE c.owner_id=$1 AND t.conversation_id=$2 AND t.request_id=$3
       ON CONFLICT(conversation_id,request_id) DO NOTHING`, [key.ownerId,key.conversationId,key.requestId]);
     // Atomic ownership check and FK admission requirement. Repeated intent has one receipt.
-    await this.store.pool.query(`INSERT INTO birbcrew_ts.integration_cancellations(conversation_id,request_id)
-      SELECT a.conversation_id,a.request_id FROM birbcrew_ts.request_admissions a
-      JOIN birbcrew_ts.conversations c USING(conversation_id)
-      WHERE c.owner_id=$1 AND a.conversation_id=$2 AND a.request_id=$3
-      ON CONFLICT(conversation_id,request_id) DO NOTHING`, [key.ownerId,key.conversationId,key.requestId]);
+    await this.store.transaction(async db => {
+      // Lock the conversation first, like every workflow-side canceller; inserting the
+      // shared audit key before this lock can deadlock against them.
+      const { rows: [conversation] } = await db.query<{ member_id: string }>(
+        "SELECT member_id FROM birbcrew_ts.conversations WHERE conversation_id=$1 AND owner_id=$2 FOR KEY SHARE",
+        [key.conversationId,key.ownerId]);
+      if (!conversation) return;
+      const { rows: [intent] } = await db.query<{ receipt_id: string }>(`INSERT INTO birbcrew_ts.integration_cancellations(conversation_id,request_id)
+        SELECT a.conversation_id,a.request_id FROM birbcrew_ts.request_admissions a
+        JOIN birbcrew_ts.conversations c USING(conversation_id)
+        WHERE c.owner_id=$1 AND a.conversation_id=$2 AND a.request_id=$3
+        ON CONFLICT(conversation_id,request_id) DO NOTHING RETURNING receipt_id`, [key.ownerId,key.conversationId,key.requestId]);
+      if (intent) await appendAudit(db, { type: "request.cancellation_requested", ownerId: key.ownerId, memberId: conversation.member_id,
+        conversationId: key.conversationId, requestId: key.requestId, payload: { receiptId: intent.receipt_id } });
+    });
     return this.status(key);
   }
 
