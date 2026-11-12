@@ -12,7 +12,7 @@ import { Client, Connection, WorkflowUpdateFailedError } from "@temporalio/clien
 import { Pool } from "pg";
 import { z } from "zod";
 import { decisionSchema } from "./approvals.ts";
-import { auditCsv, auditParameterNames, auditQuerySchema, readAudit } from "./audit.ts";
+import { AuditUnsettledError, auditCsv, auditParameterNames, auditQuerySchema, readAudit } from "./audit.ts";
 import { MemberClient } from "./client.ts";
 import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from "./domain.ts";
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
@@ -44,8 +44,8 @@ async function body(request: IncomingMessage): Promise<unknown> {
   catch { throw new HttpError(400, "invalid_json"); }
 }
 
-function json(response: ServerResponse, status: number, data: unknown) {
-  response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+function json(response: ServerResponse, status: number, data: unknown, headers: Record<string, string> = {}) {
+  response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
   response.end(JSON.stringify(data));
 }
 
@@ -223,6 +223,7 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       if (error instanceof z.ZodError) return json(response, 400, { error: "invalid_input" });
       if (error instanceof MemberStoreError) return json(response, error.code === "not_found" ? 404 : 409, { error: error.code });
       if (error instanceof WorkflowUpdateFailedError) return json(response, 409, { error: "update_rejected" });
+      if (error instanceof AuditUnsettledError) return json(response, 503, { error: "audit_unsettled" }, { "Retry-After": "1" });
       return json(response, 503, { error: "retry_same_request" });
     });
   });

@@ -131,7 +131,9 @@ had paged past that higher ID would never see the lower one.
 
 To prevent this, a statement trigger (`audit_events_append_order`) takes a shared
 advisory lock before any insert draws its ID. The writer holds that lock until
-commit. This applies to every writer, including direct SQL.
+commit. This applies to every writer, including direct SQL. The identity is
+declared `CACHE 1`, because the argument needs IDs drawn in order and a session's
+cached IDs would not be.
 
 A read polls for the same lock exclusively with `pg_try_advisory_xact_lock`. It
 gets the lock only when no allocated ID is still uncommitted. It then records the
@@ -139,9 +141,24 @@ largest committed ID as a horizon and returns rows only up to it.
 
 A read never queues ahead of writers. It holds the lock for one index lookup,
 which is the most it can delay a writer. It can wait for an in-flight state change
-to commit. If audited writes overlap continuously for 5 s,
-the read fails with `503 retry_same_request`. It never returns a page that a later
-commit can fill in behind the cursor.
+to commit, polling with a backoff that grows from 10 ms to 200 ms (about 30
+attempts). If it cannot get the lock within 5 s, it answers `503` with
+`{"error":"audit_unsettled"}` and `Retry-After: 1`. Retry the same read. Nothing was
+skipped. It never returns a page that a later commit can fill in behind the cursor.
+
+The lock is shared by all owners. Every audited transaction in Crew appends its row
+as its last step, then runs only database statements and commits. None waits for the
+application, Temporal or a native turn after appending. A read therefore waits out
+its 5 s window only while audited writes overlap continuously, or while a writer
+process has stalled between its insert and its commit: frozen, paused, or cut off
+from the database. Until PostgreSQL ends that session, every owner's read answers
+`audit_unsettled`. PostgreSQL notices a vanished client only through TCP keepalives,
+so set the server's `tcp_keepalives_idle`, `tcp_keepalives_interval` and
+`tcp_keepalives_count` well below the usual two-hour system default. A frozen process
+whose host still answers keepalives holds the lock until it resumes or is killed. Do
+not set `idle_in_transaction_session_timeout` for the application role. Native
+admission keeps a transaction open for a whole native turn by design, and the timeout
+would end it.
 
 ## Retention, upgrade and recovery
 
@@ -250,7 +267,9 @@ node --test tests/service/approvals.test.ts tests/service/codex-calls.test.ts \
 - owner isolation, including conversation filters;
 - keyset paging, CSV/JSON row equivalence and quoting, and query validation;
 - a reader that waits for a late commit instead of skipping it, while other
-  writers proceed.
+  writers proceed;
+- a writer left open past the read window: `503 audit_unsettled` with
+  `Retry-After`, after about 30 polls.
 
 By direct SQL it checks:
 

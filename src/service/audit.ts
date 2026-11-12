@@ -44,8 +44,9 @@ export interface AuditFact<T extends AuditEventType> {
 }
 
 /** Call inside the transaction that commits the recorded fact, after that transaction
- * holds the conversation row (the foreign key below locks it), and as late as possible:
- * the insert holds a shared lock that audit reads wait for until commit. */
+ * holds the conversation row (the foreign key below locks it), and as late as possible.
+ * Await nothing outside the database after it: the insert holds a shared lock that
+ * every owner's audit reads wait for until commit. */
 export async function appendAudit<T extends AuditEventType>(db: Pick<PoolClient, "query">, fact: AuditFact<T>) {
   const definition: { actor: "owner" | "system"; key: string; payload: z.ZodType } = auditEvents[fact.type];
   const payload = definition.payload.parse(fact.payload);
@@ -83,20 +84,28 @@ export interface AuditEvent {
   payload: Record<string, unknown>;
 }
 
+export const auditSettleWindowMs = 5_000;
+/** An audited transaction stayed open for the whole read window. Retrying later is safe. */
+export class AuditUnsettledError extends Error {
+  constructor() { super("Audit writers did not settle"); this.name = "AuditUnsettledError"; }
+}
+
 // Identity values are allocated before commit, so a later ID can become visible first;
 // paging past it would lose the earlier row forever. Inserts hold the shared lock taken
 // by 021-audit.sql's statement trigger. Obtaining it exclusively proves every allocated
 // ID has committed or rolled back, and this statement's snapshot predates the lock, so
 // its maximum is a safe horizon. Polling with try-lock never queues ahead of writers.
+// The lock is global, so one stalled writer makes every owner's read wait out the window.
+// The backoff keeps those waiting readers from crowding the gateway's small pool.
 async function stableHorizon(pool: Pool): Promise<string> {
-  const deadline = Date.now() + 5_000;
-  for (;;) {
+  const deadline = Date.now() + auditSettleWindowMs;
+  for (let wait = 10; ; wait = Math.min(wait * 2, 200)) {
     const { rows: [row] } = await pool.query<{ horizon: string | null }>(`SELECT CASE
       WHEN pg_try_advisory_xact_lock(hashtextextended('birbcrew_ts.audit_events', 0))
       THEN (SELECT coalesce(max(event_id), 0) FROM birbcrew_ts.audit_events)::text END AS horizon`);
     if (row.horizon !== null) return row.horizon;
-    if (Date.now() > deadline) throw new Error("Audit writers did not settle");
-    await delay(10);
+    if (Date.now() > deadline) throw new AuditUnsettledError();
+    await delay(wait);
   }
 }
 

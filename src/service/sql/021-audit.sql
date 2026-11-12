@@ -6,7 +6,9 @@
 -- read transaction a native turn holds. Adding a constraint or index to conversations
 -- here would take a lock that every conversation statement queues behind.
 CREATE TABLE birbcrew_ts.audit_events (
-    event_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    -- CACHE 1 is required: audit.ts stableHorizon relies on IDs being drawn in order.
+    -- A session's cached values could be drawn after a reader's horizon passed them.
+    event_id bigint GENERATED ALWAYS AS IDENTITY (CACHE 1) PRIMARY KEY,
     owner_id text NOT NULL,
     occurred_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     actor_kind text NOT NULL,

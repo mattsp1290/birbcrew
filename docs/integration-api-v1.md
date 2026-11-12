@@ -191,10 +191,11 @@ responses are `{ apiVersion, events, nextAfter, hasMore }`. CSV responses carry 
 same rows, with `Audit-Next-After` and `Audit-Has-More` headers. Pass `nextAfter`
 as the next `after`. Event IDs are global across owners and not contiguous. Pages
 never skip an event that commits late. A read waits for in-flight writes without
-delaying them. If writes overlap continuously for 5 s, it returns
-`503 retry_same_request`. A restore removes the events after its recovery point,
-and new event IDs jump past every earlier ID, so a saved cursor never skips a new
-event.
+delaying them. If it cannot settle within 5 s, because writes overlap continuously
+or a writer process stalled mid-transaction, it returns `503 audit_unsettled` with
+`Retry-After: 1`; retry the same read. A restore removes the events after its
+recovery point, and new event IDs jump past every earlier ID, so a saved cursor
+never skips a new event.
 Payloads hold identifiers, digests, choices and statuses only, never prompt or
 reply text, tool arguments or credentials. See [the audit trail](audit-trail.md)
 for the event registry, field semantics and limits.

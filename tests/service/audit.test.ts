@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Pool } from "pg";
 import { z } from "zod";
 import { ApprovalStore } from "../../src/service/approvals.ts";
-import { appendAudit, auditCsv, auditEventTypes, auditQuerySchema, type AuditEvent } from "../../src/service/audit.ts";
+import { appendAudit, auditCsv, auditEventTypes, auditQuerySchema, auditSettleWindowMs, type AuditEvent } from "../../src/service/audit.ts";
 import { ChildStore } from "../../src/service/children.ts";
 import type { MemberClient } from "../../src/service/client.ts";
 import type { TurnRequest } from "../../src/service/domain.ts";
@@ -354,6 +354,39 @@ test("the SQL CHECK and the TypeScript registry name the same event types", asyn
     FROM pg_constraint WHERE conrelid='birbcrew_ts.audit_events'::regclass AND conname='audit_events_type_check'`);
   const named = new Set([...constraint.definition.matchAll(/'([a-z_]+\.[a-z_]+)'/g)].map(match => match[1]));
   assert.deepEqual([...named].sort(), [...auditEventTypes].sort());
+});
+
+test("a writer left open past the read window yields a retryable 503 audit_unsettled after a bounded number of polls", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  const query = pool.query;
+  let polls = 0;
+  pool.query = function (this: Pool, ...args: unknown[]) {
+    if (typeof args[0] === "string" && args[0].includes("pg_try_advisory_xact_lock")) polls++;
+    return (query as (...values: unknown[]) => unknown).apply(this, args);
+  } as unknown as typeof pool.query;
+  t.after(() => { pool.query = query; });
+  const writer = await pool.connect();
+  try {
+    await writer.query("BEGIN");
+    const requestId = randomUUID();
+    const { rows: [inserted] } = await writer.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members (owner_id,spawn_request_id,engine,profile)
+      VALUES ($1,$2,'pi',$3) RETURNING member_id`, [f.ownerId, requestId, profile]);
+    await writer.query(`INSERT INTO birbcrew_ts.audit_events (owner_id,actor_kind,actor_id,initiator_kind,initiator_id,event_type,member_id,payload)
+      VALUES ($1,'owner',$1,'owner',$1,'member.spawned',$2,$3)`, [f.ownerId, inserted.member_id,
+      JSON.stringify({ spawnRequestId: requestId, engine: "pi", profile })]);
+    const started = Date.now();
+    const response = await f.api("/v1/audit?format=csv");
+    assert.ok(Date.now() - started >= auditSettleWindowMs);
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get("retry-after"), "1");
+    assert.deepEqual(await response.json(), { error: "audit_unsettled" });
+    // Backoff from 10 ms to 200 ms: about 30 polls in the window, not about 500.
+    assert.ok(polls > 0 && polls <= 40, `polls: ${polls}`);
+  } finally {
+    await writer.query("ROLLBACK");
+    writer.release();
+  }
+  assert.equal((await f.api("/v1/audit")).status, 200);
 });
 
 test("migration 21 upgrades a v20 database with rows while a native turn holds its admission", async (t) => {
