@@ -7,6 +7,7 @@ import { serveNativeTool } from "./codex-mcp.ts";
 import type { DeferredTool, ToolOutcome } from "./deferral.ts";
 import type { Launch } from "./supervisor.ts";
 import type { Conversation } from "./domain.ts";
+import { temporalConnection, type TemporalSettings } from "./temporal-config.ts";
 
 // The MCP envelope already attributes the response to the native call.
 function resultText(outcome: ToolOutcome) {
@@ -15,7 +16,7 @@ function resultText(outcome: ToolOutcome) {
 }
 
 export async function runLiveTool(
-  pool: Pool, launch: Launch, member: Conversation, tool: DeferredTool, input: DriverInput,
+  pool: Pool, temporal: TemporalSettings, launch: Launch, member: Conversation, tool: DeferredTool, input: DriverInput,
   run: (input:DriverInput) => Promise<DriverResult>, discloseCallId: (id: string) => Promise<void>,
 ) {
   const stopped = new AbortController();
@@ -33,14 +34,16 @@ export async function runLiveTool(
       await discloseCallId(call.nativeCallId);
       const deadline = Date.now() + 45_000;
       const approval = await proposeLive(pool,launch,{...call,args:call.args,expiresAt:new Date(deadline).toISOString()});
-      const connection = Connection.lazy({address:process.env.BIRBCREW_TEMPORAL_ADDRESS ?? "127.0.0.1:7233"});
-      try {
-        const client = new Client({connection});
-        await connection.withDeadline(Date.now()+2000, () =>
-          client.workflow.getHandle(workflowId,launch.execution.workflowRunId).signal("liveProposal", {
-            requestId:launch.requestId, approvalId:approval.approvalId, invocationId:approval.invocationId
-          })).catch(() => { /* The workflow can also resolve the durable proposal on demand. */ });
-      } finally { await connection.close(); }
+      await temporalConnection(temporal).then(async options => {
+        const connection = Connection.lazy(options);
+        try {
+          const client = new Client({connection, namespace:temporal.namespace});
+          await connection.withDeadline(Date.now()+2000, () =>
+            client.workflow.getHandle(workflowId,launch.execution.workflowRunId).signal("liveProposal", {
+              requestId:launch.requestId, approvalId:approval.approvalId, invocationId:approval.invocationId
+            }));
+        } finally { await connection.close(); }
+      }).catch(() => { /* The workflow can also resolve the durable proposal on demand. */ });
       while (Date.now() < deadline) {
         call.signal.throwIfAborted();
         const result = await settleLive(pool,launch,approval.approvalId);

@@ -17,6 +17,7 @@ import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
 import { MemberStore } from "./store.ts";
 import { IntegrationApi, integrationCapabilities } from "./integration-api.ts";
+import { temporalConnection, temporalSettings } from "./temporal-config.ts";
 
 const credentials = z.record(z.string().regex(/^[0-9a-f]{64}$/), z.string().min(1));
 const encoder = new EventEncoder();
@@ -228,12 +229,13 @@ async function main() {
   const file = process.argv[2], database = process.env.BIRBCREW_DATABASE_URL;
   if (!file || !database) throw new Error("Set BIRBCREW_DATABASE_URL and supply the gateway configuration file");
   const config = configSchema.parse(JSON.parse(await readFile(file, "utf8")));
+  const temporal = temporalSettings(process.env);
   const pool = new Pool({ connectionString: database });
-  const connection = await Connection.connect({ address: process.env.BIRBCREW_TEMPORAL_ADDRESS ?? "127.0.0.1:7233" });
+  const connection = await Connection.connect(await temporalConnection(temporal));
   try {
     const store = new MemberStore(pool);
     await store.migrate();
-    const server = createGateway(store, new MemberClient(store, new Client({ connection })), config.tokenHashes);
+    const server = createGateway(store, new MemberClient(store, new Client({ connection, namespace: temporal.namespace })), config.tokenHashes);
     server.listen(config.port, "127.0.0.1");
     await once(server, "listening");
     const address = server.address();

@@ -6,6 +6,7 @@ import { Pool } from "pg";
 import { MemberClient } from "./client.ts";
 import { MemberStore } from "./store.ts";
 import { spawnSchema } from "./domain.ts";
+import { temporalConnection, temporalSettings } from "./temporal-config.ts";
 
 async function main() {
   const [operation, configPath] = process.argv.slice(2);
@@ -14,7 +15,7 @@ async function main() {
   }
   const url = process.env.BIRBCREW_DATABASE_URL;
   if (!url) throw new Error("Set BIRBCREW_DATABASE_URL to the private TypeScript application database");
-  const address = process.env.BIRBCREW_TEMPORAL_ADDRESS ?? "127.0.0.1:7233";
+  const temporal = temporalSettings(process.env);
   const pool = new Pool({ connectionString: url });
   const store = new MemberStore(pool);
   try {
@@ -27,7 +28,7 @@ async function main() {
       const { profiles, close } = await import(pathToFileURL(resolve(configPath)).href);
       try {
         await registerProfiles(pool, profiles, stateDir);
-        await runMemberWorker(store, address, profiles, resolve(configPath), stateDir);
+        await runMemberWorker(store, temporal, profiles, resolve(configPath), stateDir);
       } finally {
         await close?.();
       }
@@ -42,9 +43,9 @@ async function main() {
       console.log(JSON.stringify(await store.spawn(spawn)));
       return;
     }
-    const connection = await Connection.connect({ address });
+    const connection = await Connection.connect(await temporalConnection(temporal));
     try {
-      const members = new MemberClient(store, new Client({ connection }));
+      const members = new MemberClient(store, new Client({ connection, namespace: temporal.namespace }));
       let result;
       switch (operation) {
         case "open": result = await members.open(input); break;
@@ -67,5 +68,6 @@ async function main() {
 
 main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : "Member command failed");
-  process.exitCode = 1;
+  // A failed Worker.create (for example a missing namespace) leaves Temporal native handles that keep Node alive.
+  process.exit(1);
 });
