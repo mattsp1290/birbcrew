@@ -86,10 +86,12 @@ async function sourceHistory(db: PoolClient, conversationId: string) {
 }
 
 /** What a new admission of this request may record, or why it is refused: a sealed source admits
- * nothing new; a handoff's target admits its reserved request, with exactly the stored transcript,
- * before any other. Read by recordAcceptance under the conversation's row lock and by
- * MemberStore.checkAdmission before any workflow update. Null when no handoff decides it. */
-export async function handoffAdmission(db: Queryable, key: { conversationId: string; requestId: string; text: string })
+ * nothing new; a handoff's target admits its reserved request, with exactly the stored transcript
+ * and no approval deadline (the server submits it with none), before any other. Read by
+ * recordAcceptance under the conversation's row lock and by MemberStore.checkAdmission before any
+ * workflow update. Null when no handoff decides it. */
+export async function handoffAdmission(db: Queryable,
+  key: { conversationId: string; requestId: string; text: string; approvalDeadlineSeconds?: number })
   : Promise<RequestInitiator | null> {
   const { rows } = await db.query<{ handoff_id: string; sealed: boolean; first_request_id: string; transcript_digest: Buffer; admitted: boolean }>(
     `SELECT h.handoff_id, h.source_conversation_id=$1 AS sealed, h.first_request_id, h.transcript_digest,
@@ -101,7 +103,9 @@ export async function handoffAdmission(db: Queryable, key: { conversationId: str
   const [handoff] = rows;
   if (!handoff) return null;
   if (handoff.first_request_id === key.requestId) {
-    if (!sha256(key.text).equals(handoff.transcript_digest)) throw new MemberStoreError("conflict");
+    if (!sha256(key.text).equals(handoff.transcript_digest) || key.approvalDeadlineSeconds !== undefined) {
+      throw new MemberStoreError("conflict");
+    }
     return { kind: "handoff", id: handoff.handoff_id };
   }
   if (!handoff.admitted) throw new MemberStoreError("handoff_pending");

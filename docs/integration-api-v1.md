@@ -346,7 +346,9 @@ Claude or Pi card of such a request shows `expiresAt`. From then on a decision f
 carries `expiredApproval: { approvalId, expiresAt, expiredAt }`, the conversation
 state's `expiredCalls` lists the card, and the audit trail has `approval.expired`; the
 receipt `status` values are unchanged. A Codex card keeps the earlier of its live
-deadline and the request's. See [approval expiry](approval-expiry.md).
+deadline and the request's. A conversation handoff's reserved first request never
+carries one; its ID sent with a deadline fails `409 conflict`. See
+[approval expiry](approval-expiry.md).
 
 ## Audit trail
 

@@ -129,6 +129,18 @@ fails `turn_uncertain`. No `approval.expired` row is written for Codex. With the
 second adapter deadline and the 60 second minimum, the live deadline is always the
 earlier one today.
 
+## Conversation handoff
+
+A [conversation handoff](handoffs.md)'s reserved first request never has a deadline.
+The server submits it without one, and that request ID sent with
+`approvalDeadlineSeconds` fails `409 conflict`, so a card of the handoff turn waits for
+an answer. Later requests to the target take a deadline like any request.
+
+A card waiting on its deadline makes its conversation `busy` to a handoff, as any
+pending card does. After it expires, its turn goes on to its reply. The source can be
+handed off once that turn has ended and the requests queued behind it were rejected,
+as after an owner's cancel.
+
 ## Audit
 
 | Type | Actor | Recorded when | One row per | Payload |
@@ -160,9 +172,9 @@ the routine. `routine.firing_settled` gains the reason `approval_expired`, and
 Migration 28 adds `request_admissions.approval_deadline_seconds`,
 `deferred_calls.expires_at` and `expired_at`, and `routines.approval_deadline_seconds`,
 with `NOT VALID` CHECKs, so no table is rewritten or scanned. It names and widens the
-firing reason CHECK that 025 left unnamed, widens `audit_events_type_check`, keeps a
-routine's deadline in its immutable definition, and builds one empty partial unique
-index on `audit_events`. Until `migrate()` commits it holds, on existing tables only:
+firing reason CHECK that 025 left unnamed, widens `audit_events_type_check` (repeating
+every type migration 27 lists), keeps a routine's deadline in its immutable definition,
+and builds one empty partial unique index on `audit_events`. Until `migrate()` commits it holds, on existing tables only:
 
 | Table | Modes (observed in `pg_locks` on PostgreSQL 17) | Why |
 | --- | --- | --- |
@@ -211,6 +223,7 @@ npm ci
 npm run build
 export BIRBCREW_TEST_DATABASE_URL='postgresql://birbcrew:fixture-only@127.0.0.1:55432/integration_test'
 npm run test:expiry
+npm run test:handoffs
 npm run test:recovery
 ```
 
@@ -238,6 +251,10 @@ store calls its handler makes. It checks:
 - migration 28 on a version-27 database: no table rewritten, the locks above, the
   constraints `NOT VALID`, no lock queue while an admission holds `request_admissions`,
   completion while a native turn holds its admission, and an earlier receipt unchanged.
+
+`handoffs.test.ts` checks that a handoff's reserved first request refuses a deadline
+while a later request in the target takes one and expires, and that a source whose card
+expires stays `busy` until its turn has ended and can then be handed off.
 
 `recovery.test.ts` restores a real `pg_dump` taken while a card with a deadline was
 pending, checks its `expiresAt` survives, a decision past it is refused, the restored
