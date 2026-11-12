@@ -237,7 +237,9 @@ containerd's `RuntimeDefault` seccomp profile.
 
 The gateway listens on loopback only, so kubelet `httpGet` and `tcpSocket`
 probes, which target the pod IP, cannot reach it. Use exec probes, which run
-inside the container's network namespace.
+inside the container's network namespace. **Verified:** a gateway that cannot
+open its Temporal connection and a worker whose namespace is missing exit with
+status 1, so the restart policy handles those failed starts.
 
 ### Gateway
 
