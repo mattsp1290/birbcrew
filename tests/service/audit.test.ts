@@ -413,6 +413,10 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
       "request.cancellation_requested": { conversationId, requestId, payload: {} },
       "request.finished": { conversationId, requestId, payload: { status: "completed" } },
       "trusted_effect.completed": { conversationId, requestId, payload: { operationId: randomUUID(), toolName: "fixture_effect" } },
+      "approval.auto_approved": { conversationId, requestId, payload: { approvalId: randomUUID(), invocationId: requestId,
+        toolName: "record_work_item", argumentDigest: digest, grantId: randomUUID() } },
+      "grant.created": { conversationId, requestId, payload: { grantId: randomUUID(), approvalId: randomUUID(), scope: "member" } },
+      "grant.revoked": { conversationId, payload: { grantId: randomUUID(), reason: "owner" } },
     };
     for (const type of auditEventTypes) {
       const fact = { type, ownerId, memberId, ...samples[type] } as AuditFact<typeof type>;
