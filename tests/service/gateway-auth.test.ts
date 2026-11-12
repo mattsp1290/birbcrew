@@ -19,9 +19,17 @@ const store = { pool: { async query() { record("store"); return { rows: [], rowC
 const members = new Proxy({}, { get: (_, name) => () => { record("members." + String(name)); throw new Error("unreachable"); } }) as MemberClient;
 
 const token = randomUUID();
-const conversation = randomUUID(), request = randomUUID();
+const conversation = randomUUID(), request = randomUUID(), member = randomUUID(), grant = randomUUID();
+const routine = randomUUID(), memory = randomUUID();
+// Every route and method main serves, versioned and unversioned, plus health-like paths that must not exist.
 const routes: [string, string][] = [
-  ["GET", "/v1/capabilities"], ["POST", "/v1/members"], ["POST", "/v1/conversations"],
+  ["GET", "/v1/capabilities"], ["GET", "/v1/health"], ["GET", "/v1/members"], ["GET", "/v1/conversations"],
+  ["GET", "/v1/audit"], ["GET", "/v1/audit?format=csv"], ["POST", "/v1/audit"],
+  ["POST", "/v1/routines"], ["GET", "/v1/routines"], ["GET", `/v1/routines/${routine}`], ["DELETE", `/v1/routines/${routine}`],
+  ["POST", `/v1/routines/${routine}/enable`], ["POST", `/v1/routines/${routine}/disable`], ["GET", `/v1/routines/${routine}/firings`],
+  ["POST", "/v1/memories"], ["GET", "/v1/memories"], ["GET", `/v1/memories/${memory}`], ["DELETE", `/v1/memories/${memory}`],
+  ["GET", `/v1/members/${member}/grants`], ["POST", `/v1/members/${member}/grants/${grant}/revoke`],
+  ["POST", "/v1/members"], ["POST", "/v1/conversations"],
   ["GET", `/v1/conversations/${conversation}`], ["POST", `/v1/conversations/${conversation}/requests`],
   ["GET", `/v1/conversations/${conversation}/requests/${request}`], ["POST", `/v1/conversations/${conversation}/requests/${request}/cancel`],
   ["POST", `/v1/conversations/${conversation}/events`], ["POST", `/v1/conversations/${conversation}/human`],
@@ -31,7 +39,7 @@ const routes: [string, string][] = [
   ["POST", `/conversations/${conversation}/human`], ["POST", `/conversations/${conversation}/cancel`],
   ["POST", `/conversations/${conversation}/events`],
   ["GET", "/"], ["GET", "/health"], ["GET", "/healthz"], ["GET", "/v1/healthz"], ["GET", "/healthz/"], ["GET", "/healthz?probe=1"],
-  ["POST", "/healthz"], ["PUT", "/healthz"], ["DELETE", "/healthz"],
+  ["GET", "/v1/health?probe=1"], ["POST", "/healthz"], ["PUT", "/healthz"], ["DELETE", "/healthz"],
 ];
 
 async function listen(t: TestContext) {
@@ -70,9 +78,10 @@ test("every route rejects requests without a valid bearer token before reaching 
     }
   }
   // Request targets that fetch normalizes away, including ones a URL parser rejects or rewrites.
-  for (const [method, target] of [["HEAD", "/healthz"], ["OPTIONS", "/healthz"], ["GET", "//"], ["GET", "//evil/healthz"],
-    ["GET", "http://x/healthz"], ["GET", "http://[/healthz"], ["GET", "http://x:99999/healthz"], ["GET", "/./healthz"],
-    ["GET", "/v1/../healthz"], ["GET", "/%2e/healthz"], ["GET", "*"]]) {
+  for (const [method, target] of [["HEAD", "/healthz"], ["OPTIONS", "/healthz"], ["HEAD", "/v1/health"], ["GET", "//"],
+    ["GET", "//evil/healthz"], ["GET", "http://x/healthz"], ["GET", "http://x/v1/health"], ["GET", "http://[/healthz"],
+    ["GET", "http://x:99999/healthz"], ["GET", "/./healthz"], ["GET", "/v1/../healthz"], ["GET", "/v1/./health"],
+    ["GET", "/%2e/healthz"], ["GET", "*"]]) {
     assert.equal(await raw(port, method, target), 401, `${method} ${target}`);
   }
   assert.deepEqual(reached, [], "no unauthenticated request reached the store or Temporal client");
