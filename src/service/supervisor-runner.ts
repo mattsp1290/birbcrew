@@ -3,7 +3,7 @@ import { nativeCallIds } from "./text-stream.ts";
 import { MemberStore } from "./store.ts";
 import { runLiveTool } from "./codex-live.ts";
 import { trustedProjectContext } from "./project-notes.ts";
-import { traced } from "./telemetry.ts";
+import { flushTelemetry, traced } from "./telemetry.ts";
 import { withNativeAdmission } from "./native-admission.ts";
 import type { Launch } from "./supervisor.ts";
 import { pathToFileURL } from "node:url";
@@ -73,7 +73,8 @@ process.once("message", async (command: AdmittedTurn) => {
   } catch {
     reply = { error: "Native SDK turn failed" };
   } finally {
-    await pool.end();
+    // Batched spans would be lost at process.exit below.
+    await Promise.all([pool.end(), flushTelemetry()]);
   }
   if (process.connected) process.send?.(reply, () => process.exit(0));
 });

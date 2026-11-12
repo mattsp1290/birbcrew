@@ -6,6 +6,7 @@ import { Pool } from "pg";
 import { MemberClient } from "./client.ts";
 import { MemberStore } from "./store.ts";
 import { spawnSchema } from "./domain.ts";
+import { flushTelemetry } from "./telemetry.ts";
 
 async function main() {
   const [operation, configPath] = process.argv.slice(2);
@@ -30,6 +31,7 @@ async function main() {
         await runMemberWorker(store, address, profiles, resolve(configPath), stateDir);
       } finally {
         await close?.();
+        await flushTelemetry();
       }
       return;
     }
