@@ -9,7 +9,7 @@ import { EventType as E, type Event } from "@ag-ui/core";
 import { RunAgentInputSchema } from "@ag-ui/core/schemas";
 import { EventEncoder } from "@ag-ui/encoder";
 import { Client, Connection, WorkflowUpdateFailedError } from "@temporalio/client";
-import { Pool } from "pg";
+import { Client as PgClient, Pool, type PoolOptions } from "pg";
 import { z } from "zod";
 import { decisionSchema } from "./approvals.ts";
 import { AuditUnsettledError, auditCsv, auditParameterNames, auditQuerySchema, readAudit } from "./audit.ts";
@@ -60,6 +60,55 @@ function json(response: ServerResponse, status: number, data: unknown, headers: 
 
 function isEmpty(value: unknown) {
   return value == null || (typeof value === "object" && !Array.isArray(value) && !Object.keys(value).length);
+}
+
+// Strict schemas see every parameter; a repeated one is ambiguous, not last-wins.
+function searchParams(url: URL): Record<string, string> {
+  const entries = [...url.searchParams];
+  if (new Set(entries.map(([key]) => key)).size !== entries.length) throw new HttpError(400, "invalid_input");
+  return Object.fromEntries(entries);
+}
+
+export const probeTimeout = 2_000;
+// A slow or failing dependency becomes undefined, so no driver text or address is reported.
+async function probe<T>(check: () => Promise<T>): Promise<T | undefined> {
+  const timer = new AbortController();
+  try { return await Promise.race([check(), delay(probeTimeout, undefined, { signal: timer.signal })]); }
+  catch { return undefined; }
+  finally { timer.abort(); }
+}
+
+// probe() only ends the HTTP wait. The read itself uses its own connection, never the pool: pool.connect() has
+// no bound (real routes keep an unbounded wait), so a connect stalled on a silent or unreachable host would pin
+// the shared probe and a pool slot until the OS gave up, or forever. Settings are the ones pg-pool hands its own
+// clients, plus password, which pg-pool makes non-enumerable so a spread drops it. connectionTimeoutMillis covers
+// TCP, TLS and authentication; statement_timeout makes the server cancel a lock-blocked read; query_timeout
+// covers a silent socket; end() gets the same bound before the socket is destroyed. So this settles within
+// 3 * probeTimeout whatever the server does.
+async function readSchemaVersion(options: PoolOptions): Promise<number | null> {
+  const client = new PgClient({ ...options, password: options.password,
+    connectionTimeoutMillis: probeTimeout, statement_timeout: probeTimeout, query_timeout: probeTimeout });
+  client.on("error", () => {}); // a socket error after the probe gave up must not crash the gateway
+  try {
+    await client.connect();
+    const { rows: [row] } = await client.query<{ version: number | null }>("SELECT max(version) AS version FROM birbcrew_ts.schema_versions");
+    return row.version;
+  } finally {
+    const ended = await Promise.race([client.end().then(() => true), delay(probeTimeout, false, { ref: false })]);
+    if (!ended) client.connection.stream.destroy();
+  }
+}
+
+async function health(schemaVersion: () => Promise<number | null>, members: MemberClient) {
+  const [version, temporal] = await Promise.all([
+    probe(schemaVersion),
+    probe(async () => { await members.temporalReachable(Date.now() + probeTimeout); return true; }),
+  ]);
+  const database = typeof version === "number" ? "ready" : "unavailable";
+  return {
+    apiVersion: "1", status: database === "ready" && temporal ? "ready" : "not_ready",
+    dependencies: { database: { status: database, schemaVersion: version ?? null }, temporal: { status: temporal ? "ready" : "unavailable" } },
+  } as const;
 }
 
 async function observe(
@@ -139,6 +188,10 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
   { clock = () => new Date() }: { clock?: Clock } = {}) {
   const integration = new IntegrationApi(store, members);
   const accounts = Object.entries(credentials.parse(owners)).map(([hash, actor]) => ({ digest: Buffer.from(hash, "hex"), actor }));
+  // One database probe at a time, shared by concurrent health calls, so polling holds at most one probe connection.
+  // A stalled probe pins this slot only until readSchemaVersion's own bounds end it.
+  let databaseProbe: Promise<number | null> | undefined;
+  const schemaVersion = () => databaseProbe ??= readSchemaVersion(store.pool.options).finally(() => { databaseProbe = undefined; });
   const routines = new RoutineApi(store, clock);
   const memories = new MemoryApi(store);
   const dispatcher = new RoutineDispatcher({ store, members, integration, owners: accounts.map(({ actor }) => actor), clock });
@@ -152,6 +205,15 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
     const versioned = url.pathname.startsWith("/v1/");
     const path = versioned ? url.pathname.slice(3) : url.pathname;
     if (versioned && path === "/capabilities" && request.method === "GET") return json(response, 200, integrationCapabilities);
+    if (versioned && path === "/health" && request.method === "GET") {
+      z.strictObject({}).parse(searchParams(url));
+      const report = await health(schemaVersion, members);
+      return json(response, report.status === "ready" ? 200 : 503, report);
+    }
+    if (versioned && path === "/members" && request.method === "GET") return json(response, 200, await integration.listMembers(ownerId, searchParams(url)));
+    if (versioned && path === "/conversations" && request.method === "GET") {
+      return json(response, 200, await integration.listConversations(ownerId, searchParams(url)));
+    }
     if (versioned && path === "/audit") {
       if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
       const query = auditQuerySchema.parse(queryOf(url, auditParameterNames));

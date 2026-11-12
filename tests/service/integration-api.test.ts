@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { connect as connectTcp, createServer as createTcpServer, type Socket } from "node:net";
+import { setTimeout as delay } from "node:timers/promises";
 import { after, before, test } from "node:test";
 import { Pool } from "pg";
 import type { Client } from "@temporalio/client";
 import { MemberClient } from "../../src/service/client.ts";
 import { ApprovalStore } from "../../src/service/approvals.ts";
 import { MemberStore } from "../../src/service/store.ts";
-import { createGateway } from "../../src/service/gateway.ts";
+import { createGateway, probeTimeout } from "../../src/service/gateway.ts";
 import { IntegrationApi } from "../../src/service/integration-api.ts";
 import { ownerInitiator, type TurnRequest } from "../../src/service/domain.ts";
 
@@ -179,6 +181,8 @@ test("v1 HTTP contract enforces ownership, strict identity, capability version a
   assert.equal((await f.api(path + "/" + requestId, undefined, "invalid")).status, 401);
   const capabilities = await (await f.api("/v1/capabilities")).json();
   assert.equal(capabilities.apiVersion, "1");
+  assert.deepEqual(capabilities.health, { version: 1, dependencies: ["database", "temporal"] });
+  assert.deepEqual(capabilities.listing, { version: 1, resources: ["members", "conversations"], defaultLimit: 50, maximumLimit: 100 });
   assert.deepEqual(capabilities.initiatorKinds, ["owner", "routine"]);
   const before = f.counts();
   assert.deepEqual(await (await f.api(path + "/" + requestId)).json(), receipt);
@@ -386,4 +390,314 @@ test("v1 status reconciles an unstarted admission after terminal workflow withou
   await assert.rejects(api.status({ ...key, ownerId: randomUUID() }), { code: "not_found" });
   assert.equal(describes, 1, "wrong-owner reads and terminal retries cannot dispatch");
   assert.equal((await pool.query("SELECT count(*)::integer n FROM birbcrew_ts.turns WHERE conversation_id=$1", [key.conversationId])).rows[0].n, 0);
+});
+
+async function serve(gatewayStore: MemberStore, members: MemberClient) {
+  const token: string = randomUUID();
+  const server = createGateway(gatewayStore, members, { [createHash("sha256").update(token).digest("hex")]: randomUUID() });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  return {
+    get: (path: string, credential = token) => fetch(`http://127.0.0.1:${address.port}${path}`,
+      { headers: { Authorization: "Bearer " + credential }, signal: AbortSignal.timeout(10_000) }),
+    async stop() { const closed = once(server, "close"); server.close(); server.closeAllConnections(); await closed; },
+  };
+}
+
+// Accepts TCP and never answers until released, then forwards new connections to the test database. Only the
+// health probe's startup message carries statement_timeout, so `probes` counts its connections and not the
+// gateway's cancellation flusher's.
+async function stallingRelay() {
+  const target = new URL(url!), sockets = new Set<Socket>(), probes: Socket[] = [];
+  let stalled = true;
+  const track = (socket: Socket) => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); socket.on("error", () => {}); };
+  const server = createTcpServer(socket => {
+    track(socket);
+    socket.once("data", chunk => {
+      if (chunk.includes("statement_timeout")) probes.push(socket);
+      if (stalled) return;
+      const upstream = connectTcp(Number(target.port || 5432), target.hostname);
+      track(upstream); upstream.on("close", () => socket.destroy());
+      upstream.write(chunk); socket.pipe(upstream).pipe(socket);
+    });
+  });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  return {
+    port: address.port, probes, open: (socket: Socket) => sockets.has(socket), release() { stalled = false; },
+    async close() { const closed = once(server, "close"); server.close(); for (const socket of sockets) socket.destroy(); await closed; },
+  };
+}
+
+test("v1 health is authenticated, strict and reports every ready dependency", async (t) => {
+  const { rows: [{ version }] } = await pool.query("SELECT max(version)::integer AS version FROM birbcrew_ts.schema_versions");
+  const gateway = await serve(store, { async temporalReachable() {} } as unknown as MemberClient); t.after(gateway.stop);
+  assert.equal((await gateway.get("/v1/health", "invalid")).status, 401);
+  const response = await gateway.get("/v1/health");
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { apiVersion: "1", status: "ready", dependencies: {
+    database: { status: "ready", schemaVersion: version }, temporal: { status: "ready" } } });
+  assert.equal((await gateway.get("/v1/health?verbose=1")).status, 400);
+  assert.equal((await gateway.get("/health")).status, 404, "health is versioned-only");
+});
+
+test("v1 health answers 503 with the same shape, bounded and without dependency detail", { timeout: 20_000 }, async (t) => {
+  const { rows: [{ version }] } = await pool.query("SELECT max(version)::integer AS version FROM birbcrew_ts.schema_versions");
+  const secret = "do-not-leak-" + randomUUID();
+  const refused = new Pool({ connectionString: `postgresql://probe:${secret}@127.0.0.1:1/absent` });
+  const silent = await stallingRelay();
+  const unanswered = new Pool({ connectionString: `postgresql://probe:${secret}@127.0.0.1:${silent.port}/absent` });
+  t.after(async () => { await silent.close(); await refused.end(); await unanswered.end(); });
+  const cases = [
+    { store, members: { async temporalReachable() { throw new Error("connect ECONNREFUSED " + secret); } },
+      dependencies: { database: { status: "ready", schemaVersion: version }, temporal: { status: "unavailable" } } },
+    { store: new MemberStore(refused), members: { async temporalReachable() {} },
+      dependencies: { database: { status: "unavailable", schemaVersion: null }, temporal: { status: "ready" } } },
+    // Both dependencies hang (the database accepts TCP and never answers): the probes run concurrently and each is cut off.
+    { store: new MemberStore(unanswered), members: { temporalReachable: () => new Promise(() => {}) },
+      dependencies: { database: { status: "unavailable", schemaVersion: null }, temporal: { status: "unavailable" } } },
+  ];
+  for (const { store: target, members, dependencies } of cases) {
+    const gateway = await serve(target, members as unknown as MemberClient);
+    try {
+      const started = Date.now();
+      const response = await gateway.get("/v1/health");
+      assert.ok(Date.now() - started < probeTimeout + 1_500, "both dependency probes run concurrently, each bounded");
+      assert.equal(response.status, 503);
+      const report = await response.json();
+      assert.deepEqual(report, { apiVersion: "1", status: "not_ready", dependencies });
+      const text = JSON.stringify(report);
+      assert.ok(!text.includes(secret) && !text.includes("ECONNREFUSED") && !text.includes("127.0.0.1"), text);
+    } finally { await gateway.stop(); }
+  }
+});
+
+test("v1 health has the server cancel a lock-blocked probe read and leaves the pool serving", { timeout: 20_000 }, async (t) => {
+  const single = new Pool({ connectionString: url, max: 1 });
+  const gateway = await serve(new MemberStore(single), { async temporalReachable() {} } as unknown as MemberClient);
+  t.after(async () => { await gateway.stop(); await single.end(); });
+  const lock = await pool.connect();
+  try {
+    await lock.query("BEGIN");
+    await lock.query("LOCK TABLE birbcrew_ts.schema_versions IN ACCESS EXCLUSIVE MODE");
+    const blocked = await gateway.get("/v1/health");
+    assert.equal(blocked.status, 503);
+    assert.equal((await blocked.json()).dependencies.database.status, "unavailable");
+    assert.equal((await gateway.get("/v1/members")).status, 200, "the blocked probe holds no pooled connection");
+    // The server cancels the blocked read itself; abandoning it client-side would leave a backend waiting on the lock.
+    const waiting = async () => (await pool.query(`SELECT count(*)::integer AS n FROM pg_stat_activity
+      WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%FROM birbcrew_ts.schema_versions'`)).rows[0].n;
+    for (const started = Date.now(); await waiting() && Date.now() - started < 2 * probeTimeout;) await delay(50);
+    assert.equal(await waiting(), 0, "no probe backend is left waiting while the lock is still held");
+  } finally {
+    await lock.query("ROLLBACK");
+    lock.release();
+  }
+});
+
+test("v1 health probes on its own connection, so a saturated pool still reports the database ready", { timeout: 30_000 }, async (t) => {
+  const { rows: [{ version }] } = await pool.query("SELECT max(version)::integer AS version FROM birbcrew_ts.schema_versions");
+  const single = new Pool({ connectionString: url, max: 1 });
+  const gateway = await serve(new MemberStore(single), { async temporalReachable() {} } as unknown as MemberClient);
+  t.after(async () => { await gateway.stop(); await single.end(); });
+  const held = await single.connect();
+  let released = false;
+  try {
+    const real = gateway.get("/v1/members");
+    const started = Date.now(), response = await gateway.get("/v1/health");
+    assert.ok(Date.now() - started < probeTimeout + 1_500);
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).dependencies.database, { status: "ready", schemaVersion: version });
+    assert.equal(await Promise.race([real.then(() => "served"), delay(100, "waiting")]), "waiting", "the pool really is saturated");
+    held.release(); released = true;
+    assert.equal((await real).status, 200);
+  } finally { if (!released) held.release(); }
+});
+
+test("v1 health is not pinned by a database that accepts connections and never answers", { timeout: 30_000 }, async (t) => {
+  const { rows: [{ version }] } = await pool.query("SELECT max(version)::integer AS version FROM birbcrew_ts.schema_versions");
+  const relay = await stallingRelay();
+  const relayed = new URL(url!); relayed.hostname = "127.0.0.1"; relayed.port = String(relay.port);
+  const relayedPool = new Pool({ connectionString: relayed.toString() });
+  relayedPool.on("error", () => {});
+  const gateway = await serve(new MemberStore(relayedPool), { async temporalReachable() {} } as unknown as MemberClient);
+  t.after(async () => { await gateway.stop(); await relay.close(); await relayedPool.end(); });
+  const unavailable = async () => {
+    const started = Date.now(), response = await gateway.get("/v1/health");
+    assert.ok(Date.now() - started < probeTimeout + 1_500, "health is bounded while the database is silent");
+    assert.equal(response.status, 503);
+    assert.deepEqual((await response.json()).dependencies.database, { status: "unavailable", schemaVersion: null });
+  };
+  const closes = async (socket: Socket) => {
+    for (const started = Date.now(); relay.open(socket) && Date.now() - started < 2 * probeTimeout;) await delay(10);
+    return !relay.open(socket);
+  };
+  const calls = [unavailable(), unavailable()];
+  await delay(probeTimeout / 2);
+  await Promise.all([...calls, unavailable()]);
+  assert.equal(relay.probes.length, 1, "concurrent and overlapping health calls share one connection attempt");
+  assert.ok(await closes(relay.probes[0]), "the probe gives up its stalled connection");
+  relay.release();
+  const recovered = await gateway.get("/v1/health");
+  assert.equal(recovered.status, 200, "the next call probes afresh instead of joining the stalled probe");
+  assert.deepEqual((await recovered.json()).dependencies.database, { status: "ready", schemaVersion: version });
+  assert.equal(relay.probes.length, 2);
+  assert.ok(await closes(relay.probes[1]), "a successful probe ends its connection");
+});
+
+// A listed phase is what the snapshot route reports, and null exactly where that route answers 409.
+async function assertSnapshotPhases(api: (path: string) => Promise<Response>, rows: Record<string, unknown>[]) {
+  for (const { conversationId, phase } of rows) {
+    const snapshot = await api(`/v1/conversations/${conversationId}`);
+    if (phase === null) { assert.equal(snapshot.status, 409, `${conversationId}`); continue; }
+    assert.equal(snapshot.status, 200);
+    assert.equal((await snapshot.json()).state.phase, phase, `${conversationId}`);
+  }
+}
+
+test("v1 listings page an owner's members and conversations without gaps, duplicates or text", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  const { memberId: first } = await store.getConversation({ ownerId: f.ownerId, conversationId: f.conversationId });
+  const second = await store.spawn({ ownerId: f.ownerId, requestId: randomUUID(), engine: "claude", profile: "fixture-claude" });
+  const owned = new Map<string, string>([[f.conversationId, first]]);
+  for (let i = 0; i < 4; i++) {
+    const conversationId = randomUUID(), memberId = i % 2 ? first : second.memberId;
+    await store.openConversation({ ownerId: f.ownerId, conversationId, memberId }); owned.set(conversationId, memberId);
+  }
+  const other = randomUUID(), otherMember = await store.spawn({ ownerId: other, requestId: randomUUID(), engine: "pi", profile: "fixture-v1" });
+  const otherConversation = randomUUID();
+  await store.openConversation({ ownerId: other, conversationId: otherConversation, memberId: otherMember.memberId });
+  const text = "listing must not expose " + randomUUID();
+  const turn = await store.beginTurn({ ownerId: f.ownerId, conversationId: f.conversationId, requestId: randomUUID(), text },
+    { workflowRunId: randomUUID(), activityId: "listing", attempt: 1 });
+  assert.equal(turn.kind, "start");
+  // A conversation predating the public event ledger, as migration 004 marks them.
+  const legacy = randomUUID();
+  await store.openConversation({ ownerId: f.ownerId, conversationId: legacy, memberId: first }); owned.set(legacy, first);
+  await pool.query("INSERT INTO birbcrew_ts.public_snapshots (conversation_id,history_complete,state) VALUES ($1,false,'{}')", [legacy]);
+  assert.equal((await f.api(`/v1/conversations/${legacy}`)).status, 409);
+
+  async function all(path: string, key: "members" | "conversations", credential?: string) {
+    const rows: Record<string, unknown>[] = [], sizes: number[] = [];
+    for (let next: string | null = null, pages = 0; pages === 0 || next; pages++) {
+      assert.ok(pages < 10, "pagination terminates");
+      const separator = path.includes("?") ? "&" : "?";
+      const response = await f.api(next ? `${path}${separator}after=${next}` : path, undefined, credential);
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.deepEqual(Object.keys(body).sort(), ["apiVersion", key, "next"].sort());
+      assert.equal(JSON.stringify(body).includes(text), false, "listings never carry message text");
+      rows.push(...body[key]); sizes.push(body[key].length); next = body.next;
+    }
+    return { rows, sizes };
+  }
+
+  const expectedMembers = [{ memberId: first, engine: "pi", profile: "fixture-v1" },
+    { memberId: second.memberId, engine: "claude", profile: "fixture-claude" }].sort((a, b) => a.memberId < b.memberId ? -1 : 1);
+  assert.deepEqual((await all("/v1/members", "members")).rows, expectedMembers);
+  const members = await all("/v1/members?limit=1", "members");
+  assert.deepEqual(members.sizes, [1, 1], "an exactly full final page reports no next cursor");
+  assert.deepEqual(members.rows, expectedMembers);
+
+  const conversations = await all("/v1/conversations?limit=2", "conversations");
+  assert.deepEqual(conversations.sizes, [2, 2, 2]);
+  assert.deepEqual(conversations.rows.map(row => row.conversationId), [...owned.keys()].sort(), "stable order, no gaps or duplicates");
+  for (const row of conversations.rows) {
+    const member = expectedMembers.find(m => m.memberId === owned.get(row.conversationId as string))!;
+    assert.deepEqual(row, { conversationId: row.conversationId, memberId: member.memberId, engine: member.engine, profile: member.profile,
+      phase: row.conversationId === f.conversationId ? "running" : row.conversationId === legacy ? null : "idle" });
+  }
+  await assertSnapshotPhases(path => f.api(path), conversations.rows);
+
+  const filtered = await all(`/v1/conversations?limit=1&memberId=${first.toUpperCase()}`, "conversations");
+  assert.deepEqual(filtered.rows.map(row => row.conversationId),
+    [...owned].filter(([, memberId]) => memberId === first).map(([id]) => id).sort());
+  assert.ok(filtered.rows.every(row => row.memberId === first));
+  // A cursor does not record memberId: reused without it, or with another member, it continues that other listing.
+  const page = await (await f.api(`/v1/conversations?memberId=${first}&limit=1`)).json();
+  const position: string = page.conversations[0].conversationId;
+  for (const memberId of [undefined, second.memberId]) {
+    const response = await f.api(`/v1/conversations?after=${page.next}${memberId ? "&memberId=" + memberId : ""}`);
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).conversations.map((row: { conversationId: string }) => row.conversationId),
+      [...owned].filter(([id, owner]) => id > position && (!memberId || owner === memberId)).map(([id]) => id).sort(), memberId);
+  }
+
+  // Another owner's rows never appear, and naming them is indistinguishable from naming nothing.
+  const listed = JSON.stringify([(await all("/v1/members", "members")).rows, conversations.rows]);
+  assert.ok(!listed.includes(other) && !listed.includes(otherMember.memberId) && !listed.includes(otherConversation));
+  for (const memberId of [otherMember.memberId, randomUUID()]) {
+    const response = await f.api(`/v1/conversations?memberId=${memberId}`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { apiVersion: "1", conversations: [], next: null });
+  }
+  // A cursor naming another owner's row is only a position: it neither fails nor reveals that row.
+  const foreign = await f.api(`/v1/conversations?after=${Buffer.from("conversation:" + otherConversation).toString("base64url")}`);
+  assert.equal(foreign.status, 200);
+  assert.deepEqual((await foreign.json()).conversations.map((row: { conversationId: string }) => row.conversationId),
+    [...owned.keys()].sort().filter(id => id > otherConversation));
+  assert.deepEqual((await all("/v1/members", "members", f.stranger)).rows, []);
+  assert.deepEqual((await all(`/v1/conversations?memberId=${first}`, "conversations", f.stranger)).rows, []);
+  assert.equal((await f.api("/v1/members", undefined, "invalid")).status, 401);
+});
+
+test("v1 listings default to 50 rows, pass snapshot phases through and keep trusted-context conversations", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  const { memberId } = await store.getConversation({ ownerId: f.ownerId, conversationId: f.conversationId });
+  const waiting = randomUUID(), complete = randomUUID(), trusted = randomUUID();
+  for (const conversationId of [waiting, complete, trusted]) await store.openConversation({ ownerId: f.ownerId, conversationId, memberId });
+  await pool.query(`INSERT INTO birbcrew_ts.public_snapshots (conversation_id,state) VALUES ($1,'{"phase":"waiting"}'),($2,'{"phase":"complete"}')`,
+    [waiting, complete]);
+  // Trusted context is bound to an ordinary owned conversation, and stays listed after deletion.
+  await pool.query(`INSERT INTO birbcrew_ts.trusted_sessions (conversation_id,owner_id,phase,scope,context_version,application_digest)
+    VALUES ($1,$2,'deleted','fixture','fixture-v1','fixture')`, [trusted, f.ownerId]);
+  const listed = (await (await f.api(`/v1/conversations?memberId=${memberId}`)).json()).conversations as { conversationId: string; phase: string }[];
+  assert.deepEqual(Object.fromEntries(listed.map(row => [row.conversationId, row.phase])),
+    { [f.conversationId]: "idle", [waiting]: "waiting", [complete]: "complete", [trusted]: "idle" });
+  await assertSnapshotPhases(path => f.api(path), listed);
+
+  const empty = await store.spawn({ ownerId: f.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture-v1" });
+  assert.deepEqual(await (await f.api(`/v1/conversations?memberId=${empty.memberId}`)).json(),
+    { apiVersion: "1", conversations: [], next: null }, "an owned member without conversations gives an empty page");
+
+  for (let i = 0; i < 49; i++) await store.spawn({ ownerId: f.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture-v1" });
+  await pool.query(`INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id)
+    SELECT $1,$2,gen_random_uuid() FROM generate_series(1,47)`, [f.ownerId, memberId]);
+  for (const key of ["members", "conversations"]) {
+    const first = await (await f.api(`/v1/${key}`)).json();
+    assert.equal(first[key].length, 50, `${key} default to 50 rows`);
+    assert.ok(first.next);
+    const rest = await (await f.api(`/v1/${key}?after=${first.next}`)).json();
+    assert.deepEqual([rest[key].length, rest.next], [1, null]);
+  }
+});
+
+test("v1 listings reject unknown, repeated, out-of-range and forged query parameters", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  await store.spawn({ ownerId: f.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture-v1" });
+  const { memberId } = await store.getConversation({ ownerId: f.ownerId, conversationId: f.conversationId });
+  await store.openConversation({ ownerId: f.ownerId, conversationId: randomUUID(), memberId });
+  const memberCursor = (await (await f.api("/v1/members?limit=1")).json()).next;
+  const conversationCursor = (await (await f.api("/v1/conversations?limit=1")).json()).next;
+  assert.ok(memberCursor && conversationCursor);
+  assert.equal((await f.api("/v1/members?limit=100")).status, 200, "maximum limit is inclusive");
+  const forged = (value: string) => Buffer.from(value).toString("base64url");
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  function cursors(kind: string, cursor: string, otherListing: string) {
+    const id = Buffer.from(cursor, "base64url").toString().slice(kind.length + 1);
+    // Flipping an unused trailing bit decodes to identical bytes; only the canonical encoding is accepted.
+    const altered = cursor.slice(0, -1) + alphabet[alphabet.indexOf(cursor.at(-1)!) ^ 1];
+    assert.ok(Buffer.from(altered, "base64url").equals(Buffer.from(cursor, "base64url")));
+    return ["", "not-a-cursor", otherListing, forged(kind + ":" + id.toUpperCase()), forged(kind + ":" + id + ":x"),
+      forged("x".repeat(kind.length) + ":" + id), cursor + "=", altered].map(value => "after=" + value);
+  }
+  const common = ["limit=0", "limit=101", "limit=abc", "limit=1.5", "limit=01", "limit=", "limit=1&limit=2", `ownerId=${f.ownerId}`, "unknown=1"];
+  for (const query of [...common, ...cursors("member", memberCursor, conversationCursor), `memberId=${memberId}`]) {
+    assert.equal((await f.api("/v1/members?" + query)).status, 400, query);
+  }
+  for (const query of [...common, ...cursors("conversation", conversationCursor, memberCursor), "memberId=not-a-uuid",
+    `memberId=${memberId}&memberId=${memberId}`]) {
+    assert.equal((await f.api("/v1/conversations?" + query)).status, 400, query);
+  }
+  for (const path of ["/members", "/conversations"]) assert.equal((await f.api(path)).status, 404, "listings are versioned-only");
 });

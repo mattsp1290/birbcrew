@@ -15,8 +15,9 @@ request initiator kinds (`initiatorKinds`, today `["owner", "routine"]`), the au
 contract (event types, page limits, formats) and the scheduled-routine limits and
 policies (`routines`), `standingGrants` (the standing
 choices, the card and state fields, the grantable tool, policy version and
-initiator kinds, the grants route and the inactive-list limit), and `memories` (the
-member memory route, limits, injection and deletion semantics per engine). Additive
+initiator kinds, the grants route and the inactive-list limit), `memories` (the
+member memory route, limits, injection and deletion semantics per engine), health
+dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
@@ -32,6 +33,9 @@ proof of the operator's provider access or configured profile availability.
 | `GET /v1/conversations/{conversationId}` | Current public snapshot |
 | `POST /v1/conversations/{conversationId}/events` | Independent, read-only AG-UI observation |
 | `POST /v1/conversations/{conversationId}/human` | Existing explicit human-decision contract |
+| `GET /v1/health` | Readiness of PostgreSQL and Temporal; `200` ready, `503` not ready |
+| `GET /v1/members` | The owner's members, keyset-paginated |
+| `GET /v1/conversations` | The owner's conversations with coarse phase, optional `memberId` filter, keyset-paginated |
 | `GET /v1/audit` | Owner-scoped, append-only audit events; keyset pages as JSON or CSV export |
 | `POST /v1/routines`, `GET /v1/routines` | Create (`requestId`, `memberId`, `schedule`, `prompt`, `approvalPolicy`) and list scheduled routines |
 | `GET`/`DELETE /v1/routines/{routineId}`, `POST .../enable`, `POST .../disable` | Read, tombstone, enable or disable one routine |
@@ -41,9 +45,121 @@ proof of the operator's provider access or configured profile availability.
 | `POST /v1/memories`, `GET /v1/memories` | Create (`requestId`, `memberId`, `text`) and list member memory entries |
 | `GET`/`DELETE /v1/memories/{memoryId}` | Read one entry, or erase its text and keep a tombstone |
 
-Authentication is required even for capabilities. Other owners get `404`, not a
+Authentication is required even for capabilities and health. Other owners get `404`, not a
 confirmation of a request's existence. Versioned request bodies are strict: unknown
-fields (including an attempted `ownerId` override or an `initiator`) fail `400`.
+fields (including an attempted `ownerId` override or an `initiator`) fail `400`. Query parameters on the
+health and listing routes are strict too: unknown or repeated parameters fail `400`.
+
+## Health and listing
+
+These routes exist only under `/v1`; `/health` and `GET /members` or
+`GET /conversations` without the prefix are not served.
+
+`GET /v1/health` takes no parameters. It probes both dependencies concurrently, each
+bounded to 2 seconds: a PostgreSQL round trip that reads the highest applied schema
+version, and a Temporal frontend `GetSystemInfo` call on the gateway's connection. The
+probe never starts, signals or describes a workflow. A ready Temporal result proves only
+that the frontend answers: `GetSystemInfo` names no namespace, so it does not show that
+the namespace the gateway uses exists, or that workers are polling. It returns `200`
+when every dependency is ready and `503` with the same body shape otherwise, for
+example:
+
+```json
+{
+  "apiVersion": "1",
+  "status": "not_ready",
+  "dependencies": {
+    "database": { "status": "unavailable", "schemaVersion": null },
+    "temporal": { "status": "ready" }
+  }
+}
+```
+
+The top-level `status` is `ready` or `not_ready`. Each dependency reports `ready` or
+`unavailable` (failed or exceeded its bound). Driver errors, addresses and connection
+strings are never returned.
+
+The database probe opens its own short-lived PostgreSQL connection with the gateway's
+connection settings instead of borrowing one from the gateway's pool. It never queues
+behind other requests or takes a pool slot, and a saturated pool does not affect it:
+the database is `ready` whenever a fresh connection can read the schema version, even
+while every pooled connection is busy. Each step of that connection has the same
+2-second bound: connecting (including TLS and authentication), the read (the server
+cancels it if it is blocked on a lock, and the gateway abandons it if the server goes
+silent) and closing. Concurrent health requests share one probe, so health polling
+holds at most one database connection beyond the pool at a time. A response never
+waits past its bound. A probe still running then reports `unavailable` and ends within
+three times the bound (6 seconds), whether the server refuses connections, drops
+packets, accepts a connection and never answers, or answers slowly. The next health
+request after that starts a fresh probe, so health stops reporting `unavailable`
+within about 6 seconds of PostgreSQL becoming reachable again.
+
+Leave PostgreSQL one connection slot of headroom beyond the gateway's pool for this
+probe. The probe sends `statement_timeout` as a connection startup parameter. A pooler
+that rejects startup parameters it does not track, as PgBouncer does by default, refuses
+that connection, and health then reports the database `unavailable` while requests
+through the pool still work. Allow the parameter in the pooler (PgBouncer's
+`ignore_startup_parameters`) or point the gateway at PostgreSQL directly.
+
+When the database is ready, `schemaVersion` is the highest migration number applied to
+it. It is `null` when the database is unavailable. Migration numbers are not
+contiguous, and a later release can add a migration numbered below one that an earlier
+release already applied, so a database can gain a migration without `schemaVersion`
+changing. `schemaVersion` therefore names the newest migration present, not the full
+applied set, and cannot by itself identify a release. The gateway applies its
+migrations at startup, so a value below the largest number in the deployed release's
+migration list (in `src/service/store.ts`) means the database is behind that release;
+an equal value does not prove that every migration is present.
+
+`GET /v1/members` and `GET /v1/conversations` return only the authenticated owner's
+rows:
+
+```json
+{ "apiVersion": "1", "members": [{ "memberId": "UUID", "engine": "pi", "profile": "name" }], "next": "opaque" }
+```
+
+```json
+{
+  "apiVersion": "1",
+  "conversations": [
+    { "conversationId": "UUID", "memberId": "UUID", "engine": "claude", "profile": "name", "phase": "idle" }
+  ],
+  "next": null
+}
+```
+
+| Parameter | Routes | Meaning |
+| --- | --- | --- |
+| `limit` | both | Decimal page size from 1 to 100, without sign or leading zeros; default 50 |
+| `after` | both | The previous page's `next`, unchanged |
+| `memberId` | conversations | Only that member's conversations |
+
+Pages follow a stable ascending identifier order. Neither table records creation time,
+so the order is not chronological. `next` is `null` on the last page. Treat it as
+opaque and send it back with the same parameters that produced it. A cursor records
+only its resource (members or conversations) and a position. A malformed or altered
+value, or one from the other resource, fails `400`. Because it does not record the
+`memberId` filter, reusing it with a different `memberId`, or without one, is accepted
+and returns that other listing from after the cursor's identifier, skipping that
+listing's earlier rows. A row that exists throughout pagination appears exactly
+once; a row created meanwhile appears only if it sorts after the current position.
+
+`phase` uses the snapshot vocabulary (`idle`, `running`, `waiting`, `complete`,
+`cancelled`, `failed`). It is `null` for a conversation that predates the public event
+ledger, whose snapshot returns `409 history_unavailable`. Listings never include
+messages, prompts or results; read the snapshot or request receipts for those.
+Conversations used through operator-configured trusted context are ordinary owned
+conversations and are listed like any other, including after their trusted session is
+deleted. A
+`memberId` that is not the owner's, whether another owner's or nonexistent, returns an
+empty `200` page, exactly like an owned member without conversations.
+
+A rejected query parameter on the health or listing routes (unknown, repeated or
+invalid, including a malformed `after`, `limit` or `memberId`) returns
+`400 {"error":"invalid_input"}`. If PostgreSQL fails while a listing is read, the
+route returns `503 {"error":"retry_same_request"}`; listings are read-only, so
+repeating the request is safe. Health does not use that body: a failed dependency is
+reported in the health body itself.
 
 ### Identity and equivalence
 
