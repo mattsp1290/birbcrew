@@ -47,8 +47,9 @@ migrations at startup (see [Database role](#database-role)).
 | Gateway | `node src/service/gateway.ts /etc/crew/gateway.json` | JSON `{ "port": 8080, "tokenHashes": { "<sha256 hex>": "<owner id>" } }` as in the [gateway guide](member-gateway.md). Listens on `127.0.0.1:<port>` and prints `{"url": ...}`. |
 | Worker | `node src/service/cli.ts worker src/service/providers.ts` | Registers the profiles enabled by the attestation variables below. |
 
-Run one container per process with the hardening below. Do not add Docker's
-`--init`; `tini` is already PID 1 and reaps orphaned SDK descendants.
+Run one container per process with the hardening below. `tini` is the image
+entrypoint and reaps orphaned SDK descendants, so do not add Docker's `--init`.
+In Kubernetes pass the command as `args:`; setting `command:` replaces `tini`.
 
 **Verified** with these flags for the gateway, the fixture worker and the members CLI:
 
@@ -75,8 +76,9 @@ Run one container per process with the hardening below. Do not add Docker's
 | `BIRBCREW_CODEX_ATTESTATION`, `BIRBCREW_CODEX_AUTH_HOME` | worker | unset | Codex with a ChatGPT subscription. |
 
 Temporal TLS is all or nothing: set all four TLS variables, or none for the
-previous plaintext connection. A partial set or a relative path stops the
-process before it connects, and the error names only the variables. The
+previous plaintext connection. A partial set, a relative path or an unreadable
+file stops the process before it connects. The error names only the variables
+(and the file error code), never their values or file contents. The
 gateway, the worker, the CLI and the Codex live-call signal sent from SDK child
 processes all use these settings. Certificate and key files are read when a
 connection opens; restart the gateway and worker after rotating them.
@@ -90,7 +92,8 @@ certificate, and no member workflow appeared in `default`. A gateway without
 TLS settings or with a wrong server name exited with status 1, as did a worker
 with a missing namespace. `npm run test:temporal:tls` repeats this in CI with a
 separate Node TLS terminator, which also refuses a handshake without a client
-certificate. **Unverified:** a real Temporal 1.32
+certificate; it needs Docker, OpenSSL, Node 22.23.3 and the pinned Temporal CLI
+1.10.0. **Unverified:** a real Temporal 1.32
 frontend with server-side mTLS, its authorizer or claim mapper, and certificate
 rotation.
 
@@ -103,7 +106,7 @@ the gateway, worker and CLI, and a plaintext connection was refused.
 
 | Path | Mount | Requirements |
 | --- | --- | --- |
-| `/var/lib/birbcrew/native` | Persistent volume, worker only | Writable by uid 10001. The worker creates a `.birbcrew-volume` identity file. Claude and Codex profiles are registered to that identity, so a replacement worker must mount the same volume. Pi context lives in PostgreSQL. |
+| `/var/lib/birbcrew/native` | Persistent volume, worker only | Writable by uid 10001. The worker creates `.birbcrew-volume` identity files, at the root for Claude and under `codex/` for Codex. Those profiles are registered to that identity, so a replacement worker must mount the same volume. Pi context lives in PostgreSQL. |
 | `/tmp` | tmpfs | Writable, exec allowed, mode `1777`. |
 | `/etc/crew/...` | Read-only secrets | Gateway configuration and Temporal TLS files, readable by uid 10001. |
 | Attestation directory | Private writable volume | See below. Must not be under `/app`. |
@@ -141,7 +144,8 @@ GRANT CONNECT, CREATE, TEMPORARY ON DATABASE crew TO crew_service;
 
 **Verified** with PostgreSQL 17.6 and a role without superuser, `CREATEDB` or
 `CREATEROLE`: the first start created `birbcrew_ts` owned by `crew_service`.
-Without `TEMPORARY` the first start fails (migration 006 uses `pg_temp`
+With only `CONNECT` and `CREATE`, the first worker start failed with
+`permission denied to create temporary tables` (migration 006 uses `pg_temp`
 functions). `CREATE SCHEMA IF NOT EXISTS` checks database `CREATE` even after
 the schema exists, so a role with only `CONNECT` cannot start. The current code
 therefore cannot run with separate migration and runtime roles.
@@ -165,7 +169,9 @@ into a private volume owned by 10001 and renew it before it expires
   provider `chatgpt-subscription` and `BIRBCREW_CODEX_AUTH_HOME` to an absolute
   directory holding a Codex CLI ChatGPT login. Each turn starts the bundled
   `codex app-server` with that directory as `CODEX_HOME` and reads the current
-  access token without refreshing it. Keep the login current with the Codex
+  access token without refreshing it. Without `BIRBCREW_CODEX_AUTH_HOME` the
+  worker falls back to `CODEX_HOME`, then `$HOME/.codex`, which is the tmpfs
+  `/tmp/.codex` in this image, so set it explicitly. Keep the login current with the Codex
   CLI against the same directory. How that refresh runs in the cluster is
   **unverified**.
 

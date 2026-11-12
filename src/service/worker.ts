@@ -9,11 +9,11 @@ import type { MemberProfile } from "./profiles.ts";
 import { memberActivities } from "./activities.ts";
 import { memberTaskQueue, activityQueue } from "./queues.ts";
 import type { MemberStore } from "./store.ts";
-import { temporalConnection, type TemporalSettings } from "./temporal-config.ts";
+import { temporalConnectionOptions, type TemporalSettings } from "./temporal-config.ts";
 
 export async function runMemberWorker(store: MemberStore, temporal: TemporalSettings, profiles: ReadonlyMap<string, MemberProfile>,
   configPath: string, stateDir: string) {
-  const connection = await NativeConnection.connect(await temporalConnection(temporal));
+  const connection = await NativeConnection.connect(await temporalConnectionOptions(temporal));
   const { namespace } = temporal;
   const workers: Worker[] = [];
   let supervisor;

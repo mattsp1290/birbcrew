@@ -17,7 +17,7 @@ import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
 import { MemberStore } from "./store.ts";
 import { IntegrationApi, integrationCapabilities } from "./integration-api.ts";
-import { temporalConnection, temporalSettings } from "./temporal-config.ts";
+import { TemporalSettingsError, temporalConnectionOptions, temporalSettings } from "./temporal-config.ts";
 
 const credentials = z.record(z.string().regex(/^[0-9a-f]{64}$/), z.string().min(1));
 const encoder = new EventEncoder();
@@ -231,7 +231,7 @@ async function main() {
   const config = configSchema.parse(JSON.parse(await readFile(file, "utf8")));
   const temporal = temporalSettings(process.env);
   const pool = new Pool({ connectionString: database });
-  const connection = await Connection.connect(await temporalConnection(temporal));
+  const connection = await Connection.connect(await temporalConnectionOptions(temporal));
   try {
     const store = new MemberStore(pool);
     await store.migrate();
@@ -252,5 +252,8 @@ async function main() {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  main().catch(() => { console.error("Gateway could not start"); process.exitCode = 1; });
+  main().catch((error: unknown) => {
+    console.error(error instanceof TemporalSettingsError ? error.message : "Gateway could not start");
+    process.exitCode = 1;
+  });
 }

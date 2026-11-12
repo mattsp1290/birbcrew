@@ -21,7 +21,9 @@ export const temporalSettingsSchema = z.strictObject({
 });
 export type TemporalSettings = z.infer<typeof temporalSettingsSchema>;
 
-/** Parse once at a process entry point and pass the result inward. Without TLS variables the connection stays plaintext. */
+/** Names only the offending variables, never their values or file contents, so every process may print it. */
+export class TemporalSettingsError extends Error {}
+
 export function temporalSettings(env: NodeJS.ProcessEnv): TemporalSettings {
   const tls = Object.fromEntries(Object.entries(tlsVariables)
     .flatMap(([field, name]) => env[name] === undefined ? [] : [[field, env[name]]]));
@@ -31,15 +33,19 @@ export function temporalSettings(env: NodeJS.ProcessEnv): TemporalSettings {
     ...(Object.keys(tls).length && { tls }),
   });
   if (parsed.success) return parsed.data;
-  // Name the variables only; their values can be private paths.
-  const names = new Set(parsed.error.issues.map(({ path }) => variables[String(path.at(-1))]));
-  throw new Error(`Invalid Temporal settings: ${[...names].join(", ")}. TLS needs all four TLS variables, with absolute file paths.`);
+  const issues = parsed.error.issues.map(({ path }) => path);
+  const names = [...new Set(issues.map((path) => variables[String(path.at(-1))]))];
+  throw new TemporalSettingsError(`Invalid Temporal settings: ${names.join(", ")}` +
+    (issues.some((path) => path[0] === "tls") ? ". TLS needs all four TLS variables, with absolute file paths." : ""));
 }
 
-/** Options for both client and worker connections. Certificate and key bytes are read here and never logged. */
-export async function temporalConnection(settings: TemporalSettings): Promise<{ address: string; tls?: TLSConfig }> {
+export async function temporalConnectionOptions(settings: TemporalSettings): Promise<{ address: string; tls?: TLSConfig }> {
   if (!settings.tls) return { address: settings.address };
   const { caPath, certificatePath, privateKeyPath, serverName } = settings.tls;
-  const [ca, crt, key] = await Promise.all([caPath, certificatePath, privateKeyPath].map((path) => readFile(path)));
+  const read = (path: string, name: string) => readFile(path).catch((error: NodeJS.ErrnoException) => {
+    throw new TemporalSettingsError(`Cannot read ${name} (${error.code ?? "error"})`);
+  });
+  const [ca, crt, key] = await Promise.all([read(caPath, tlsVariables.caPath), read(certificatePath, tlsVariables.certificatePath),
+    read(privateKeyPath, tlsVariables.privateKeyPath)]);
   return { address: settings.address, tls: { serverNameOverride: serverName, serverRootCACertificate: ca, clientCertPair: { crt, key } } };
 }

@@ -7,7 +7,7 @@ import { serveNativeTool } from "./codex-mcp.ts";
 import type { DeferredTool, ToolOutcome } from "./deferral.ts";
 import type { Launch } from "./supervisor.ts";
 import type { Conversation } from "./domain.ts";
-import { temporalConnection, type TemporalSettings } from "./temporal-config.ts";
+import { temporalConnectionOptions, type TemporalSettings } from "./temporal-config.ts";
 
 // The MCP envelope already attributes the response to the native call.
 function resultText(outcome: ToolOutcome) {
@@ -34,8 +34,8 @@ export async function runLiveTool(
       await discloseCallId(call.nativeCallId);
       const deadline = Date.now() + 45_000;
       const approval = await proposeLive(pool,launch,{...call,args:call.args,expiresAt:new Date(deadline).toISOString()});
-      await temporalConnection(temporal).then(async options => {
-        const connection = Connection.lazy(options);
+      try {
+        const connection = Connection.lazy(await temporalConnectionOptions(temporal));
         try {
           const client = new Client({connection, namespace:temporal.namespace});
           await connection.withDeadline(Date.now()+2000, () =>
@@ -43,7 +43,7 @@ export async function runLiveTool(
               requestId:launch.requestId, approvalId:approval.approvalId, invocationId:approval.invocationId
             }));
         } finally { await connection.close(); }
-      }).catch(() => { /* The workflow can also resolve the durable proposal on demand. */ });
+      } catch { /* The workflow can also resolve the durable proposal on demand. */ }
       while (Date.now() < deadline) {
         call.signal.throwIfAborted();
         const result = await settleLive(pool,launch,approval.approvalId);

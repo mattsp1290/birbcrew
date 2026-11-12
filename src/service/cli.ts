@@ -6,7 +6,7 @@ import { Pool } from "pg";
 import { MemberClient } from "./client.ts";
 import { MemberStore } from "./store.ts";
 import { spawnSchema } from "./domain.ts";
-import { temporalConnection, temporalSettings } from "./temporal-config.ts";
+import { temporalConnectionOptions, temporalSettings } from "./temporal-config.ts";
 
 async function main() {
   const [operation, configPath] = process.argv.slice(2);
@@ -43,7 +43,7 @@ async function main() {
       console.log(JSON.stringify(await store.spawn(spawn)));
       return;
     }
-    const connection = await Connection.connect(await temporalConnection(temporal));
+    const connection = await Connection.connect(await temporalConnectionOptions(temporal));
     try {
       const members = new MemberClient(store, new Client({ connection, namespace: temporal.namespace }));
       let result;

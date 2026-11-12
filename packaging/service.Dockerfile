@@ -24,8 +24,9 @@ COPY src/service src/service
 
 FROM ${NODE_IMAGE}
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini=0.19.0-1+b3 \
+    && apt-get install -y --no-install-recommends tini \
     && rm -rf /var/lib/apt/lists/* \
+    && tini --version | grep -q '^tini version 0\.19\.0' \
     && groupadd --gid 10001 crew \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin crew \
     && install -d -o 10001 -g 10001 -m 0700 /var/lib/birbcrew/native

@@ -1,0 +1,44 @@
+name: Service image
+on:
+  pull_request:
+    paths:
+      - 'packaging/**'
+      - 'src/service/**'
+      - 'native/**'
+      - 'scripts/build-native'
+      - 'package*.json'
+      - 'vendor/**'
+      - 'packages/**'
+      - '.github/workflows/service-image.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      NODE_IMAGE: node:22.23.3-bookworm-slim@sha256:3ed98443660ff48413b5af19ecefce3b9d50845a901a43420d47cc63a9fddbe9
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse a base image without a digest
+        run: |
+          if docker buildx build -f packaging/service.Dockerfile --target build \
+              --build-arg NODE_IMAGE=node:22.23.3-bookworm-slim . > guard.log 2>&1; then
+            echo "The build accepted an unpinned base image" >&2
+            exit 1
+          fi
+          grep -q "Pin NODE_IMAGE by digest" guard.log
+      - run: docker buildx build --load -f packaging/service.Dockerfile --build-arg NODE_IMAGE="$NODE_IMAGE" -t crew-service:ci .
+      - name: Run hardened
+        run: |
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777 crew-service:ci sh -ec '
+              test "$(id -u):$(id -g)" = 10001:10001
+              tr "\0" " " < /proc/1/cmdline | grep -q "^/usr/bin/tini -- "
+              if touch /app/probe 2>/dev/null; then exit 1; fi
+              test -x /app/.proof/bin/member-launch
+              test "$BIRBCREW_STATE_DIR" = /var/lib/birbcrew/native
+              node -e "require(\"@swc/core\")"
+              node --input-type=module -e "await import(\"/app/src/service/gateway.ts\"); await import(\"/app/src/service/worker.ts\")"
+            '

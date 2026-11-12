@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { createServer } from "node:tls";
 import { Connection } from "@temporalio/client";
-import { temporalConnection, temporalSettings } from "../../src/service/temporal-config.ts";
+import { temporalConnectionOptions, temporalSettings } from "../../src/service/temporal-config.ts";
 import { run, services, until } from "./member-services.mts";
 
 // Temporal's development server has no TLS listener, so a TLS terminator that requires a client
@@ -56,30 +56,42 @@ try {
     BIRBCREW_TEMPORAL_TLS_PRIVATE_KEY_PATH: file("client.key"), BIRBCREW_TEMPORAL_TLS_SERVER_NAME: serverName };
 
   const settings = temporalSettings(env);
-  const options = await temporalConnection(settings);
+  const options = await temporalConnectionOptions(settings);
   const connectTimeout = 3000;
   await assert.rejects(Connection.connect({ address: options.address, connectTimeout }), "plaintext must not reach the TLS endpoint");
   const before = refused;
   await assert.rejects(Connection.connect({ address: options.address, connectTimeout,
     tls: { serverNameOverride: serverName, serverRootCACertificate: options.tls!.serverRootCACertificate } }), "client certificate is required");
   assert.ok(refused > before, "the endpoint refused the handshake without a client certificate");
-  await assert.rejects(Connection.connect({ ...await temporalConnection(temporalSettings({ ...env, BIRBCREW_TEMPORAL_TLS_SERVER_NAME: "wrong.crew.test" })),
+  await assert.rejects(Connection.connect({ ...await temporalConnectionOptions(temporalSettings({ ...env, BIRBCREW_TEMPORAL_TLS_SERVER_NAME: "wrong.crew.test" })),
     connectTimeout }), "server name override is used for verification");
   const direct = await Connection.connect({ ...options, connectTimeout });
   try { await direct.workflowService.describeNamespace({ namespace }); } finally { await direct.close(); }
   console.log("TLS endpoint refused plaintext, a missing client certificate and a wrong server name; configured mTLS connected");
 
+  const absent = "crew-missing-" + randomUUID().slice(0, 8);
   const missing = spawn(process.execPath, ["src/service/cli.ts", "worker", "tests/proof/fixture-profiles.mts"],
-    { env: { ...env, BIRBCREW_TEMPORAL_NAMESPACE: "crew-missing-" + randomUUID().slice(0, 8), BIRBCREW_PROOF_ENGINE: "pi" }, stdio: "ignore" });
+    { env: { ...env, BIRBCREW_TEMPORAL_NAMESPACE: absent, BIRBCREW_PROOF_ENGINE: "pi" }, stdio: ["ignore", "ignore", "pipe"] });
   const missingExit = once(missing, "exit");
-  const exited = await Promise.race([missingExit, new Promise((done) => setTimeout(done, 30_000, "running"))]);
-  if (exited === "running") missing.kill("SIGKILL");
-  assert.deepEqual(exited, [1, null], "a worker with a missing namespace exits nonzero");
-  console.log("A worker configured with a missing namespace exited with status 1");
+  const stderr = missing.stderr.toArray().then((chunks) => chunks.join(""));
+  const deadline = setTimeout(() => missing.kill("SIGKILL"), 30_000);
+  try { assert.deepEqual(await missingExit, [1, null], "a worker with a missing namespace exits nonzero"); }
+  finally { clearTimeout(deadline); }
+  assert.match(await stderr, new RegExp(`Namespace ${absent} (was not found|is not found)`));
+  console.log("A worker configured with a missing namespace reported it and exited with status 1");
 
   const ownerId = randomUUID(), token = randomUUID();
   const config = file("gateway.json");
   await writeFile(config, JSON.stringify({ port: 0, tokenHashes: { [createHash("sha256").update(token).digest("hex")]: ownerId } }), { mode: 0o600 });
+  const unreadable = join(s.directory, "absent", "client.key");
+  const misconfigured = spawn(process.execPath, ["src/service/gateway.ts", config],
+    { env: { ...env, BIRBCREW_TEMPORAL_TLS_PRIVATE_KEY_PATH: unreadable }, stdio: ["ignore", "ignore", "pipe"] });
+  const misconfiguredExit = once(misconfigured, "exit");
+  const report = (await misconfigured.stderr.toArray()).join("");
+  assert.deepEqual(await misconfiguredExit, [1, null]);
+  assert.match(report, /Cannot read BIRBCREW_TEMPORAL_TLS_PRIVATE_KEY_PATH \(ENOENT\)/);
+  assert.ok(!report.includes(unreadable), "the gateway does not print the private key path");
+  console.log("A gateway with an unreadable key file named the variable without its path and exited with status 1");
   const stopWorker = await s.child(process.execPath, ["src/service/cli.ts", "worker", "tests/proof/fixture-profiles.mts"], env);
   const gateway = spawn(process.execPath, ["src/service/gateway.ts", config], { env, stdio: ["ignore", "pipe", "inherit"] });
   const gatewayExit = once(gateway, "exit");
