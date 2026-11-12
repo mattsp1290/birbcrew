@@ -183,7 +183,7 @@ test("v1 HTTP contract enforces ownership, strict identity, capability version a
   assert.equal(capabilities.apiVersion, "1");
   assert.deepEqual(capabilities.health, { version: 1, dependencies: ["database", "temporal"] });
   assert.deepEqual(capabilities.listing, { version: 1, resources: ["members", "conversations"], defaultLimit: 50, maximumLimit: 100 });
-  assert.deepEqual(capabilities.initiatorKinds, ["owner", "routine"]);
+  assert.deepEqual(capabilities.initiatorKinds, ["owner", "routine", "handoff"]);
   const before = f.counts();
   assert.deepEqual(await (await f.api(path + "/" + requestId)).json(), receipt);
   assert.deepEqual(f.counts(), before);

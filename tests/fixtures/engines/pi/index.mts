@@ -1,3 +1,4 @@
+import { handoffAcknowledgement } from "../handoff.mts";
 import { holdResumedReceipt, streamGate, waitForGate } from "../stream-gate.mts";
 import { randomUUID } from "node:crypto";
 import type { BaseEvent, RunAgentInput } from "@ag-ui/core";
@@ -120,6 +121,7 @@ function scriptedStream(context: Context, signal: AbortSignal | undefined, onPro
     const answer = contentText(last.content);
     text = last.isError ? JSON.parse(answer).kind : "selected " + answer;
   } else if (latest?.startsWith("record ") && last?.role === "toolResult") text = "settled " + contentText(last.content);
+  else if (handoffAcknowledgement(latest)) text = handoffAcknowledgement(latest)!;
   else if (latest === "recall") text = "recalled " + (remembered ?? "none");
   else if (latest?.startsWith(prefix)) text = "stored " + latest.slice(prefix.length);
   else if (wait) text = "waiting";

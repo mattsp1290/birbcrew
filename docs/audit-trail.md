@@ -43,16 +43,19 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   names the owner ID. A request with no admission row is recorded as
   owner-initiated, as before migration 23: requests admitted by workflow histories
   older than `bounded-conversations-v1`, and trusted-context effects, whose lane
-  records no admission. `member.spawned`, `conversation.opened`, the routine
-  facts and the memory facts belong to no request and name the acting owner. Migration 25 adds the
+  records no admission. `member.spawned`, `conversation.opened`,
+  `conversation.handed_off`, the routine facts and the memory facts belong to no
+  request and name the acting owner. Migration 25 adds the
   second kind, `routine`, with the routine's ID: an admission records it only from
   the routine's firing row (see
-  [scheduled routines](scheduled-routines.md#what-a-firing-records)). Named CHECK
+  [scheduled routines](scheduled-routines.md#what-a-firing-records)). Migration 27
+  adds the third, `handoff`, with the handoff's ID: an admission records it only for
+  the request a [conversation handoff](handoffs.md#the-reserved-first-request)
+  reserved, with exactly its transcript. Named CHECK
   constraints (`audit_events_initiator_check` and
-  `request_admissions_initiator_kind_check`) allow only these two kinds, and a
-  routine only on a request-tied audit row. Member handoff must widen both in its
-  own migration. No operator or application kind exists
-  yet. Operator CLI commands (`npm run members`) act as the owner they name.
+  `request_admissions_initiator_kind_check`) allow only these three kinds, and a
+  routine or a handoff only on a request-tied audit row. No operator or application
+  kind exists yet. Operator CLI commands (`npm run members`) act as the owner they name.
   Standing grants (migration 24) added no kind: a call a grant approves keeps its
   request's initiator, and `approval.auto_approved` names the system as its actor.
 - `event_type`, `member_id`, `conversation_id`, `request_id` and a small
@@ -76,11 +79,13 @@ text, tokens or credentials. Memory rows carry no digest of their text either: t
 owner can delete an entry, and a digest kept in this table would let an export holder
 confirm a guess of the deleted text. `src/service/audit.ts` validates each payload against a strict schema
 before insert, so extra fields are refused. The prompt digest is the hex SHA-256 of
-the exact UTF-8 text, the same digest that admission already stores. The argument
+the exact UTF-8 text, the same digest that admission already stores. A handoff's
+transcript digest is the hex SHA-256 of the transcript it quoted, which is also the
+prompt digest of the target's first request. The argument
 digest is the one shown on the public approval card: a SHA-256 over the tool name,
 operation ID and note.
 
-Both digests are unsalted fingerprints of the text, not secrets. Anyone holding an
+These digests are unsalted fingerprints of the text, not secrets. Anyone holding an
 export can confirm a guess, and can recover short or predictable text ("yes", "run
 the tests", a templated prompt) by trying candidates. Identical text has the same
 digest for every owner, so pooled exports link those requests across owners. Treat
@@ -91,7 +96,7 @@ audit version may switch to a keyed per-owner digest.
 
 The registry is the `auditEvents` object in `src/service/audit.ts`.
 `audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
-`024-standing-grants.sql`, `025-routines.sql` and then `026-memories.sql`, lists the same types.
+`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql` and then `027-handoffs.sql`, lists the same types.
 Each widening replaces the whole constraint, so the latest migration lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
@@ -117,6 +122,7 @@ A test checks that the two lists match. `GET /v1/capabilities` lists them under
 | `memory.created` | owner | a [member memory](memories.md) entry is created | entry | `memoryId` |
 | `memory.deleted` | owner | an entry is deleted and its text erased | entry | `memoryId` |
 | `memory.suspended` | system | a restored installation resumes and suspends an active entry | entry | `memoryId`, `reason` (`recovery_restore`) |
+| `conversation.handed_off` | owner | a [conversation handoff](handoffs.md) commits; on the source conversation | handoff | `handoffId`, `targetConversationId`, `targetMemberId`, `firstRequestId`, `carriedTurns`, `omittedTurns`, `uncertainTurns`, `transcriptDigest` |
 
 `approval.decided` names the deciding owner as its actor. Through the gateway, the
 owner comes from the bearer token at `POST .../human`. The operator CLI names the
@@ -297,6 +303,14 @@ Migration 26 replaces `audit_events_type_check` the same way, with every earlier
 type and the three memory types, and adds one partial unique index for them. It takes
 `audit_events` together with `members` and `conversations` without queueing, so it
 never waits for a native turn; [member memory](memories.md#upgrade) lists its locks.
+
+Migration 27 replaces `audit_events_type_check` and `audit_events_initiator_check`
+the same way, with every earlier type and kind plus `conversation.handed_off` and
+`handoff`, widens the admission CHECK, and adds one partial unique index. It takes
+`request_admissions` and `audit_events` together with `members` and `conversations`
+without queueing, so it never deadlocks with an admission or a commit and never waits
+for a native turn; [conversation handoff](handoffs.md#upgrade) lists its locks.
+Previous-release processes must be stopped first, and rollback is unsupported.
 
 The audit table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest

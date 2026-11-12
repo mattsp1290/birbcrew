@@ -3,9 +3,9 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { z } from "zod";
 import { approvalSchema } from "./approvals.ts";
-import { commitSchema, executionSchema, submitSchema, openSchema } from "./domain.ts";
+import { commitSchema, executionSchema, turnRequestSchema, openSchema } from "./domain.ts";
 
-export const launchSchema = submitSchema.extend({ token: z.uuid(), execution: executionSchema, childId: z.uuid().optional() });
+export const launchSchema = turnRequestSchema.extend({ token: z.uuid(), execution: executionSchema, childId: z.uuid().optional() });
 export type Launch = z.infer<typeof launchSchema>;
 export const commandSchema = z.strictObject({
   id: z.uuid(), action: z.enum(["start", "stop"]), launch: launchSchema,
