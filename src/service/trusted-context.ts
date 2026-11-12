@@ -1,5 +1,5 @@
-import {acquireRecoveryNativeLease,requireRecoveryActive} from "./recovery-admission.ts";
 /** Trusted backend-only API. Never construct authority from an observer request. */
+import {acquireRecoveryNativeLease,requireRecoveryActive} from "./recovery-admission.ts";
 import { appendAudit, trustedToolName } from "./audit.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { Client, type Pool, type PoolClient } from "pg";

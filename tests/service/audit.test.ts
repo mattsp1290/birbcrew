@@ -539,11 +539,14 @@ test("migration 21 upgrades a v20 database with rows while a native turn holds i
   await admin.query("CREATE DATABASE " + database);
   source.pathname = "/" + database;
   const upgraded = new Pool({ connectionString: source.href });
+  // An after hook never replaces the test's own failure, even when this DROP fails because a failed
+  // assertion left a session open.
   t.after(async () => {
-    await upgraded.end();
-    // Not FORCE: end() resolves before its connections close, and terminating one then is an unhandled pool error.
-    await admin.query(`DROP DATABASE ${database}`);
-    await admin.end();
+    try {
+      await upgraded.end();
+      // Not FORCE: end() resolves before its connections close, and terminating one then is an unhandled pool error.
+      await admin.query(`DROP DATABASE ${database}`);
+    } finally { await admin.end(); }
   });
   const sql = new URL("../../src/service/sql/", import.meta.url);
   await upgraded.query("CREATE SCHEMA birbcrew_ts");

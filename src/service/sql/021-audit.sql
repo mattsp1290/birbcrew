@@ -19,10 +19,17 @@ CREATE TABLE birbcrew_ts.audit_events (
     member_id uuid NOT NULL,
     conversation_id uuid,
     request_id uuid,
-    payload jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object' AND octet_length(payload::text) <= 1024),
+    payload jsonb NOT NULL,
+    CONSTRAINT audit_events_payload_check CHECK (jsonb_typeof(payload) = 'object' AND octet_length(payload::text) <= 1024),
     CONSTRAINT audit_events_actor_check CHECK (
         (actor_kind = 'owner' AND actor_id = owner_id) OR (actor_kind = 'system' AND actor_id IS NULL)),
-    -- Later non-human initiators (routines, member handoff, standing approvals) widen this.
+    -- Later non-human initiators (routines, member handoff, standing approvals) widen this
+    -- and audit_events_type_check. migrate() runs every migration in one transaction, and
+    -- dropping or adding a constraint holds ACCESS EXCLUSIVE here until it commits, so
+    -- every audited write and audit read waits. Drop and re-add in one ALTER TABLE with the
+    -- new constraint NOT VALID: existing rows satisfy a wider predicate, and NOT VALID skips
+    -- the full-table scan under that lock. VALIDATE, if wanted, runs outside migrate()
+    -- under SHARE UPDATE EXCLUSIVE. Widen AuditEvent and appendAudit in audit.ts with them.
     CONSTRAINT audit_events_initiator_check CHECK (initiator_kind = 'owner' AND initiator_id = owner_id),
     -- The closed registry; keep in step with auditEvents in src/service/audit.ts.
     CONSTRAINT audit_events_type_check CHECK (
@@ -37,7 +44,7 @@ CREATE TABLE birbcrew_ts.audit_events (
             AND (jsonb_typeof(payload->'receiptId') = 'string') IS TRUE)
         OR (event_type = 'trusted_effect.completed' AND request_id IS NOT NULL
             AND (jsonb_typeof(payload->'operationId') = 'string') IS TRUE)),
-    CHECK (request_id IS NULL OR conversation_id IS NOT NULL),
+    CONSTRAINT audit_events_request_conversation_check CHECK (request_id IS NULL OR conversation_id IS NOT NULL),
     FOREIGN KEY (owner_id, member_id) REFERENCES birbcrew_ts.members (owner_id, member_id),
     FOREIGN KEY (conversation_id) REFERENCES birbcrew_ts.conversations
 );

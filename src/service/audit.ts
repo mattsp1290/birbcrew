@@ -45,8 +45,10 @@ export interface AuditFact<T extends AuditEventType> {
   payload: z.input<(typeof auditEvents)[T]["payload"]>;
 }
 
-/** Call inside the transaction that commits the recorded fact, after that transaction
- * holds the conversation row (the foreign key below locks it), and as late as possible.
+/** Call inside the transaction that commits the recorded fact, after that transaction has
+ * inserted or locked the conversation row it names: the audit row's foreign keys take FOR
+ * KEY SHARE on its member and conversation, and locking the conversation first avoids
+ * deadlocks. Call it as late as possible.
  * Await nothing outside the database after it: the insert holds a shared lock that
  * every owner's audit reads wait for until commit. */
 export async function appendAudit<T extends AuditEventType>(db: Pick<PoolClient, "query">, fact: AuditFact<T>) {

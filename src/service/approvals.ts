@@ -261,6 +261,9 @@ export class ApprovalStore {
     return this.transaction(db => this.decideLocked(db, decisionSchema.parse(input)));
   }
 
+  /** Storing a choice appends the approval.decided audit row, whose shared lock every
+   * owner's audit read waits on until commit. After it returns, run only database
+   * statements and commit: await nothing outside the database. */
   async decideLocked(db: PoolClient, key: Decision, live = false): Promise<Choice> {
     const turn = await lockTurn(db, key);
     const call = await findCall(db, key);
@@ -345,6 +348,9 @@ export class ApprovalStore {
     return this.transaction((db) => this.settleLocked(db, key));
   }
 
+  /** May append the work_item.committed audit row, whose shared lock every owner's audit
+   * read waits on until commit. After it returns, run only database statements and commit:
+   * await nothing outside the database. */
   async settleLocked(db: PoolClient, key: z.infer<typeof settleSchema>, live = false): Promise<ToolOutcome> {
     const turn = await lockTurn(db, key);
     if (turn.token !== key.token) throw new MemberStoreError("stale");
