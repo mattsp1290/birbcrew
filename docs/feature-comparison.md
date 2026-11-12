@@ -107,7 +107,7 @@ vendor cloud.
 | 24 | Event triggers or goals | No | Yes | Yes | Part | Part | Yes | No | Part | Yes |
 | 25 | Follow-ups that the agent schedules | No | Yes | Part | Part | Part | Part | No | Part | Yes |
 | 26 | Memory across conversations | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| 27 | Skills or reusable instruction packs | No | Yes | Yes | Part | No | ? | Part | Yes | Yes |
+| 27 | Skills or reusable instruction packs | Part | Yes | Yes | Part | No | ? | Part | Yes | Yes |
 | 28 | Learning from past work or a demonstration | No | Yes | Yes | ? | No | Part | Yes | ? | Yes |
 | 29 | Proactive check-ins or suggestions | No | Yes | Yes | Yes | Yes | Yes | No | Yes | Yes |
 
@@ -181,7 +181,7 @@ Each line states what Crew does at `47f3c0f` and where the feature stops.
 | 24 | No | No webhook, repository, or email event starts a request. |
 | 25 | No | A member has no tool that schedules a later turn. Only an owner creates a routine. |
 | 26 | Yes | An owner saves at most 32 entries of at most 1,024 bytes for each member. A conversation takes a snapshot of the entries when it opens. The model cannot write memory, and Crew has no search over memory. See [member memory](memories.md). |
-| 27 | No | Pi loads no skills, no extensions, and no prompt templates. Claude loads no plugins and no setting sources. Codex runs with plugins off and refuses ambient configuration files. The instruction text of a member is fixed. |
+| 27 | Part | An owner can give a member instructions of at most 16,384 bytes at spawn. They are fixed for the life of the member, reach every native launch of its conversations before project notes and memory, and never change its tools, approvals, or limits. Crew still has no skills and no reusable instruction packs: Pi loads no skills, no extensions, and no prompt templates, Claude loads no plugins and no setting sources, and Codex runs with plugins off and refuses ambient configuration files. See [member instructions](member-instructions.md). |
 | 28 | No | Crew does not learn from finished conversations. |
 | 29 | No | A member acts only on an owner request or a routine firing. |
 

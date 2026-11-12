@@ -16,7 +16,8 @@ contract (event types, page limits, formats) and the scheduled-routine limits an
 policies (`routines`), `standingGrants` (the standing
 choices, the card and state fields, the grantable tool, policy version and
 initiator kinds, the grants route and the inactive-list limit), `memories` (the
-member memory route, limits, injection and deletion semantics per engine), health
+member memory route, limits, injection and deletion semantics per engine),
+`memberInstructions` (the spawn field, the read route, limits, order and restore), health
 dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
@@ -25,7 +26,7 @@ proof of the operator's provider access or configured profile availability.
 
 | Route | Purpose |
 | --- | --- |
-| `POST /v1/members` | Existing member creation contract (`requestId`, `engine`, `profile`) |
+| `POST /v1/members` | Existing member creation contract (`requestId`, `engine`, `profile`), plus optional `instructions` |
 | `POST /v1/conversations` | Open an owned conversation (`conversationId`, `memberId`) |
 | `POST /v1/conversations/{conversationId}/requests` | Submit `{ "requestId": "UUID", "text": "exact input" }` |
 | `GET /v1/conversations/{conversationId}/requests/{requestId}` | Reconcile status and original committed result; never invokes inference |
@@ -44,6 +45,7 @@ proof of the operator's provider access or configured profile availability.
 | `POST /v1/members/{memberId}/grants/{grantId}/revoke` | Revoke a standing grant for later calls, body `{}`; repeating returns the same grant |
 | `POST /v1/memories`, `GET /v1/memories` | Create (`requestId`, `memberId`, `text`) and list member memory entries |
 | `GET`/`DELETE /v1/memories/{memoryId}` | Read one entry, or erase its text and keep a tombstone |
+| `GET /v1/members/{memberId}/instructions` | The member's instructions, or `null` |
 
 Authentication is required even for capabilities and health. There is no
 unauthenticated route. A request without a valid token gets `401` before the gateway
@@ -122,6 +124,9 @@ rows:
 ```json
 { "apiVersion": "1", "members": [{ "memberId": "UUID", "engine": "pi", "profile": "name" }], "next": "opaque" }
 ```
+
+A member spawned with instructions also carries `"instructions": { "bytes": 73, "digest": "sha256 hex" }`,
+never the text.
 
 ```json
 {
@@ -386,13 +391,30 @@ later never reach it. Only the owner writes memory; the model cannot. A create i
 idempotent by `requestId`; a replay of a deleted entry fails `409 memory_deleted`,
 and a 33rd active entry `409 memory_limit`. `POST /v1/conversations` also fails
 `409 memory_limit` when the conversation's project notes fit what the member's engine
-can be given but notes and entries together do not; nothing is opened. Deleting an
+can be given but notes and entries together do not, counting any member instructions
+with the notes; nothing is opened. Deleting an
 entry erases its text and keeps a tombstone. A deletion reaches every later launch on
 Pi with Crew's Pi models. Codex replays the context its rollout recorded on a
 conversation's first turn, and Claude's SDK may resend the prompt it recorded then, so
 on those engines a deletion may reach only conversations that have not run a turn.
 `capabilities.memories.startedConversations` says which. See
 [member memory](memories.md) for the trust boundary and what deletion does not erase.
+
+## Member instructions
+
+`POST /v1/members` takes optional `instructions`: 1 to 16,384 bytes under memory's
+character rules. The route now decodes its body strictly, so bytes that are not UTF-8
+fail `400 invalid_json` with or without the field. Instructions are fixed for the life
+of the member; a spawn replay must repeat them exactly, or fails `409 conflict`. Every native launch of the member's conversations
+gets them first, before project notes and memory; Pi children and the trusted-context
+lane do not. They never change the member's tools, approvals or limits.
+`GET /v1/members/{memberId}/instructions` returns the text to its owner only; spawn
+responses, `GET /v1/members` and the `member.instructions_set` audit row carry its
+SHA-256 and byte count. `POST /v1/conversations` fails `409 instructions_limit` when the
+conversation's project notes fit what the member's engine can be given but notes and
+instructions together do not, and `409 memory_limit` when notes and instructions fit but
+memory on top does not. A restore keeps instructions as they were. See
+[member instructions](member-instructions.md).
 
 ## Validation
 

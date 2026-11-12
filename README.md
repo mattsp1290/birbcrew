@@ -123,3 +123,9 @@ writes memory; the model cannot. Deleting a fact erases its text, but Codex, and
 Claude where its SDK records the prompt, keep the context a conversation's first turn
 saw, and native session files and Pi checkpoints keep copies. Memory reaches every
 later conversation of the member, so whoever holds the owner's token can steer them all.
+
+An owner can give a member [instructions](docs/member-instructions.md) when they spawn
+it: up to 16,384 bytes describing its role. They are fixed for the life of the member,
+come before project notes and memory in every native launch of its conversations, and
+never change its tools, approvals or limits. Only the owner reads the text back, through
+`/v1/members/{memberId}/instructions`; listings and the audit trail carry its digest.

@@ -74,16 +74,18 @@ Payloads contain identifiers, SHA-256 digests, choices and statuses only. They
 never contain prompt or reply text, tool arguments or results, notes, member memory
 text, tokens or credentials. Memory rows carry no digest of their text either: the
 owner can delete an entry, and a digest kept in this table would let an export holder
-confirm a guess of the deleted text. `src/service/audit.ts` validates each payload against a strict schema
+confirm a guess of the deleted text. Member instructions are never erased, so their row
+carries the SHA-256 of the text, never the text. `src/service/audit.ts` validates each payload against a strict schema
 before insert, so extra fields are refused. The prompt digest is the hex SHA-256 of
 the exact UTF-8 text, the same digest that admission already stores. The argument
 digest is the one shown on the public approval card: a SHA-256 over the tool name,
 operation ID and note.
 
-Both digests are unsalted fingerprints of the text, not secrets. Anyone holding an
-export can confirm a guess, and can recover short or predictable text ("yes", "run
-the tests", a templated prompt) by trying candidates. Identical text has the same
-digest for every owner, so pooled exports link those requests across owners. Treat
+These digests, and the instructions digest, are unsalted fingerprints of the text, not
+secrets. Anyone holding an export can confirm a guess, and can recover short or
+predictable text ("yes", "run the tests", a templated prompt or role) by trying
+candidates. Identical text has the same digest for every owner, so pooled exports link
+those requests and members across owners. Treat
 an exported trail with the same care as the prompts and notes themselves. A later
 audit version may switch to a keyed per-owner digest.
 
@@ -91,7 +93,7 @@ audit version may switch to a keyed per-owner digest.
 
 The registry is the `auditEvents` object in `src/service/audit.ts`.
 `audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
-`024-standing-grants.sql`, `025-routines.sql` and then `026-memories.sql`, lists the same types.
+`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql` and then `029-member-instructions.sql`, lists the same types.
 Each widening replaces the whole constraint, so the latest migration lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
@@ -117,6 +119,7 @@ A test checks that the two lists match. `GET /v1/capabilities` lists them under
 | `memory.created` | owner | a [member memory](memories.md) entry is created | entry | `memoryId` |
 | `memory.deleted` | owner | an entry is deleted and its text erased | entry | `memoryId` |
 | `memory.suspended` | system | a restored installation resumes and suspends an active entry | entry | `memoryId`, `reason` (`recovery_restore`) |
+| `member.instructions_set` | owner | `spawn` inserts a member with [instructions](member-instructions.md) | member | `digest` (SHA-256 of the text), `bytes` |
 
 `approval.decided` names the deciding owner as its actor. Through the gateway, the
 owner comes from the bearer token at `POST .../human`. The operator CLI names the
@@ -468,6 +471,7 @@ export BIRBCREW_TEST_DATABASE_URL='postgresql://birbcrew:fixture-only@127.0.0.1:
 npm run test:audit
 npm run test:routines
 npm run test:memories
+npm run test:instructions
 npm run test:api
 node --test tests/service/store.test.ts tests/service/rollover-client.test.ts
 npm run test:recovery
