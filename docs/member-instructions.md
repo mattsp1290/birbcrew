@@ -134,10 +134,12 @@ start a line, or pose as another block's header.
 
 The read happens in the supervisor child, never in workflow code, so every native
 launch gets the instructions: a conversation's first turn, later turns, a turn a new
-worker resumes after its worker died, a tool resume after an approval, a rollover, and
-the conversations routine firings open. No workflow, update or argument changes, and no
-`patched()` marker is needed. Because the text never changes, what Claude and Codex
-recorded on a conversation's first turn is what every later launch sends.
+worker resumes after its worker died, a tool resume after an approval, a rollover, the
+conversations routine firings open, and the target of a [handoff](handoffs.md), which
+opens like any other conversation of its member. No workflow, update or argument
+changes, and no `patched()` marker is needed. Because the text never changes, what
+Claude and Codex recorded on a conversation's first turn is what every later launch
+sends.
 
 Not every launch:
 
@@ -150,6 +152,13 @@ Not every launch:
 - `recoverPending` recovers a stopped Claude proposal without context; it makes no model
   request. The turn that resumes after the decision launches with the instructions.
 - The trusted-context lane gets none: its application supplies the whole context.
+
+A handoff carries no instructions across. Its transcript quotes only the source's
+committed prompts and replies and reaches the target as its first user message, never
+as system context; the target's system context is its own member's instructions, notes
+and memory. The handoff record and its `conversation.handed_off` audit row hold
+identifiers, counts and a digest. A reply in which the source model quoted its
+instructions is carried like any other reply.
 
 ## Trust boundary
 
@@ -205,7 +214,8 @@ shorter instructions will open. On Codex, the largest instructions with 17 full 
 entries are refused with `memory_limit`, though either alone fits. On Claude, the largest
 instructions fit beside the largest notes capture allows (257,500 code units) and three
 full memory entries more do not. A routine firing whose open is refused fails with
-`rejected`, like any refused open.
+`rejected`, like any refused open. A [handoff](handoffs.md) to the member opens its
+target the same way, so it fails with the same code and writes nothing.
 
 ## Audit
 
@@ -246,7 +256,8 @@ commits it holds, on existing tables only:
 | `audit_events` | `ACCESS EXCLUSIVE`, `SHARE` | the CHECK and the index build |
 
 It takes both with `LOCK ... NOWAIT` together and retries every 20 to 100 ms, as
-migrations 25 and 26 do, so it never waits in a lock queue. A running native turn holds
+migrations 25 to 28 do, so it never waits in a lock queue. Applied in one transaction
+after 27 and 28, it retries while holding their locks. A running native turn holds
 only `ACCESS SHARE` on `members`, so the migration does not wait for it. After 60 s
 without the locks it fails with `55P03`, applies nothing, and the process exits. Stop
 every process of the previous release first, as for every migration.
@@ -288,8 +299,12 @@ snapshots, audit JSON or CSV; the triggers that keep the row fixed, one per memb
 to its owner and refused once a conversation exists, including an insert and an open
 racing in both orders; the context order with notes and memory, unchanged context for
 members without instructions, and hostile text that stays in its frame; the sizes above
-and every row of the open-time table; migration 29's locks, that it never queues and does
-not wait for a native turn; and an upgrade from version 26.
+and every row of the open-time table; a [handoff](handoffs.md) target of each engine
+whose context leads with its own member's instructions while the transcript, the
+handoff record and the audit trail carry neither member's, the insert trigger refusing
+instructions once a handoff opened a conversation, and `instructions_limit` and
+`memory_limit` refusing a handoff as they refuse an open; migration 29's locks, that it
+never queues and does not wait for a native turn; and an upgrade from version 28.
 
 `recovery.test.ts` checks that capture counts the table, that a held installation refuses
 instruction writes, and that a restore keeps the instructions, removes those of a member
@@ -304,6 +319,8 @@ npm run test:instructions:service
 It runs the real gateway, Temporal worker and fixture providers, and reads which markers
 reached each provider request: Pi turns, a turn resumed by a new worker after its worker
 was killed while it waited on an approval card, a routine firing, and the first and later
-turns of Claude and Codex conversations; that members without instructions and other
-owners' members see none; and that no text reaches public events, snapshots, receipts,
-listings or the audit trail.
+turns of Claude and Codex conversations, and a Claude handoff target's first turn, whose
+system context holds its own member's instructions and whose transcript holds none; that
+members without instructions and other owners' members see none; and that no text
+reaches public events, snapshots, receipts, handoff records, listings or the audit
+trail.

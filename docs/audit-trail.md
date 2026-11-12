@@ -43,9 +43,9 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   names the owner ID. A request with no admission row is recorded as
   owner-initiated, as before migration 23: requests admitted by workflow histories
   older than `bounded-conversations-v1`, and trusted-context effects, whose lane
-  records no admission. `member.spawned`, `conversation.opened`,
-  `conversation.handed_off`, the routine facts and the memory facts belong to no
-  request and name the acting owner. Migration 25 adds the
+  records no admission. `member.spawned`, `member.instructions_set`,
+  `conversation.opened`, `conversation.handed_off`, the routine facts and the memory
+  facts belong to no request and name the acting owner. Migration 25 adds the
   second kind, `routine`, with the routine's ID: an admission records it only from
   the routine's firing row (see
   [scheduled routines](scheduled-routines.md#what-a-firing-records)). Migration 27
@@ -321,6 +321,11 @@ Migration 28 replaces `audit_events_type_check` the same way, with every type 27
 together with the four other tables it alters without queueing;
 [approval expiry](approval-expiry.md#upgrade-in-flight-workflows-and-recovery) lists its
 locks.
+
+Migration 29 replaces `audit_events_type_check` the same way, with every type 28 lists plus
+`member.instructions_set`, and adds one partial unique index for it. It takes
+`audit_events` together with `members` without queueing;
+[member instructions](member-instructions.md#upgrade) lists its locks.
 
 The audit table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest

@@ -449,10 +449,11 @@ gets them first, before project notes and memory; Pi children and the trusted-co
 lane do not. They never change the member's tools, approvals or limits.
 `GET /v1/members/{memberId}/instructions` returns the text to its owner only; spawn
 responses, `GET /v1/members` and the `member.instructions_set` audit row carry its
-SHA-256 and byte count. `POST /v1/conversations` fails `409 instructions_limit` when the
-conversation's project notes fit what the member's engine can be given but notes and
-instructions together do not, and `409 memory_limit` when notes and instructions fit but
-memory on top does not. A restore keeps instructions as they were. See
+SHA-256 and byte count. `POST /v1/conversations`, and a handoff to the member, which
+opens its target the same way, fail `409 instructions_limit` when the conversation's
+project notes fit what the member's engine can be given but notes and instructions
+together do not, and `409 memory_limit` when notes and instructions fit but memory on top
+does not. A handoff transcript never carries instructions. A restore keeps instructions as they were. See
 [member instructions](member-instructions.md).
 
 ## Validation
