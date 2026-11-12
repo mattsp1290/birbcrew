@@ -33,7 +33,8 @@ The digest above is the `node:22.23.3-bookworm-slim` index resolved on
 runs `npm ci --omit=dev` and compiles the native launcher against the same
 bookworm glibc into `/app/.proof/bin/member-launch`, the path the source
 resolves. The image runs as `10001:10001` under `tini` and contains no
-credentials. **Verified:** the command above without `--push` built both
+credentials. The `Service image` workflow rebuilds it for amd64 on relevant pull
+requests and runs it read-only with the flags below. **Verified:** the command above without `--push` built both
 platforms, arm64 natively and amd64 under QEMU. The amd64 image completed the Pi
 fixture path below under emulation; Codex was exercised on arm64 only.
 
@@ -144,9 +145,10 @@ GRANT CONNECT, CREATE, TEMPORARY ON DATABASE crew TO crew_service;
 
 **Verified** with PostgreSQL 17.6 and a role without superuser, `CREATEDB` or
 `CREATEROLE`: the first start created `birbcrew_ts` owned by `crew_service`.
-With only `CONNECT` and `CREATE`, the first worker start failed with
-`permission denied to create temporary tables` (migration 006 uses `pg_temp`
-functions). `CREATE SCHEMA IF NOT EXISTS` checks database `CREATE` even after
+With only `CONNECT` and `CREATE`, the first start failed with
+`permission denied to create temporary tables` and created nothing (migration
+006 uses `pg_temp` functions); after `GRANT TEMPORARY` it applied all 20
+migrations. `CREATE SCHEMA IF NOT EXISTS` checks database `CREATE` even after
 the schema exists, so a role with only `CONNECT` cannot start. The current code
 therefore cannot run with separate migration and runtime roles.
 

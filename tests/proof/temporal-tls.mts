@@ -87,8 +87,12 @@ try {
   const misconfigured = spawn(process.execPath, ["src/service/gateway.ts", config],
     { env: { ...env, BIRBCREW_TEMPORAL_TLS_PRIVATE_KEY_PATH: unreadable }, stdio: ["ignore", "ignore", "pipe"] });
   const misconfiguredExit = once(misconfigured, "exit");
-  const report = (await misconfigured.stderr.toArray()).join("");
-  assert.deepEqual(await misconfiguredExit, [1, null]);
+  const misconfiguredDeadline = setTimeout(() => misconfigured.kill("SIGKILL"), 30_000);
+  let report;
+  try {
+    report = (await misconfigured.stderr.toArray()).join("");
+    assert.deepEqual(await misconfiguredExit, [1, null]);
+  } finally { clearTimeout(misconfiguredDeadline); }
   assert.match(report, /Cannot read BIRBCREW_TEMPORAL_TLS_PRIVATE_KEY_PATH \(ENOENT\)/);
   assert.ok(!report.includes(unreadable), "the gateway does not print the private key path");
   console.log("A gateway with an unreadable key file named the variable without its path and exited with status 1");

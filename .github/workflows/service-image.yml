@@ -28,7 +28,7 @@ jobs:
             echo "The build accepted an unpinned base image" >&2
             exit 1
           fi
-          grep -q "Pin NODE_IMAGE by digest" guard.log
+          grep -Eq '^#[0-9]+ [0-9.]+ Pin NODE_IMAGE by digest' guard.log
       - run: docker buildx build --load -f packaging/service.Dockerfile --build-arg NODE_IMAGE="$NODE_IMAGE" -t crew-service:ci .
       - name: Run hardened
         run: |
@@ -36,7 +36,8 @@ jobs:
             --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777 crew-service:ci sh -ec '
               test "$(id -u):$(id -g)" = 10001:10001
               tr "\0" " " < /proc/1/cmdline | grep -q "^/usr/bin/tini -- "
-              if touch /app/probe 2>/dev/null; then exit 1; fi
+              if touch /var/lib/birbcrew/native/probe 2>/dev/null; then exit 1; fi
+              touch /tmp/probe
               test -x /app/.proof/bin/member-launch
               test "$BIRBCREW_STATE_DIR" = /var/lib/birbcrew/native
               node -e "require(\"@swc/core\")"
