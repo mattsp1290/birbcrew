@@ -149,29 +149,46 @@ attributes are detected. The service name is `OTEL_SERVICE_NAME` when set and
 not empty, otherwise `service.name` from `OTEL_RESOURCE_ATTRIBUTES`, otherwise
 `birbcrew`. `OTEL_RESOURCE_ATTRIBUTES` follows the OpenTelemetry format:
 comma-separated `key=value` entries such as
-`deployment.environment.name=production,service.version=1.2.3`. Spaces and
-tabs around keys, values and commas are ignored, and empty entries are
+`deployment.environment.name=production,service.version=1.2.3`. Whitespace
+around the whole value, such as the final newline of a YAML block, is ignored,
+as are spaces and tabs around keys, values and commas. Empty entries are
 skipped. Each key is a W3C Baggage token (letters, digits and
-``!#$%&'*+-.^_`|~``) of at most 255 characters and appears once. Each value is
-not empty and uses printable ASCII other than space, `"`, `,`, `;` and `\`;
-percent-encode anything else, such as `%20` for a space or `%2C` for a comma.
-Decoded, a value must be valid UTF-8 of at most 255 characters with no control
-or invisible formatting characters. At most 32 entries and 4096 characters are
-accepted. `OTEL_SERVICE_NAME` follows the same length and character limits as
-a decoded value. Unlike the OpenTelemetry SDK, which drops malformed input
-silently, Crew refuses to start when either variable breaks these rules, so a
-typo cannot quietly remove the environment or version. The error names the
-variable and, for an attribute, the entry's position, never its content.
+``!#$%&'*+-.^_`|~``) of at most 255 characters and appears once. Keys that
+plain JavaScript objects inherit, such as `constructor`, `toString` or
+`__proto__`, are refused because the OpenTelemetry SDK would drop them. Each
+value is not empty and uses printable ASCII other than space, `"`, `,`, `;`
+and `\`; percent-encode anything else, such as `%20` for a space or `%2C` for
+a comma. Decoded, a value must be valid UTF-8, not only whitespace, and at
+most 255 characters, counted as Unicode code points. It must not contain
+control characters, invisible formatting characters, or line or paragraph
+separators (Unicode categories Cc, Cf, Zl and Zp). At most 32 entries and 4096
+characters are accepted. `OTEL_SERVICE_NAME` follows the same length and
+character limits as a decoded value, after surrounding whitespace is removed.
+Unlike the OpenTelemetry SDK, which drops malformed input silently, Crew
+refuses to start when either variable breaks these rules, so a typo cannot
+quietly remove the environment or version. The error names the variable and,
+for an attribute, the entry's position among the comma-separated parts
+(counting from 1, empty parts included), never its content.
 
 When an export fails, the process writes one line to standard error, such as
 `birbcrew: OTLP trace export failed (ECONNREFUSED) and its spans were dropped;
-the next warning comes at least 5 minutes later`. The reason is only an HTTP
-status, a Node error code such as `ENOTFOUND` or `EPROTO`, or `timeout`;
-the line never contains the endpoint, a header, the collector's status text or
+the next warning comes at least 5 minutes later`. The reason in parentheses is
+one of these:
+
+- an HTTP status, such as `HTTP 404`;
+- `HTTP 429, 502, 503 or 504`, when retries on one of those statuses ran out;
+- a fixed Node or OpenSSL error code, such as `ENOTFOUND`, `EPROTO` or
+  `DEPTH_ZERO_SELF_SIGNED_CERT`;
+- `timeout`, when no answer came within two seconds, including a connection
+  attempt that is never answered;
+- `unknown error`.
+
+The line never contains the endpoint, a header, the collector's status text or
 response body, or span data. Each process writes at most one such line every
-five minutes and counts the failures it held back in the next one. Native
-turn runners discard standard error, so the line comes from the worker. Crew
-registers no OpenTelemetry diagnostic logger.
+five minutes and counts the failures it held back in the next one. A failed
+write, such as to a closed pipe, is ignored. Native turn runners discard
+standard error, so the line comes from the worker. Crew registers no
+OpenTelemetry diagnostic logger.
 
 #### Datadog Agent
 
@@ -189,13 +206,23 @@ OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=production,service.version=
 The Agent must run APM with its OTLP HTTP receiver listening beyond
 loopback, for example `DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_HTTP_ENDPOINT=0.0.0.0:4318`.
 The receiver speaks plain HTTP, so an `https` endpoint fails every export with
-`EPROTO`. `BIRBCREW_OTLP_TRACES_ALLOW_HTTP` accepts only `true` or `false`, in
-any case; empty means `false`, and any other value stops startup. When the endpoint is plain `http`
-to a host other than `127.0.0.1`, Crew refuses to start if
-`OTEL_EXPORTER_OTLP_HEADERS` or `OTEL_EXPORTER_OTLP_TRACES_HEADERS` is set,
-because those headers usually hold credentials and would cross the network
-unencrypted. The spans themselves also travel unencrypted, so use this only
-where the path to the Agent stays inside the cluster network.
+`EPROTO`. Whenever `BIRBCREW_OTLP_TRACES_ENDPOINT` is set,
+`BIRBCREW_OTLP_TRACES_ALLOW_HTTP` must be `true` or `false`, in any case, or
+empty, which means `false`; any other value stops startup. The opt-in changes
+only whether the connection is encrypted, not where spans may go: an `https`
+endpoint may already name any host. When the endpoint is plain `http` to a
+host other than `127.0.0.1`, Crew refuses to start if
+`OTEL_EXPORTER_OTLP_HEADERS` or `OTEL_EXPORTER_OTLP_TRACES_HEADERS` holds
+anything other than whitespace, because those headers usually hold
+credentials. Everything else in each request is readable on the network: the
+host and path, the resource attributes (service name, environment, version and
+anything else in `OTEL_RESOURCE_ATTRIBUTES`), and every span's name, timing,
+status, `engine`, and conversation, request, workflow run and child IDs. Use
+the opt-in only where the path to the Agent stays inside the cluster network.
+The exporter reads the collector's response without a size limit, as it does
+over `https`, so whoever can answer in the collector's place can grow the
+process's memory; without encryption that includes anyone able to intercept
+or impersonate the Agent's Service inside the cluster.
 
 The Agent maps `service.name` to the Datadog service,
 `deployment.environment.name` to `env` and `service.version` to `version`.
