@@ -201,9 +201,9 @@ inside the container's network namespace.
   answers a loopback peer that requests exactly `/healthz` with a constant
   `{"status":"ok"}` and reads no database or Temporal state. Any other method,
   request target (including a query string) or peer goes through the normal
-  authentication and gets `401`. Replace `8080` with the configured port. Starting
-  Node takes a few hundred milliseconds on a small CPU limit, so raise the
-  timeout:
+  authentication, so it gets `401` without a valid token. Replace `8080` with
+  the configured port. Starting Node takes a few hundred milliseconds on a small
+  CPU limit, so raise the timeout:
 
   ```yaml
   livenessProbe:

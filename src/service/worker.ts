@@ -45,9 +45,16 @@ export async function runMemberWorker(store: MemberStore, temporal: TemporalSett
     }
     if (workers.length === 1) throw new Error("No member engines configured");
     const running = workers.map((worker) => worker.run());
-    const beats = heartbeat === undefined ? undefined : setInterval(() => {
-      if (workers.every((worker) => worker.getState() === "RUNNING")) void touch(heartbeat).catch(() => {});
-    }, 5000);
+    let reported = false;
+    const beat = () => {
+      if (heartbeat === undefined || !workers.every((worker) => worker.getState() === "RUNNING")) return;
+      void touch(heartbeat).catch(() => {
+        if (!reported) console.error("Cannot update BIRBCREW_WORKER_HEARTBEAT_FILE");
+        reported = true;
+      });
+    };
+    beat();
+    const beats = heartbeat === undefined ? undefined : setInterval(beat, 5000);
     try {
       await Promise.race([Promise.all(running), supervisor.exited.then(() => { throw new Error("SDK supervisor stopped"); })]);
     } finally {
