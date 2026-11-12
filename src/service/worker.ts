@@ -1,5 +1,6 @@
 import { progressActivity } from "./progress-activity.ts";
 import { answerLive, cancelLive } from "./codex-calls.ts";
+import { open } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { ChildStore } from "./children.ts";
@@ -11,8 +12,13 @@ import { memberTaskQueue, activityQueue } from "./queues.ts";
 import { ownerAdmissionActivity, type MemberStore } from "./store.ts";
 import { temporalConnectionOptions, type TemporalSettings } from "./temporal-config.ts";
 
+async function touch(path: string) {
+  const file = await open(path, "a");
+  try { const now = new Date(); await file.utimes(now, now); } finally { await file.close(); }
+}
+
 export async function runMemberWorker(store: MemberStore, temporal: TemporalSettings, profiles: ReadonlyMap<string, MemberProfile>,
-  configPath: string, stateDir: string) {
+  configPath: string, stateDir: string, heartbeat?: string) {
   const connection = await NativeConnection.connect(await temporalConnectionOptions(temporal));
   const { namespace } = temporal;
   const workers: Worker[] = [];
@@ -39,9 +45,20 @@ export async function runMemberWorker(store: MemberStore, temporal: TemporalSett
     }
     if (workers.length === 1) throw new Error("No member engines configured");
     const running = workers.map((worker) => worker.run());
+    let reported = false;
+    const beat = () => {
+      if (heartbeat === undefined || !workers.every((worker) => worker.getState() === "RUNNING")) return;
+      void touch(heartbeat).catch(() => {
+        if (!reported) console.error("Cannot update BIRBCREW_WORKER_HEARTBEAT_FILE");
+        reported = true;
+      });
+    };
+    beat();
+    const beats = heartbeat === undefined ? undefined : setInterval(beat, 5000);
     try {
       await Promise.race([Promise.all(running), supervisor.exited.then(() => { throw new Error("SDK supervisor stopped"); })]);
     } finally {
+      clearInterval(beats);
       for (const worker of workers) if (worker.getState() === "RUNNING") worker.shutdown();
       await Promise.allSettled(running);
     }
