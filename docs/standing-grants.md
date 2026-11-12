@@ -39,7 +39,9 @@ grant, and answer `409` to a standing choice:
 - requests with no admission row, such as those admitted by workflow histories
   older than durable admission: a missing admission is not the owner;
 - requests admitted for any other initiator. This release knows no other kind. A
-  kind it cannot read fails the proposal instead of matching a grant.
+  kind it cannot read fails the proposal instead of matching a grant, and a
+  standing answer on a card for such a request fails as a server error (`503`)
+  rather than creating a grant.
 
 Trusted-context tools never reach approval cards. Their own `authorize()` decides
 them (see [trusted application context](trusted-application-context.md)).
@@ -147,10 +149,14 @@ limit, or a cancellation, an uncertain turn or a rejected admission has closed i
 conversation workflow that fails without leaving one of those facts keeps its grant
 listed as `active` until revoked, although no new call can be proposed there.
 
-A grant's binding is checked in the database. A row trigger looks up the card that
-created a grant and refuses it (`23503`) unless the card belongs to the same owner
-and member and, for a conversation grant, the same conversation. As for audit rows,
-a card the lookup cannot see is refused rather than left to the foreign keys.
+Part of this is checked in the database. A row trigger looks up the card that
+created a grant and refuses the grant (`23503`) unless the card belongs to the same
+owner and member, was answered with the grant's scope and, for a conversation grant,
+is in the same conversation. A CHECK allows a scope or a grant reference only on an
+approved top-level `record_work_item` call. As for audit rows, a card the lookup
+cannot see is refused rather than left to the foreign keys. Which calls a grant
+covers is decided by the query in `src/service/grants.ts` alone; no trigger repeats
+it for the calls a grant approves.
 
 ## Audit
 
@@ -202,7 +208,10 @@ tables, such as an open `psql` transaction or `pg_dump`, delays it.
 Stop every process of the previous release before the first upgraded one starts, as
 for migrations 21 and 23. A worker of the previous release replaying a history in
 which a granted call skipped the wait would wait for an answer that never comes. A
-gateway or activity of the previous release refuses standing choices.
+gateway or activity of the previous release refuses standing choices. Rolling back to
+a release without standing grants is not supported once a conversation workflow has
+taken a standing answer or run a granted call: the earlier workflow code neither
+accepts a standing choice nor skips the wait, so such histories do not replay on it.
 
 ## Security
 
@@ -211,6 +220,12 @@ automated consumer holding the same token. **Whoever holds the owner's token can
 create a standing grant by answering a card, and every later call it covers then
 runs with no person involved.** An `allow_always` grant hands the member's
 `record_work_item` calls to every holder of that token until it is revoked.
+
+Once a grant exists, no person sees the calls it covers. The member records a work
+item with whatever `note` the model chose, including when untrusted content in the
+conversation prompted the call. A card never showed the note either, but each call
+needed a person. A grant belongs to the member, not to its profile's instructions or
+model, so it survives an operator changing those.
 Authentication and permission changes need human review before merge (see the
 README).
 
@@ -218,6 +233,8 @@ README).
 
 - Grants do not expire with time. Only revocation, a closed conversation or a restore
   ends one.
+- The list of active grants is not bounded: one per open conversation of the member,
+  plus one member-wide grant. Only the ended grants are limited to 20.
 - The operator CLI's `pending` command does not show `standingChoices`. Its `decide`
   command accepts them, acting as the owner it names.
 - A grant cannot be scoped to arguments, a time window or a number of calls.
