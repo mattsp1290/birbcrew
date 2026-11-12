@@ -365,6 +365,7 @@ test('a transfer interrupted between its epoch and state writes leaves the epoch
  const t=await setup(context);
  const {generation}=await t.recovery.capture(t.bundle,pins,t.hooks);const {control:c}=await t.recovery.status();
  await writeFile(join(t.fence.directory,'epoch.json'),JSON.stringify({epoch:3}));
+ const before=await fenceState(t);
  const originalRename=fs.rename;let renames=0;
  const restore=()=>{fs.rename=originalRename;syncBuiltinESMExports();};t.defer(async()=>restore());
  fs.rename=async(...args:Parameters<typeof originalRename>)=>{if(++renames===2) throw new Error('injected crash');return originalRename(...args);};
@@ -372,8 +373,59 @@ test('a transfer interrupted between its epoch and state writes leaves the epoch
  const target=randomUUID();
  await assert.rejects(t.fence.transfer(c.installation,c.instance,target,generation,1),/injected crash/);
  restore();
- // Whichever write landed first, a retry must never hand epoch 3 out again.
- assert.ok(await t.fence.transfer(c.installation,c.instance,target,generation,1)>3);
+ // The second rename is state.json's: the raised epoch landed, and authority did not move.
+ assert.deepEqual(await fenceState(t),{state:before.state,epoch:JSON.stringify({epoch:4})});
+ // The retry, still a move from the held source, skips epoch 4 and never hands out 3 again.
+ assert.equal(await t.fence.transfer(c.installation,c.instance,target,generation,1),5);
+});
+
+test('an unreadable fence epoch file fails every fence operation instead of reading as 0',async context=>{
+ for(const damaged of ['{"epoch":','{"epoch":"3"}']) {
+  const t=await setup(context);
+  const {generation}=await t.recovery.capture(t.bundle,pins,t.hooks);const {control:c}=await t.recovery.status();
+  await writeFile(join(t.fence.directory,'epoch.json'),damaged);
+  const before=await fenceState(t);
+  await assert.rejects(t.fence.transfer(c.installation,c.instance,randomUUID(),generation,1));
+  await assert.rejects(t.recovery.resume(t.hooks),'even resume, which does not use the epoch, fails closed');
+  assert.deepEqual(await fenceState(t),before,'the fence is unchanged');
+  // The documented repair: rewrite the file with a chosen epoch. The lock was released.
+  await writeFile(join(t.fence.directory,'epoch.json'),JSON.stringify({epoch:3}));
+  await t.recovery.resume(t.hooks);
+  assert.equal((await t.recovery.status()).control.phase,'active');
+ }
+});
+
+test('a fence epoch below the minimum, or an identity drawn during the transfer, is refused with the retry instruction',async context=>{
+ for(const {fault,expected,refusal} of [
+  {fault:'low epoch',expected:4,refusal:'returned epoch 1 for this transfer, but this restore needs at least epoch 4. Authority has moved to target'},
+  {fault:'drawn',expected:6,refusal:'drew an ID in or past epoch 4\'s range after acceptance checked it, while the installation was held, so acceptance left it unchanged. Authority has moved to target'},
+ ]) {
+  const t=await setup(context);
+  // The restored identity has drawn an ID in epoch 3, so acceptance needs at least epoch 4.
+  await setSequence(t.pool,3n<<44n);await spawn(t.store);
+  await t.recovery.capture(t.bundle,pins,t.hooks);
+  const pool=t.pool;
+  class FaultyFence extends FileRecoveryFence {
+   override async transfer(installation:string,source:string,target:string,generation:string,minimumEpoch?:number) {
+    // An operator-supplied fence that ignores minimumEpoch and returns a positive epoch below it.
+    if(fault==='low epoch') {await super.transfer(installation,source,target,generation);return 1;}
+    // Something outside Crew draws from the identity after acceptance computed its minimum.
+    const epoch=await super.transfer(installation,source,target,generation,minimumEpoch);
+    await pool.query(`SELECT setval(${sequence},$1::bigint)`,[(5n<<44n).toString()]);
+    return epoch;
+   }
+  }
+  const target=randomUUID();
+  await assert.rejects(new InstallationRecovery(t.pool,new FaultyFence(t.fence.directory)).acceptRestore(t.bundle,pins,target),(error:unknown)=>error instanceof RecoveryRefusedError
+   &&error.message.includes(`${refusal} ${target}`)
+   &&error.message.includes(`retry accept-restore with the same target instance, ${target}.`));
+  await assert.rejects(t.recovery.resume(t.hooks),/fenced/,'authority has moved, so the source cannot resume');
+  await t.recovery.acceptRestore(t.bundle,pins,target);
+  assert.equal(await epochIn(t.fence.directory),expected,'the retry raises the stored epoch to the recomputed minimum');
+  await t.recovery.resume(t.hooks,await readRecoveryManifest(t.bundle));
+  await spawn(t.store);
+  assert.equal(await lastId(t.pool),(BigInt(expected)<<44n).toString());
+ }
 });
 
 test('bundle directory fsync failure cannot record a successful or transferable backup',async context=>{

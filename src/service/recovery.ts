@@ -206,7 +206,9 @@ export class InstallationRecovery {
   const floor=(BigInt(epoch)<<auditEpochBits).toString();
   const {rows:[identity]}=await this.pool.query<{moved:string|null}>(`SELECT CASE WHEN ${restoredAuditId}<$1::bigint
     THEN setval(pg_get_serial_sequence('birbcrew_ts.audit_events','event_id'),$1::bigint,false) END::text AS moved`,[floor]);
-  if(identity.moved===null) throw new Error('The audit identity drew IDs while the installation was held');
+  // The write barrier refuses audit inserts before they draw, so only something outside Crew,
+  // such as a direct nextval or setval, gets here. A retry recomputes the minimum past it.
+  if(identity.moved===null) throw new RecoveryRefusedError(`The restored audit identity drew an ID in or past epoch ${epoch}'s range after acceptance checked it, while the installation was held, so acceptance left it unchanged. Authority has moved to target ${target}, whose database stays held, so the source cannot resume. Stop whatever is drawing from the audit identity outside Crew, then retry accept-restore with the same target instance, ${target}.`);
  }
  private async resumeImpl(hooks:Pick<RecoveryHooks,'reconcile'>,manifest:RecoveryManifest|null=null) {
   const {control:c}=await this.status();
