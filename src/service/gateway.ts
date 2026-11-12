@@ -268,11 +268,13 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       loop();
     }
   });
+  let stopping = Promise.resolve();
   server.once("close", () => {
     for (const timer of timers) clearInterval(timer);
-    void dispatcher.stop();
+    stopping = dispatcher.stop();
   });
-  return server;
+  // Settles once the close has ended the dispatcher's pass; await it before closing the pool.
+  return Object.assign(server, { stopped: () => stopping });
 }
 
 const configSchema = z.strictObject({ tokenHashes: credentials, port: z.number().int().min(0).max(65535) });
@@ -294,7 +296,7 @@ async function main() {
     const stop = () => { server.close(); server.closeAllConnections(); };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
-    try { await once(server, "close"); }
+    try { await once(server, "close"); await server.stopped(); }
     finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
   } finally {
     await connection.close();

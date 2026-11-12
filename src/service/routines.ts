@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { WorkflowUpdateFailedError } from "@temporalio/client";
 import type { PoolClient } from "pg";
 import { z } from "zod";
@@ -18,6 +19,8 @@ export const routineLimits = {
   // A claim's lease outlasts one admission attempt, so one process never drives a firing twice at once.
   leaseMs: 2 * 60_000,
   admissionDeadlineMs: 60_000,
+  // A pass waits this long for its drives; a stalled one continues alone and cannot block later passes.
+  driveWaitMs: 75_000,
   observeEveryMs: 5_000,
   batch: 32,
 } as const;
@@ -126,11 +129,13 @@ const createSchema = z.strictObject({
   requestId: lowerUuid, memberId: lowerUuid, schedule: z.string().max(128),
   prompt: submitSchema.shape.text, approvalPolicy: z.enum(approvalPolicies),
 });
-const pageLimit = z.string().regex(/^[1-9][0-9]{0,3}$/).refine(value => Number(value) <= 1000).transform(Number).optional();
+const pageLimit = (maximum: number) => z.string().regex(/^[1-9][0-9]{0,3}$/).refine(value => Number(value) <= maximum)
+  .transform(Number).optional();
 const instant = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/).refine(value => !Number.isNaN(Date.parse(value)))
   .transform(value => new Date(value));
-const listParameters = { after: lowerUuid.optional(), limit: pageLimit };
-const firingParameters = { before: instant.optional(), limit: pageLimit };
+// A routine carries its prompt (up to 16 KiB), so a list page holds at most 100.
+const listParameters = { after: lowerUuid.optional(), limit: pageLimit(100) };
+const firingParameters = { before: instant.optional(), limit: pageLimit(1000) };
 // A strict object still accepts inherited names such as __proto__; the gateway checks names too.
 export const routineListParameterNames: readonly string[] = Object.keys(listParameters);
 export const firingParameterNames: readonly string[] = Object.keys(firingParameters);
@@ -327,15 +332,19 @@ export class RoutineDispatcher {
   private readonly integration: Pick<IntegrationApi, "status" | "cancel">;
   private readonly owners: ReadonlySet<string>;
   private readonly clock: Clock;
+  private readonly driveWaitMs: number;
+  // Drives still running in this process, including any that outlived a pass's wait.
   private readonly driving = new Set<string>();
   private armedAt: Date | null = null;
   private ticking: Promise<void> | undefined;
+  private waiting: AbortController | undefined;
   private stopped = false;
 
   constructor(options: { store: MemberStore; members: Pick<MemberClient, "open" | "accept">;
-    integration: Pick<IntegrationApi, "status" | "cancel">; owners: Iterable<string>; clock: Clock }) {
+    integration: Pick<IntegrationApi, "status" | "cancel">; owners: Iterable<string>; clock: Clock; driveWaitMs?: number }) {
     this.store = options.store; this.members = options.members; this.integration = options.integration;
     this.owners = new Set(options.owners); this.clock = options.clock;
+    this.driveWaitMs = options.driveWaitMs ?? routineLimits.driveWaitMs;
   }
 
   /** One pass. A call while a pass runs joins it instead of starting another. */
@@ -347,7 +356,16 @@ export class RoutineDispatcher {
   /** No pass starts after this; the returned promise settles with the one in flight. */
   stop(): Promise<void> {
     this.stopped = true;
+    this.waiting?.abort();
     return (this.ticking ?? Promise.resolve()).catch(() => {});
+  }
+
+  /** Dispatcher transactions give up on a lock after 10 s rather than stall every later pass. */
+  private transaction<T>(action: (db: PoolClient) => Promise<T>): Promise<T> {
+    return this.store.transaction(async db => {
+      await db.query("SET LOCAL lock_timeout = '10s'");
+      return action(db);
+    });
   }
 
   private async run() {
@@ -358,8 +376,11 @@ export class RoutineDispatcher {
     this.armedAt ??= now;
     try {
       const claims = [...await this.claim(now, this.armedAt), ...await this.expiredLeases(now)];
-      await Promise.allSettled(claims.map(claim => this.drive(claim)));
-      await this.observe(now);
+      const waiting = this.waiting = new AbortController();
+      await Promise.race([Promise.allSettled(claims.map(claim => this.drive(claim))),
+        delay(this.driveWaitMs, undefined, { ref: false, signal: waiting.signal }).catch(() => {})]);
+      waiting.abort();
+      if (!this.stopped) await this.observe(this.clock());
     } catch (error) {
       // The write barrier refused a write: the installation was held after the check above.
       if (error && typeof error === "object" && "code" in error && error.code === "55000") this.armedAt = null;
@@ -368,12 +389,16 @@ export class RoutineDispatcher {
   }
 
   private claim(now: Date, armedAt: Date): Promise<Claim[]> {
-    return this.store.transaction(async db => {
+    return this.transaction(async db => {
       const { rows } = await db.query<DueRoutine>(`SELECT r.routine_id, r.owner_id, r.member_id, r.schedule, r.prompt, r.next_window,
           EXISTS (SELECT 1 FROM birbcrew_ts.routine_firings f WHERE f.routine_id=r.routine_id
             AND f.status IN ('claimed','admitted','waiting')) AS open
         FROM birbcrew_ts.routines r WHERE r.state='enabled' AND r.next_window<=$1
-        ORDER BY r.next_window LIMIT $2 FOR UPDATE OF r SKIP LOCKED`, [now, routineLimits.batch]);
+          -- A recent window this dispatcher was not armed for is left to an armed replica
+          -- (decideWindow's "wait"); keeping it out of the batch lets later windows through.
+          AND NOT (r.next_window>=$3 AND r.next_window<$4)
+        ORDER BY r.next_window LIMIT $2 FOR UPDATE OF r SKIP LOCKED`,
+        [now, routineLimits.batch, new Date(now.getTime() - routineLimits.latenessMs), armedAt]);
       const claims: Claim[] = [];
       for (const routine of rows) {
         const schedule = parseSchedule(routine.schedule)!;
@@ -382,23 +407,25 @@ export class RoutineDispatcher {
         const skip: SkipReason | undefined = act === "missed" ? "missed"
           : !this.owners.has(routine.owner_id) ? "owner_unavailable" : routine.open ? "overlap" : undefined;
         const firing = { ...routine, scheduled_for: window };
+        let unavailable = false;
         if (skip) {
           const { rowCount } = await db.query(`INSERT INTO birbcrew_ts.routine_firings
               (routine_id,scheduled_for,status,reason,recorded_at,settled_at) VALUES ($1,$2,'skipped',$3,$4,$4)
-            ON CONFLICT DO NOTHING`, [routine.routine_id, window, skip, now]);
+            ON CONFLICT (routine_id,scheduled_for) DO NOTHING`, [routine.routine_id, window, skip, now]);
           if (rowCount) await settledFact(db, firing, "skipped", skip);
+          unavailable = rowCount === 1 && skip === "owner_unavailable";
         } else {
           // The identity is drawn once, here; every later attempt reuses it.
           const { rows: [identity] } = await db.query<Pick<Claim, "conversation_id" | "request_id">>(`INSERT INTO birbcrew_ts.routine_firings
               (routine_id,scheduled_for,status,conversation_id,request_id,recorded_at,lease_until)
-            VALUES ($1,$2,'claimed',gen_random_uuid(),gen_random_uuid(),$3,$4) ON CONFLICT DO NOTHING
+            VALUES ($1,$2,'claimed',gen_random_uuid(),gen_random_uuid(),$3,$4) ON CONFLICT (routine_id,scheduled_for) DO NOTHING
             RETURNING conversation_id, request_id`,
             [routine.routine_id, window, now, new Date(now.getTime() + routineLimits.leaseMs)]);
           if (identity) claims.push({ ...firing, ...identity });
         }
         await db.query("UPDATE birbcrew_ts.routines SET next_window=$2 WHERE routine_id=$1 AND state='enabled'",
           [routine.routine_id, nextWindow(schedule, window)]);
-        if (skip === "owner_unavailable") await countOutcome(db, routine.routine_id, "failure", now);
+        if (unavailable) await countOutcome(db, routine.routine_id, "failure", now);
       }
       return claims;
     });
@@ -430,14 +457,15 @@ export class RoutineDispatcher {
         await this.members.accept({ ...key, requestId: claim.request_id, text: claim.prompt }, deadline);
       } catch (error) { refusal = refused(error); }
       const now = this.clock();
-      await this.store.transaction(async db => {
-        const { rows: [current] } = await db.query<{ status: FiringStatus; admitted: boolean }>(`SELECT f.status,
-            EXISTS (SELECT 1 FROM birbcrew_ts.request_admissions a WHERE a.conversation_id=f.conversation_id
-              AND a.request_id=f.request_id) AS admitted
-          FROM birbcrew_ts.routine_firings f WHERE f.routine_id=$1 AND f.scheduled_for=$2 FOR UPDATE OF f`,
-          [claim.routine_id, claim.scheduled_for]);
+      await this.transaction(async db => {
+        const { rows: [current] } = await db.query<{ status: FiringStatus }>(`SELECT status FROM birbcrew_ts.routine_firings
+          WHERE routine_id=$1 AND scheduled_for=$2 FOR UPDATE`, [claim.routine_id, claim.scheduled_for]);
         if (current?.status !== "claimed") return;
-        if (current.admitted) await moveFiring(db, claim, "claimed", "admitted", null, now);
+        // A separate statement: its snapshot sees an admission that committed while the row lock
+        // above waited for recordAcceptance's share lock.
+        const admitted = await db.query("SELECT 1 FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",
+          [claim.conversation_id, claim.request_id]);
+        if (admitted.rowCount) await moveFiring(db, claim, "claimed", "admitted", null, now);
         else if (refusal && await moveFiring(db, claim, "claimed", "failed", "rejected", now)) {
           await countOutcome(db, claim.routine_id, "failure", now);
         }
@@ -459,7 +487,7 @@ export class RoutineDispatcher {
       const key = { ownerId: firing.owner_id, conversationId: firing.conversation_id, requestId: firing.request_id };
       const change = observedFiring(firing, await this.integration.status(key), firing.approval_policy);
       if (change.status !== firing.status || change.reason !== firing.reason) {
-        await this.store.transaction(async db => {
+        await this.transaction(async db => {
           if (await moveFiring(db, firing, firing.status, change.status, change.reason, now) && change.outcome) {
             await countOutcome(db, firing.routine_id, change.outcome, now);
           }

@@ -53,7 +53,8 @@ async function databaseAt(t: TestContext, version = Infinity) {
   return db;
 }
 
-type Hooks = { beforeAdmission?: (input: TurnRequest, attempt: number) => void; afterAdmission?: (input: TurnRequest, attempt: number) => void };
+type Hooks = { beforeAdmission?: (input: TurnRequest, attempt: number) => void | Promise<void>;
+  afterAdmission?: (input: TurnRequest, attempt: number) => void };
 /** A fresh database, one owner and member, a settable clock, and MemberClient doubles that
  * open and admit through the real store as the workflow's activities would. */
 async function harness(t: TestContext, hooks: Hooks = {}) {
@@ -69,7 +70,7 @@ async function harness(t: TestContext, hooks: Hooks = {}) {
     async accept(input: TurnRequest) {
       accepts.push(input);
       const attempt = accepts.filter(({ requestId }) => requestId === input.requestId).length;
-      hooks.beforeAdmission?.(input, attempt);
+      await hooks.beforeAdmission?.(input, attempt);
       await store.recordAcceptance(input, ownerInitiator);
       hooks.afterAdmission?.(input, attempt);
       return { requestId: input.requestId };
@@ -82,7 +83,7 @@ async function harness(t: TestContext, hooks: Hooks = {}) {
   const routines = new RoutineApi(store, clock);
   return {
     db, store, ownerId, member, members, accepts, routines, integration, clock,
-    dispatcher: (owners = [ownerId]) => new RoutineDispatcher({ store, members, integration, owners, clock }),
+    dispatcher: (owners = [ownerId], driveWaitMs?: number) => new RoutineDispatcher({ store, members, integration, owners, clock, driveWaitMs }),
     create: (fields: Record<string, unknown> = {}) => routines.create(ownerId, { requestId: randomUUID(), memberId: member.memberId,
       schedule: "*/15 * * * *", prompt: "scheduled prompt", approvalPolicy: "wait", ...fields }),
     firings: async (routineId: string) => (await db.query(`SELECT scheduled_for AS "scheduledFor", status, reason,
@@ -176,7 +177,7 @@ test("the routine routes are strict, bounded, idempotent and owner-scoped", asyn
   for (const query of ["?limit=0", "?limit=1001", "?before=2031-01-06", "?before=yesterday", "?after=" + routineId, "?limit=1&limit=2", "?__proto__=1"]) {
     assert.deepEqual(await g.api(path + "/firings" + query), { status: 400, body: { error: "invalid_input" } }, query);
   }
-  for (const query of ["?after=not-a-uuid", "?before=" + T0, "?limit=1&limit=1"]) {
+  for (const query of ["?after=not-a-uuid", "?before=" + T0, "?limit=1&limit=1", "?limit=101"]) {
     assert.deepEqual(await g.api("/v1/routines" + query), { status: 400, body: { error: "invalid_input" } }, query);
   }
 
@@ -247,6 +248,31 @@ test("an owner never has more than 20 enabled routines, even under concurrent cr
   assert.equal(reenabled.filter(outcome => outcome.status === "fulfilled").length, 5);
   const { rows: [count] } = await pool.query("SELECT count(*)::integer AS n FROM birbcrew_ts.routines WHERE owner_id=$1 AND state='enabled'", [ownerId]);
   assert.equal(count.n, 20);
+
+  // Deterministically: an uncommitted 20th routine makes a 21st create wait on the owner's lock,
+  // then refuses it once the 20th commits. Without the lock both would count 19.
+  const other = "owner-" + randomUUID();
+  const own = await store.spawn({ ownerId: other, requestId: randomUUID(), engine: "pi", profile: "fixture" });
+  const make = () => ({ ...body(), memberId: own.memberId });
+  for (let i = 0; i < 19; i++) await routines.create(other, make());
+  const holder = await pool.connect();
+  try {
+    await holder.query("BEGIN");
+    await holder.query(`INSERT INTO birbcrew_ts.routines (owner_id,create_request_id,member_id,schedule,prompt,approval_policy,created_at,state,next_window)
+      VALUES ($1,$2,$3,'0 * * * *','p','wait',$4,'enabled',$4)`, [other, randomUUID(), own.memberId, T0]);
+    let settled = false;
+    const late = routines.create(other, make()).finally(() => { settled = true; });
+    late.catch(() => {});
+    for (let i = 0; i < 100 && !settled && !(await pool.query("SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted")).rowCount; i++) {
+      await delay(20);
+    }
+    await delay(100);
+    assert.equal(settled, false, "the second enable waits for the first to commit");
+    await holder.query("COMMIT");
+    await assert.rejects(late, { code: "routine_limit" });
+  } finally { holder.release(); }
+  const { rows: [capped] } = await pool.query("SELECT count(*)::integer AS n FROM birbcrew_ts.routines WHERE owner_id=$1 AND state='enabled'", [other]);
+  assert.equal(capped.n, 20);
 });
 
 test("two dispatchers at the same instant fire each window once, with one identity", async (t) => {
@@ -293,6 +319,84 @@ test("an ambiguous admission keeps the firing claimed and retries the same ident
   assert.deepEqual(await h.firings(before.routineId), [{ ...claimed, status: "admitted" }]);
   const { rows } = await h.db.query("SELECT conversation_id, request_id FROM birbcrew_ts.request_admissions WHERE conversation_id=$1", [claimed.conversationId]);
   assert.deepEqual(rows, [{ conversation_id: claimed.conversationId, request_id: claimed.requestId }]);
+});
+
+test("a refusal that races an earlier attempt's admission settles as admitted, not failed", async (t) => {
+  // The retried attempt is refused while an earlier attempt's admission is still in flight: it holds
+  // the firing's share lock, as recordAcceptance does, and commits only once settlement waits for it.
+  let straggle: ((input: TurnRequest) => Promise<void>) | undefined;
+  const h = await harness(t, { beforeAdmission: async input => {
+    if (!straggle) throw new Error("timeout");
+    await straggle(input);
+    throw new MemberStoreError("conflict");
+  } });
+  const routine = await h.create();
+  const dispatcher = h.dispatcher();
+  await dispatcher.tick();
+  h.at(window(15));
+  await dispatcher.tick();
+  assert.equal((await h.firings(routine.routineId))[0].status, "claimed");
+  const straggler = await h.db.connect();
+  try {
+    straggle = async input => {
+      await straggler.query("BEGIN");
+      await straggler.query("SELECT 1 FROM birbcrew_ts.routine_firings WHERE conversation_id=$1 FOR SHARE", [input.conversationId]);
+      await straggler.query(`INSERT INTO birbcrew_ts.request_admissions (conversation_id,request_id,prompt_digest,initiator_kind,initiator_id)
+        VALUES ($1,$2,$3,'routine',$4)`, [input.conversationId, input.requestId, createHash("sha256").update(input.text).digest(), routine.routineId]);
+    };
+    h.advance(routineLimits.leaseMs);
+    const pass = dispatcher.tick();
+    let waited = false;
+    for (let i = 0; i < 300 && !waited; i++) {
+      waited = !!(await h.db.query("SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'")).rowCount;
+      if (!waited) await delay(10);
+    }
+    assert.ok(waited, "settlement waits for the in-flight admission's share lock");
+    await straggler.query("COMMIT");
+    await pass;
+  } finally { straggler.release(); }
+  assert.deepEqual((await h.firings(routine.routineId)).map(f => f.status), ["admitted"]);
+  assert.equal((await h.routine(routine.routineId)).consecutive_failures, 0);
+});
+
+test("a stalled drive holds up no later pass and is not driven twice by its process", { timeout: 30_000 }, async (t) => {
+  let release = () => {};
+  const stalled = new Promise<void>(resolve => { release = resolve; });
+  const h = await harness(t, { beforeAdmission: input => input.text === "stalls" ? stalled : undefined });
+  const slow = await h.create({ prompt: "stalls" });
+  const quick = await h.create();
+  const dispatcher = h.dispatcher([h.ownerId], 200);
+  await dispatcher.tick();
+  h.at(window(15));
+  const started = Date.now();
+  await dispatcher.tick();
+  assert.ok(Date.now() - started < 5_000, "the pass ends without its stalled drive");
+  assert.deepEqual([(await h.firings(slow.routineId))[0].status, (await h.firings(quick.routineId))[0].status], ["claimed", "admitted"]);
+  h.advance(routineLimits.leaseMs + 1_000);
+  await dispatcher.tick();
+  assert.equal(h.accepts.filter(({ text }) => text === "stalls").length, 1, "its own expired lease is not re-driven while it runs");
+  release();
+  for (let i = 0; i < 100 && (await h.firings(slow.routineId))[0].status === "claimed"; i++) await delay(20);
+  assert.equal((await h.firings(slow.routineId))[0].status, "admitted");
+});
+
+test("windows this dispatcher waits on do not crowd a due window out of its batch", async (t) => {
+  const h = await harness(t);
+  const other = "owner-" + randomUUID();
+  const member = await h.store.spawn({ ownerId: other, requestId: randomUUID(), engine: "pi", profile: "fixture" });
+  for (let i = 0; i < 20; i++) await h.create();
+  for (let i = 0; i < 13; i++) await h.routines.create(other, { requestId: randomUUID(), memberId: member.memberId,
+    schedule: "*/15 * * * *", prompt: "p", approvalPolicy: "wait" });
+  const later = await h.routines.create(other, { requestId: randomUUID(), memberId: member.memberId,
+    schedule: "18 * * * *", prompt: "p", approvalPolicy: "wait" });
+  const dispatcher = h.dispatcher([h.ownerId, other]);
+  h.at(window(17));
+  await dispatcher.tick(); // armed at 10:17: 33 windows of 10:15 are left to an armed replica
+  h.at(window(18));
+  await dispatcher.tick();
+  assert.deepEqual((await h.firings(later.routineId)).map(f => [f.scheduledFor.toISOString(), f.status]), [[window(18).toISOString(), "admitted"]]);
+  const { rows: [{ n }] } = await h.db.query("SELECT count(*)::integer AS n FROM birbcrew_ts.routine_firings WHERE scheduled_for=$1", [window(15)]);
+  assert.equal(n, 0);
 });
 
 test("missed, unarmed, overlapping and owner-unavailable windows are skipped; only the last counts as a failure", async (t) => {
