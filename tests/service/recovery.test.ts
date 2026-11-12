@@ -27,7 +27,9 @@ async function setup() {
  const recovery=new InstallationRecovery(pool,fence);await recovery.initializeFence();
  const bundle=join(directory,'bundle');await import('node:fs/promises').then(fs=>fs.mkdir(bundle));
  const hooks:RecoveryHooks={quiesce:async()=>{},snapshot:async dir=>{const artifacts=[];for(const kind of ['application-postgres','temporal-persistence','native-volumes','configuration'] as const){const file=kind+'.fixture';await writeFile(join(dir,file),'private fixture '+kind);artifacts.push({kind,file});}return artifacts;},reconcile:async()=>{}};
- return {name,pool,store,directory,fence,recovery,bundle,hooks,cleanup:async()=>{await pool.end();await admin.query(`DROP DATABASE ${name} WITH(FORCE)`);await rm(directory,{recursive:true,force:true});}};
+ // Not FORCE: end() resolves before its connections close, and terminating one then is an unhandled pool
+ // error. A plain DROP waits up to 5 s for those sessions to exit, and fails loudly on a real leak.
+ return {name,pool,store,directory,fence,recovery,bundle,hooks,cleanup:async()=>{await pool.end();await admin.query(`DROP DATABASE ${name}`);await rm(directory,{recursive:true,force:true});}};
 }
 
 test('freeze blocks every domain writer including TRUNCATE, survives reconnect, and interrupted capture stays held',async()=>{
@@ -154,7 +156,7 @@ test('real PostgreSQL archive restores mappings, checkpoint, committed replay an
   assert.ok(BigInt(next.id)>BigInt(audit.at(-1)!.event_id),'restored identity continues after the restored rows');
   assert.deepEqual(await store.beginTurn(request),{kind:'replay',reply:'recorded'});
   assert.equal((await restored.query('SELECT phase FROM birbcrew_ts.turns WHERE request_id=$1',[pending.requestId])).rows[0].phase,'started');
- } finally {await restored?.end();await admin.query(`DROP DATABASE IF EXISTS ${restoredName} WITH(FORCE)`);await t.cleanup();}
+ } finally {await restored?.end();await admin.query(`DROP DATABASE IF EXISTS ${restoredName}`);await t.cleanup();}
 });
 
 test('SIGKILL after external activation before database activation is safely retryable on restored instance',async()=>{
@@ -219,7 +221,7 @@ test('retained A backup restores to C after A→B, but only after current owner 
   await assert.rejects(t.recovery.resume(t.hooks),/fenced/);
   await assert.rejects(t.fence.transfer(manifest.installation,instanceB,randomUUID(),manifest.generation),/overlap/);
   await c.resume(t.hooks,manifest);assert.equal((await c.status()).control.phase,'active');
- }finally{await poolC?.end();await admin.query(`DROP DATABASE IF EXISTS ${nameC} WITH(FORCE)`);await t.cleanup();}
+ }finally{await poolC?.end();await admin.query(`DROP DATABASE IF EXISTS ${nameC}`);await t.cleanup();}
 });
 
 async function dumpToBundle(t:Awaited<ReturnType<typeof setup>>) {
@@ -273,7 +275,6 @@ test('a restored audit trail never reissues an event ID, even when one generatio
   assert.deepEqual([firstOnB,onB,onC],[1n<<44n,(2n<<44n)-1n,2n<<44n].map(String),'each timeline starts at its epoch times 2^44');
  } finally {
   for(const pool of pools) await pool.end();
-  // Not FORCE: end() resolves before its connections close, and terminating one then is an unhandled pool error.
   for(const name of databases) await admin.query(`DROP DATABASE IF EXISTS ${name}`);
   await t.cleanup();
  }

@@ -337,8 +337,9 @@ By direct SQL it checks:
 - spreadsheet formula prefixes in CSV cells, and that a plain RFC 4180 reader
   recovers the exact values;
 - migration 21 on a version-20 database with members and conversations: the locks
-  it takes on existing tables, and that it completes while a native turn holds its
-  admission and that turn still writes to its conversation;
+  it takes on existing tables, that it completes while a native turn holds its
+  admission and that turn still writes to its conversation, and that the identity's
+  cache is 1;
 - that the TypeScript and SQL registries match.
 
 Run the suites one after another, as above. Gateway-starting suites

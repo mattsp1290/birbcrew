@@ -1,6 +1,6 @@
 import {acquireRecoveryNativeLease,requireRecoveryActive} from "./recovery-admission.ts";
 /** Trusted backend-only API. Never construct authority from an observer request. */
-import { appendAudit } from "./audit.ts";
+import { appendAudit, trustedToolName } from "./audit.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { Client, type Pool, type PoolClient } from "pg";
 import { z } from "zod";
@@ -50,7 +50,7 @@ export function toolManifest(app: TrustedApplication) {
   if (typeof app.authorize !== "function" || app.tools.length > 8) throw new TrustedContextError("limit");
   const names = new Set<string>();
   return app.tools.map(tool => {
-    if (!/^[a-z][a-z0-9_]{0,63}$/.test(tool.name) || names.has(tool.name)) throw new TrustedContextError("conflict");
+    if (!trustedToolName.test(tool.name) || names.has(tool.name)) throw new TrustedContextError("conflict");
     names.add(tool.name); text(2048).parse(tool.description);
     if (tool.kind !== "read" && tool.kind !== "effect") throw new TrustedContextError("conflict");
     for (const [n,max] of [[tool.maxArgumentBytes,16_384],[tool.maxResultBytes,65_536],[tool.deadlineMs,30_000]]) {

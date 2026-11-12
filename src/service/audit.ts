@@ -6,6 +6,8 @@ import { engineSchema } from "./domain.ts";
 
 const uuid = z.uuid();
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
+/** Trusted-context registration accepts exactly the tool names an audit row can hold. */
+export const trustedToolName = /^[a-z][a-z0-9_]{0,63}$/;
 
 // Each key names one partial unique index in 021-audit.sql. A naming mismatch fails
 // loudly, and unrelated conflicts (such as a primary key) still raise errors.
@@ -33,7 +35,7 @@ export const auditEvents = {
     reason: z.enum(["predecessor_failed", "predecessor_cancelled", "admission_unconfirmed"]).optional(),
   }) },
   "trusted_effect.completed": { actor: "system", key: "((payload->>'operationId')) WHERE event_type = 'trusted_effect.completed'",
-    payload: z.strictObject({ operationId: uuid, toolName: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/) }) },
+    payload: z.strictObject({ operationId: uuid, toolName: z.string().regex(trustedToolName) }) },
 } as const;
 export type AuditEventType = keyof typeof auditEvents;
 export const auditEventTypes = Object.keys(auditEvents) as AuditEventType[];
@@ -104,8 +106,9 @@ async function stableHorizon(pool: Pool): Promise<string> {
       WHEN pg_try_advisory_xact_lock(hashtextextended('birbcrew_ts.audit_events', 0))
       THEN (SELECT coalesce(max(event_id), 0) FROM birbcrew_ts.audit_events)::text END AS horizon`);
     if (row.horizon !== null) return row.horizon;
-    if (Date.now() > deadline) throw new AuditUnsettledError();
-    await delay(wait);
+    const left = deadline - Date.now();
+    if (left <= 0) throw new AuditUnsettledError();
+    await delay(Math.min(wait, left));
   }
 }
 

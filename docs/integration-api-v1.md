@@ -197,8 +197,10 @@ or a writer process stalled mid-transaction, it returns `503 audit_unsettled` wi
 digits; compare them as 64-bit integers, not as strings or JavaScript numbers. A
 restore removes the events after its recovery point, and new event IDs jump to a
 range above every earlier ID, so a saved cursor never skips a new event; the audit
-trail guide states the conditions. CSV cells that a spreadsheet would run as a
-formula start with an extra `'`.
+trail guide states the conditions. Any CSV cell that starts with `=`, `+`, `-`,
+`@`, tab, CR or `'` gets one extra leading `'`, so a spreadsheet shows it as text;
+to recover the exact value, remove one leading `'` from any cell that starts with
+it.
 Payloads hold identifiers, digests, choices and statuses only, never prompt or
 reply text, tool arguments or credentials. See [the audit trail](audit-trail.md)
 for the event registry, field semantics and limits.

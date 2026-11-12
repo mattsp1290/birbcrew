@@ -602,4 +602,8 @@ test("migration 21 upgrades a v20 database with rows while a native turn holds i
   } finally { client.release(); }
   const { rows: types } = await upgraded.query("SELECT event_type FROM birbcrew_ts.audit_events WHERE owner_id=$1 ORDER BY event_id", [ownerId]);
   assert.deepEqual(types.map(row => row.event_type), ["request.accepted", "member.spawned"]);
+  // stableHorizon's paging proof needs IDs drawn in order, which a session cache would break.
+  const { rows: [identity] } = await upgraded.query(`SELECT seqcache::integer AS cache FROM pg_sequence
+    WHERE seqrelid=pg_get_serial_sequence('birbcrew_ts.audit_events','event_id')::regclass`);
+  assert.equal(identity.cache, 1);
 });
