@@ -1,4 +1,4 @@
-import { lookup as resolve } from "node:dns/promises";
+import { Resolver } from "node:dns/promises";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { BlockList, isIP, type LookupFunction } from "node:net";
@@ -20,8 +20,8 @@ export type TargetPolicy = {
   /** BIRBCREW_WEBHOOK_ALLOW_INSECURE_TARGETS=1: plain http, loopback and private addresses, for local
    * testing only. Link-local, metadata and other special addresses stay refused. */
   allowInsecure: boolean;
-  /** Tests replace DNS; production uses the system resolver. */
-  lookup?: (hostname: string) => Promise<ResolvedAddress[]>;
+  /** Tests replace DNS; production asks the configured DNS servers. `signal` aborts at the timeout. */
+  lookup?: (hostname: string, signal: AbortSignal) => Promise<ResolvedAddress[]>;
 };
 export const defaultTargetPolicy: TargetPolicy = Object.freeze({ allowInsecure: false });
 
@@ -52,7 +52,8 @@ const never4 = blocks([["0.0.0.0", 8], ["169.254.0.0", 16], ["192.0.0.0", 24], [
 const private4 = blocks([["127.0.0.0", 8], ["10.0.0.0", 8], ["172.16.0.0", 12], ["192.168.0.0", 16], ["100.64.0.0", 10]], "ipv4");
 // IPv4-mapped, NAT64, 6to4 and Teredo addresses embed an IPv4 address this check would not see.
 const never6 = blocks([["::", 128], ["::ffff:0:0", 96], ["64:ff9b::", 96], ["64:ff9b:1::", 48], ["100::", 64],
-  ["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8], ["fd00:ec2::254", 128]], "ipv6");
+  ["2001::", 23], ["2001:db8::", 32], ["3fff::", 20], ["2002::", 16], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8],
+  ["fd00:ec2::254", 128], ["fd20:ce::254", 128]], "ipv6");
 const private6 = blocks([["::1", 128], ["fc00::", 7]], "ipv6");
 const global6 = blocks([["2000::", 3]], "ipv6");
 
@@ -87,8 +88,16 @@ export function parseTarget(input: string, policy: TargetPolicy): URL {
   return target;
 }
 
-async function systemLookup(hostname: string): Promise<ResolvedAddress[]> {
-  return (await resolve(hostname, { all: true, order: "verbatim" })).map(({ address, family }) => ({ address, family: family === 6 ? 6 : 4 }));
+// DNS queries through c-ares, not getaddrinfo: getaddrinfo blocks one of libuv's four pool threads
+// until the resolver gives up, so names whose servers never answer could starve the gateway's file,
+// crypto and database-connect work. The hosts file is not read.
+async function systemLookup(hostname: string, signal: AbortSignal): Promise<ResolvedAddress[]> {
+  const resolver = new Resolver({ timeout: 2_000, tries: 2 });
+  signal.addEventListener("abort", () => resolver.cancel(), { once: true });
+  const [v4, v6] = await Promise.allSettled([resolver.resolve4(hostname), resolver.resolve6(hostname)]);
+  if (v4.status === "rejected" && v6.status === "rejected") throw v4.reason;
+  return [...(v4.status === "fulfilled" ? v4.value.map(address => ({ address, family: 4 as const })) : []),
+    ...(v6.status === "fulfilled" ? v6.value.map(address => ({ address, family: 6 as const })) : [])];
 }
 
 /** Every address the name resolves to, each allowed. One refused address refuses them all, so a
@@ -103,7 +112,7 @@ export async function resolveTarget(target: URL, policy: TargetPolicy): Promise<
   const timer = new AbortController();
   let addresses: ResolvedAddress[];
   try {
-    addresses = await Promise.race([(policy.lookup ?? systemLookup)(host),
+    addresses = await Promise.race([(policy.lookup ?? systemLookup)(host, timer.signal),
       delay(targetLimits.resolveTimeoutMs, undefined, { signal: timer.signal }).then(() => { throw new TargetRefusedError("resolution"); })]);
   } catch (error) {
     if (error instanceof TargetRefusedError) throw error;
@@ -135,7 +144,8 @@ export function postToTarget(target: URL, addresses: readonly ResolvedAddress[],
     const sent = (secure ? httpsRequest : httpRequest)({
       hostname: host, port: target.port || undefined, path: target.pathname + target.search, method: "POST",
       headers: { ...headers, "Content-Length": String(Buffer.byteLength(body)) },
-      agent: false, lookup: pinned, signal, ...(secure && !isIP(host) ? { servername: host } : {}),
+      // rejectUnauthorized given explicitly, so NODE_TLS_REJECT_UNAUTHORIZED=0 cannot turn verification off here.
+      agent: false, lookup: pinned, signal, ...(secure ? { rejectUnauthorized: true, ...(!isIP(host) && { servername: host }) } : {}),
     });
     const connectTimer = setTimeout(() => sent.destroy(new TargetUnreachableError("timeout")), timeouts.connectMs);
     sent.once("socket", socket => socket.once(secure ? "secureConnect" : "connect", () => clearTimeout(connectTimer)));
@@ -146,7 +156,8 @@ export function postToTarget(target: URL, addresses: readonly ResolvedAddress[],
       response.on("error", () => {});
       response.on("data", (chunk: Buffer) => { read += chunk.length; if (read >= targetLimits.responseBytes) response.destroy(); });
     });
-    sent.once("error", error => {
+    // `on`, not `once`: a second error after the first must never be an uncaught exception.
+    sent.on("error", error => {
       clearTimeout(connectTimer);
       if (error instanceof TargetUnreachableError) return fail(error);
       if (stop.aborted) return fail(new TargetUnreachableError("aborted"));

@@ -34,8 +34,8 @@ test("only public unicast addresses are allowed; the insecure setting adds loopb
   // benchmark ranges, and IPv6 forms that embed an IPv4 address.
   for (const address of ["0.0.0.0", "169.254.169.254", "169.254.170.2", "100.100.100.200", "168.63.129.16", "192.0.0.192", "192.0.2.1",
     "198.18.0.1", "198.51.100.7", "203.0.113.9", "224.0.0.1", "239.255.255.250", "240.0.0.1", "255.255.255.255",
-    "::", "fe80::1", "fec0::1", "ff02::1", "fd00:ec2::254", "::ffff:127.0.0.1", "::ffff:169.254.169.254", "::ffff:8.8.8.8",
-    "64:ff9b::a00:1", "2002:a00:1::1", "2001::1", "2001:db8::1", "100::1", "::127.0.0.1"]) {
+    "::", "fe80::1", "fec0::1", "ff02::1", "fd00:ec2::254", "fd20:ce::254", "::ffff:127.0.0.1", "::ffff:169.254.169.254", "::ffff:8.8.8.8",
+    "64:ff9b::a00:1", "2002:a00:1::1", "2001::1", "2001:db8::1", "3fff::1", "100::1", "::127.0.0.1"]) {
     assert.equal(addressAllowed(address, secure), false, address);
     assert.equal(addressAllowed(address, insecure), false, address);
   }

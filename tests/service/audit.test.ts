@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Pool } from "pg";
 import { z } from "zod";
 import { ApprovalStore } from "../../src/service/approvals.ts";
-import { appendAudit, auditCsv, auditEventTypes, auditQuerySchema, auditSettleWindowMs,
+import { appendAudit, auditCsv, auditEvents, auditEventTypes, auditQuerySchema, auditSettleWindowMs,
   type AuditEvent, type AuditEventType, type AuditFact } from "../../src/service/audit.ts";
 import { ChildStore } from "../../src/service/children.ts";
 import type { MemberClient } from "../../src/service/client.ts";
@@ -114,6 +114,12 @@ test("each owner action appears once, attributed and in order, and never to anot
   const scope = { ownerId: f.ownerId, memberId, conversationId, requestId };
   const approval = await approvals.propose({ ...scope, token: turn.token, invocationId: requestId, nativeCallId: "audit-call",
     toolName: "record_work_item", arguments: { operation_id: requestId, note: "private-fixture-note" } });
+  const [requested] = await f.appended("approval.requested");
+  assert.deepEqual({ actor: requested.actor, initiator: requested.initiator, payload: requested.payload }, { actor: system, initiator: owner,
+    payload: { approvalId: approval.approvalId, invocationId: requestId, toolName: "record_work_item", argumentDigest: approval.argumentDigest } });
+  // A retried proposal of the same call records nothing new.
+  await approvals.propose({ ...scope, token: turn.token, invocationId: requestId, nativeCallId: "audit-call",
+    toolName: "record_work_item", arguments: { operation_id: requestId, note: "private-fixture-note" } });
   await f.appended();
   const decided = await f.api(`/v1/conversations/${conversationId}/human`, { memberId, requestId, invocationId: requestId,
     approvalId: approval.approvalId, version: approval.version, choice: "approve" });
@@ -147,7 +153,7 @@ test("each owner action appears once, attributed and in order, and never to anot
   assert.deepEqual(rejected.payload, { status: "cancelled", reason: "predecessor_cancelled" });
 
   const all = await f.audit();
-  assert.deepEqual(all.events.map(event => event.type), ["member.spawned", "conversation.opened", "request.accepted",
+  assert.deepEqual(all.events.map(event => event.type), ["member.spawned", "conversation.opened", "request.accepted", "approval.requested",
     "approval.decided", "work_item.committed", "request.finished", "request.accepted", "request.cancellation_requested", "request.finished"]);
   assert.ok(all.events.every((event, i) => i === 0 || BigInt(event.eventId) > BigInt(all.events[i - 1].eventId)));
   assert.ok(all.events.every((event, i) => i === 0 || event.occurredAt >= all.events[i - 1].occurredAt));
@@ -220,7 +226,7 @@ test("retries, replays and repeated deliveries never duplicate a fact", async ()
   await new ChildStore(pool).quarantineDelegation(conversation, delegated, execution.workflowRunId);
 
   assert.deepEqual(await counts(ownerId), {
-    "approval.decided": 1, "conversation.opened": 2, "member.spawned": 1, "request.accepted": 4,
+    "approval.decided": 1, "approval.requested": 1, "conversation.opened": 2, "member.spawned": 1, "request.accepted": 4,
     "request.cancellation_requested": 2, "request.finished": 4, "work_item.committed": 1,
   });
   const { rows } = await pool.query("SELECT payload FROM birbcrew_ts.audit_events WHERE owner_id=$1 AND event_type='request.finished' ORDER BY event_id", [ownerId]);
@@ -398,7 +404,7 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
   try {
     await db.query("BEGIN");
     const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), digest = "0".repeat(64);
-    const routineId = randomUUID(), memoryId = randomUUID();
+    const routineId = randomUUID(), memoryId = randomUUID(), webhookId = randomUUID();
     const { rows: [{ member_id: memberId }] } = await db.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
       (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi',$3) RETURNING member_id`, [ownerId, randomUUID(), profile]);
     await db.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)",
@@ -426,9 +432,16 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
       "memory.created": { payload: { memoryId } },
       "memory.deleted": { payload: { memoryId } },
       "memory.suspended": { payload: { memoryId, reason: "recovery_restore" } },
+      "approval.requested": { conversationId, requestId, payload: { approvalId: randomUUID(), invocationId: requestId,
+        toolName: "choose_next_step", argumentDigest: digest } },
+      "webhook.created": { payload: { webhookId, revision: 1, host: "hooks.example.com", kinds: ["request.finished"] } },
+      "webhook.enabled": { payload: { webhookId, revision: 3, host: "hooks.example.com" } },
+      "webhook.disabled": { payload: { webhookId, revision: 2, host: "hooks.example.com", reason: "consecutive_failures" } },
+      "webhook.deleted": { payload: { webhookId, revision: 4, host: "hooks.example.com" } },
     };
     for (const type of auditEventTypes) {
-      const fact = { type, ownerId, memberId, ...samples[type] } as AuditFact<typeof type>;
+      // A type that belongs to no member names none.
+      const fact = { type, ownerId, memberId: "member" in auditEvents[type] ? null : memberId, ...samples[type] } as AuditFact<typeof type>;
       await appendAudit(db, fact);
       await appendAudit(db, fact);
     }
@@ -541,7 +554,7 @@ test("a Claude turn recovered to a pending decision is finished once, by its com
 
   const { rows } = await pool.query("SELECT payload->>'status' AS status FROM birbcrew_ts.audit_events WHERE owner_id=$1 AND event_type='request.finished'", [ownerId]);
   assert.deepEqual(rows.map(row => row.status), ["completed"]);
-  assert.deepEqual(await counts(ownerId), { "approval.decided": 1, "conversation.opened": 1, "member.spawned": 1,
+  assert.deepEqual(await counts(ownerId), { "approval.decided": 1, "approval.requested": 1, "conversation.opened": 1, "member.spawned": 1,
     "request.accepted": 1, "request.finished": 1, "work_item.committed": 1 });
 });
 

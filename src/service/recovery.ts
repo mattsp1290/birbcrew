@@ -6,6 +6,7 @@ import { Client, type Pool, type PoolClient } from 'pg';
 import { z } from 'zod';
 import { fenceEpochLimit, RecoveryRefusedError, type RecoveryFence } from './recovery-fence.ts';
 import { appendAudit } from './audit.ts';
+import { settleRestoredWebhooks } from './webhooks.ts';
 export { RecoveryRefusedError } from './recovery-fence.ts';
 
 const id=z.uuid();
@@ -60,6 +61,8 @@ async function settleRestoredState(db:PoolClient,activate:()=>Promise<boolean>) 
   SELECT memory_id,owner_id,member_id FROM suspended ORDER BY created_at,memory_id`);
  for(const memory of memories) await appendAudit(db,{type:'memory.suspended',ownerId:memory.owner_id,memberId:memory.member_id,
   payload:{memoryId:memory.memory_id,reason:'recovery_restore'}});
+ // Webhook endpoints are disabled and undelivered rows cancelled: nothing from before the restore is sent.
+ await settleRestoredWebhooks(db);
 }
 export type SnapshotArtifact={kind:RecoveryManifest['artifacts'][number]['kind'];file:string};
 /** Hooks are trusted operator code, not user/AG-UI input. They must stop ALL
