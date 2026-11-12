@@ -2,8 +2,9 @@ import json
 import os
 from functools import cache
 from pathlib import Path, PurePosixPath
+from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from birbcrew.execution.contract import Digest, ExecutionInput, Identity, Record, digest
 
@@ -46,12 +47,27 @@ class Repository(Record):
         )
 
 
+class ClaudeReviewer(Record):
+    kind: Literal["claude"]
+
+
+class OpenCodeGoReviewer(Record):
+    kind: Literal["opencode-go"]
+    subscription_evidence: Path
+    api_key_file: Path | None = None
+
+
+Reviewer = Annotated[ClaudeReviewer | OpenCodeGoReviewer, Field(discriminator="kind")]
+
+
 class ExecutionSettings(Record):
     repository: Repository
     worktree_root: Path
     artifact_root: Path
     codex: Path
-    claude: Path
+    codex_socket: Path | None = None
+    reviewer: Reviewer = ClaudeReviewer(kind="claude")
+    claude: Path | None = None
     git: Path
     gh: Path
     task_queue: str
@@ -60,16 +76,23 @@ class ExecutionSettings(Record):
 
     @model_validator(mode="after")
     def absolute_paths(self):
+        optional = (self.codex_socket, self.claude)
+        if isinstance(self.reviewer, OpenCodeGoReviewer):
+            optional += (self.reviewer.subscription_evidence, self.reviewer.api_key_file)
         for path in (
             self.worktree_root,
             self.artifact_root,
             self.codex,
-            self.claude,
             self.git,
             self.gh,
+            *(path for path in optional if path is not None),
         ):
             if not path.is_absolute():
                 raise ValueError("installation_requires_absolute_paths")
+        if self.reviewer.kind == "claude" and self.claude is None:
+            raise ValueError("claude_reviewer_requires_claude_path")
+        if self.reviewer.kind != "claude" and self.claude is not None:
+            raise ValueError("claude_path_requires_claude_reviewer")
         if self.binding_revision != self.repository.revision:
             raise ValueError("binding_revision_mismatch")
         return self
@@ -103,6 +126,13 @@ class ExecutionSettings(Record):
 
 @cache
 def installation() -> ExecutionSettings:
-    return ExecutionSettings.model_validate(
-        json.loads(Path(os.environ["BIRBCREW_EXECUTION_CONFIG"]).read_text())
-    )
+    try:
+        return ExecutionSettings.model_validate(
+            json.loads(Path(os.environ["BIRBCREW_EXECUTION_CONFIG"]).read_text())
+        )
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(map(str, item['loc'])) or 'settings'}: {item['msg']}"
+            for item in error.errors(include_input=False, include_url=False)
+        )
+        raise ValueError(f"execution_config_invalid: {problems}") from None
