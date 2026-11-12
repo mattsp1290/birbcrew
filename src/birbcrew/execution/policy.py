@@ -2,6 +2,7 @@ import json
 import os
 from functools import cache
 from pathlib import Path, PurePosixPath
+from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
@@ -46,12 +47,27 @@ class Repository(Record):
         )
 
 
+class ClaudeReviewer(Record):
+    kind: Literal["claude"]
+
+
+class OpenCodeGoReviewer(Record):
+    kind: Literal["opencode-go"]
+    subscription_evidence: Path
+    api_key_file: Path | None = None
+
+
+Reviewer = Annotated[ClaudeReviewer | OpenCodeGoReviewer, Field(discriminator="kind")]
+
+
 class ExecutionSettings(Record):
     repository: Repository
     worktree_root: Path
     artifact_root: Path
     codex: Path
-    claude: Path
+    codex_socket: Path | None = None
+    reviewer: Reviewer = ClaudeReviewer(kind="claude")
+    claude: Path | None = None
     git: Path
     gh: Path
     task_queue: str
@@ -60,16 +76,23 @@ class ExecutionSettings(Record):
 
     @model_validator(mode="after")
     def absolute_paths(self):
+        optional = (self.codex_socket, self.claude)
+        if isinstance(self.reviewer, OpenCodeGoReviewer):
+            optional += (self.reviewer.subscription_evidence, self.reviewer.api_key_file)
         for path in (
             self.worktree_root,
             self.artifact_root,
             self.codex,
-            self.claude,
             self.git,
             self.gh,
+            *(path for path in optional if path is not None),
         ):
             if not path.is_absolute():
                 raise ValueError("installation_requires_absolute_paths")
+        if self.reviewer.kind == "claude" and self.claude is None:
+            raise ValueError("claude_reviewer_requires_claude_path")
+        if self.reviewer.kind != "claude" and self.claude is not None:
+            raise ValueError("claude_path_requires_claude_reviewer")
         if self.binding_revision != self.repository.revision:
             raise ValueError("binding_revision_mismatch")
         return self

@@ -1,6 +1,6 @@
 # Approved documentation delivery pilot
 
-Birbforge owns approval and the delivery workflow. Crew runs three versioned Temporal activities on the subscription-authenticated executor host. The activities author an approved documentation change, obtain an independent Claude review, and publish the reviewed commit as a draft GitHub PR. They do not merge or deploy it.
+Birbforge owns approval and the delivery workflow. Crew runs three versioned Temporal activities on the subscription-authenticated executor host. The activities author an approved documentation change, obtain an independent review from the installed reviewer, and publish the reviewed commit as a draft GitHub PR. They do not merge or deploy it.
 
 The public contract is generated from `execution/contract.py` into `contracts/execution.v1/schema.json`. Approval binds an immutable goal record, its content digest, repository, base commit, installed policy revision, exact documentation paths and trusted acceptance identifier. Birbforge computes the offer digest and clients echo it. Digests use UTF-8 JSON with sorted object keys, no insignificant whitespace and unescaped Unicode. Contract offers contain no floating-point values. The installation selects one record from a dedicated Beans hub; it must not read the owner's default hub or reuse `FixtureHub` as a live adapter.
 
@@ -18,7 +18,7 @@ Run the API alongside Birbforge's loopback gateway. Set `mode` to `approved-goal
 BIRBCREW_CONFIG=/private/crew.json python -m uvicorn birbcrew.api:app --host 127.0.0.1 --port 8000
 ```
 
-Run the activity worker on the host containing the existing managed Codex daemon and Claude subscription login.
+Run the activity worker on the host containing the existing managed Codex daemon and, when the Claude reviewer is selected, the Claude subscription login. [The in-cluster executor](in-cluster-executor.md) describes the container image and the OpenCode Go reviewer.
 
 ```sh
 BIRBCREW_CONFIG=/private/executor-store.json BIRBCREW_EXECUTION_CONFIG=/private/execution.json python -m birbcrew.execution.worker
@@ -26,7 +26,7 @@ BIRBCREW_CONFIG=/private/executor-store.json BIRBCREW_EXECUTION_CONFIG=/private/
 
 The worker registers activities only. It does not start another scheduler or manage the Codex daemon lifecycle. `Settings` supports an explicit Temporal namespace and optional mTLS CA, client certificate, private key and server name. The executor database role needs only SELECT, INSERT and UPDATE on `execution.operations`. API storage and Temporal persistence use separate roles.
 
-`ExecutionSettings` is the private installation contract. All binary, checkout, artifact and worktree paths are absolute. The one repository binding contains the exact GitHub remote, base branch, allowed Markdown paths and acceptance command. The client cannot submit a shell command or choose an execution host. Acceptance runs the installed command, never a script from the candidate. Set the command to a trusted check for the intended document, including its length and required topics. Its output is retained privately.
+`ExecutionSettings` is the private installation contract. All binary, checkout, artifact and worktree paths are absolute. The one repository binding contains the exact GitHub remote, base branch, allowed Markdown paths and acceptance command. `reviewer` selects exactly one review engine: `{"kind": "claude"}` or `{"kind": "opencode-go", ...}`. When it is absent, the Claude reviewer is selected, so an existing configuration keeps its behavior. `claude` is required with the Claude reviewer and rejected with any other reviewer. There is no fallback between engines. The optional `codex_socket` is passed to `codex app-server proxy --sock`. The client cannot submit a shell command or choose an execution host. Acceptance runs the installed command, never a script from the candidate. Set the command to a trusted check for the intended document, including its length and required topics. Its output is retained privately.
 
 ## Recovery and cancellation
 
@@ -40,7 +40,7 @@ Candidate creation does not require a claim that the author stopped writing. The
 
 The trusted worker checks exact changed paths, regular nonexecutable files, no symlink traversal and the unchanged base. It records each worktree Git directory and `.git` marker privately before exposing the author scratch. Every later Git command verifies that marker, selects the recorded Git directory explicitly, and disables hooks and filesystem monitors. Retain these Git identity records with the private execution artifacts.
 
-Before creating a candidate, the worker rejects recognizable private-key headers and GitHub, OpenAI, Anthropic, Slack, AWS, JWT and age credential formats. This deterministic check does not detect every secret or restrict what the author can read. It supports the bounded, trusted-owner documentation goal; it is not a general data-loss prevention system. Independent review receives the exact diff with text conversion and external diff disabled. Claude has no tools or MCP servers, hooks are disabled, and API/provider environment overrides are removed so the normal subscription login is used. Its structured verdict is persisted once. A lost review reply never causes another reviewer invocation.
+Before creating a candidate, the worker rejects recognizable private-key headers and GitHub, OpenAI, Anthropic, Slack, AWS, JWT and age credential formats. This deterministic check does not detect every secret or restrict what the author can read. It supports the bounded, trusted-owner documentation goal; it is not a general data-loss prevention system. Independent review receives the exact diff with text conversion and external diff disabled. Claude has no tools or MCP servers, hooks are disabled, and API/provider environment overrides are removed so the normal subscription login is used. OpenCode Go receives the same prompt as one Chat Completions request whose only tool is the required verdict schema; output is not retried. Its structured verdict is persisted once. A lost review reply never causes another reviewer invocation.
 
 Publication verifies the stored author and review receipts, clean candidate SHA, explicit installed remote, deterministic branch and ownership marker. It uses a normal push. Existing PR lookup includes closed PRs. Before a new push, the worker fetches the installed base branch tip and requires the approved base commit to be its ancestor. A foreign or closed PR blocks a fresh publication attempt. After publication has started, any conflicting or malformed readback remains uncertain and does not write a terminal receipt. A lost create reply reconciles the matching open draft rather than creating another. User-visible review summaries contain bounded findings; full evidence stays private.
 
@@ -50,7 +50,7 @@ After restoring a database, keep dispatch disabled until an operator reconciles 
 
 Run `uv run --group dev pytest` and `uv run --group dev ruff check src tests`. The execution tests exercise actual temporary Git repositories, PostgreSQL concurrent claims, Temporal activity-worker restart, strict receipt binding, lost turn and publication acknowledgements, and a live shell that writes after a simulated terminal label. The PostgreSQL checks require local binaries. The Temporal test uses `TEMPORAL_TEST_SERVER` or `/opt/homebrew/bin/temporal`.
 
-Injected daemon and GitHub responses establish failure handling, not live provider or device acceptance. The persistent installation must separately prove the actual Codex and Claude subscription journey, exact draft PR, service recovery, and shared physical-phone/Mac controls. Fixture checks do not establish k3s candidate verification or native candidate isolation.
+Injected daemon and GitHub responses establish failure handling, not live provider or device acceptance. The persistent installation must separately prove the actual Codex subscription journey and the selected reviewer's live call, exact draft PR, service recovery, and shared physical-phone/Mac controls. Fixture checks do not establish k3s candidate verification or native candidate isolation.
 
 Build the container with digest-pinned `PYTHON_IMAGE` (Python 3.13 Debian slim) and `UV_IMAGE` build arguments. The Dockerfile installs the frozen dependency lock under `/venv` and runs as UID/GID 10001. Runtime configuration and credentials are mounted privately and excluded from the build context.
 
@@ -60,6 +60,6 @@ Conversation listing orders owner-scoped results by persisted activity. Creation
 
 ## Independent review retry
 
-An owner can request another review only after a confirmed terminal inconclusive receipt. Numbered attempts retain the frozen candidate, original author receipt and earlier reviews. A specific Claude CLI usage-credit error can fall back once to Sonnet through the existing subscription. A valid rejection never triggers fallback. The English error classifier fails closed if the CLI changes its wording; check it when upgrading the installed CLI. Model labels in private evidence report what the CLI returned and are not independent model attestation.
+An owner can request another review only after a confirmed terminal inconclusive receipt. Numbered attempts retain the frozen candidate, original author receipt and earlier reviews. A specific Claude CLI usage-credit error can fall back once to Sonnet through the existing subscription. The OpenCode Go reviewer has no model fallback. A valid rejection never triggers fallback. The English error classifier fails closed if the CLI changes its wording; check it when upgrading the installed CLI. Model labels in private evidence report what the CLI returned and are not independent model attestation.
 
 Worker loss or an interrupted claim does not establish a stopped reviewer. Unconfirmed attempts require operator reconciliation; do not manufacture a terminal receipt or blindly start another reviewer. Deploy the updated Crew activity worker before a Forge workflow that sends numbered attempts.

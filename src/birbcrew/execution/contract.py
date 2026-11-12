@@ -113,7 +113,7 @@ class ReviewInput(ExecutionInput):
 class ReviewReceipt(Record):
     candidate_commit: Commit
     review_attempt: int = Field(default=0, ge=0, exclude_if=lambda value: value == 0)
-    reviewer: Literal["claude-cli"] = "claude-cli"
+    reviewer: Literal["claude-cli", "opencode-go"] = "claude-cli"
     disposition: Literal["approved", "changes_requested", "inconclusive"]
     findings_digest: Digest
     evidence_ref: Identity

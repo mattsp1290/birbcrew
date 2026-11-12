@@ -40,7 +40,7 @@ async def turn_status(client, thread_id, turn_id):
 
 async def interrupt(config, state):
     try:
-        async with Daemon(config.codex) as client:
+        async with Daemon(config.codex, config.codex_socket) as client:
             await client.call(
                 "thread/resume", {"threadId": state["thread_id"], "excludeTurns": True}
             )
@@ -182,7 +182,7 @@ async def author_goal(raw: dict) -> dict:
             )
             await register_worktree(config, work)
             activity.heartbeat({"operation_id": identity, "phase": "connecting"})
-            async with Daemon(config.codex) as client:
+            async with Daemon(config.codex, config.codex_socket) as client:
                 thread = await client.call(
                     "thread/start",
                     {
@@ -230,7 +230,7 @@ async def author_goal(raw: dict) -> dict:
                 state = await advance(identity, state, phase="running", turn_id=turn["turn"]["id"])
         if "thread_id" not in state or state["phase"] not in {"submitting", "running"}:
             return {"status": "uncertain", "reason": "author_claim_requires_reconciliation"}
-        async with Daemon(config.codex) as client:
+        async with Daemon(config.codex, config.codex_socket) as client:
             await client.call(
                 "thread/resume", {"threadId": state["thread_id"], "excludeTurns": True}
             )

@@ -8,6 +8,8 @@ from birbcrew.execution.contract import DraftReceipt, PublicationInput
 from birbcrew.execution.policy import installation
 from birbcrew.execution.process import command, git
 
+REVIEWER_NAMES = {"claude-cli": "Claude", "opencode-go": "OpenCode Go"}
+
 
 def marker(request):
     return (
@@ -146,7 +148,8 @@ async def publish_draft(raw: dict) -> dict:
                 f"Approved documentation goal {request.approved_goal.offer.goal_ref.record_id}.\n\n"
                 f"Candidate `{request.candidate.head_commit}` passed the installed "
                 "documentation check "
-                "and an independent Claude review. This is a draft for owner review.\n\n"
+                f"and an independent {REVIEWER_NAMES[request.review.reviewer]} review. "
+                "This is a draft for owner review.\n\n"
                 "No staging, native candidate verification, merge or deployment was performed."
             )
             await command(

@@ -674,8 +674,11 @@
             "type": "integer"
           },
           "reviewer": {
-            "const": "claude-cli",
             "default": "claude-cli",
+            "enum": [
+              "claude-cli",
+              "opencode-go"
+            ],
             "title": "Reviewer",
             "type": "string"
           },
@@ -1130,8 +1133,11 @@
         "type": "integer"
       },
       "reviewer": {
-        "const": "claude-cli",
         "default": "claude-cli",
+        "enum": [
+          "claude-cli",
+          "opencode-go"
+        ],
         "title": "Reviewer",
         "type": "string"
       },

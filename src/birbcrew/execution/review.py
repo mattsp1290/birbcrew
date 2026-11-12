@@ -1,16 +1,28 @@
 import asyncio
 import json
 import re
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, StrictStr, model_validator
+from pydantic_ai import Agent, ToolOutput, UsageLimits
+from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior
 from temporalio import activity
 
+from birbcrew import provider
 from birbcrew.execution import journal
 from birbcrew.execution.contract import Record, ReviewInput, ReviewReceipt, ReviewRecoveryInput
-from birbcrew.execution.policy import installation
+from birbcrew.execution.policy import OpenCodeGoReviewer, installation
 from birbcrew.execution.process import CommandFailure, command, git, usage_unavailable
 from birbcrew.execution.review_recovery import inspect_legacy_recovery
+
+CLAUDE_MODEL_NAME = re.compile(r"claude-[a-zA-Z0-9.-]{1,100}")
+PROVIDER_MODEL_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._/-]{0,99}")
+REVIEW_TIMEOUT_SECONDS = 600
+
+
+class ReviewerFailure(RuntimeError):
+    """An allowlisted failure code. It never carries provider or credential text."""
 
 
 class Verdict(Record):
@@ -29,12 +41,134 @@ class Verdict(Record):
         return self
 
 
+async def claude_review(
+    claude: Path, cwd: Path, prompt: str, diagnostics: list
+) -> tuple[Verdict, str]:
+    argv = [
+        str(claude),
+        "--print",
+        "--no-session-persistence",
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+        "--settings",
+        '{"disableAllHooks":true}',
+        "--setting-sources",
+        "",
+        "--output-format",
+        "json",
+        "--json-schema",
+        json.dumps(Verdict.model_json_schema()),
+    ]
+    verdict = None
+    for model in ("default", "sonnet"):
+        try:
+            response = await command(
+                argv + (["--model", model] if model != "default" else []),
+                cwd,
+                text=prompt,
+                timeout=REVIEW_TIMEOUT_SECONDS,
+                subscription=True,
+            )
+            envelope = json.loads(response)
+            if envelope.get("is_error"):
+                raise CommandFailure(usage_unavailable(envelope))
+            verdict = Verdict.model_validate(envelope["structured_output"])
+            models = envelope.get("modelUsage", {})
+            diagnostics.append(
+                {
+                    "model": model,
+                    "outcome": "verdict",
+                    "reported_models": [
+                        name for name in models if CLAUDE_MODEL_NAME.fullmatch(name)
+                    ][:3]
+                    if isinstance(models, dict)
+                    else [],
+                }
+            )
+            break
+        except CommandFailure as error:
+            diagnostics.append({"model": model, "outcome": str(error)})
+            if model != "default" or not error.usage_unavailable:
+                raise
+    if verdict is None:
+        raise ValueError("review_verdict_missing")
+    reported_models = diagnostics[-1]["reported_models"]
+    return verdict, (
+        "Claude CLI reported model: " + ", ".join(reported_models) + ". "
+        if reported_models
+        else f"Claude CLI model selection: {model}. "
+    )
+
+
+async def with_heartbeats(awaitable, timeout: float):
+    task = asyncio.ensure_future(awaitable)
+    try:
+        async with asyncio.timeout(timeout):
+            while not task.done():
+                if activity.in_activity():
+                    activity.heartbeat()
+                await asyncio.wait({task}, timeout=1)
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.wait({task})
+    return task.result()
+
+
+async def opencode_review(
+    reviewer: OpenCodeGoReviewer, prompt: str, session: str, diagnostics: list
+) -> tuple[Verdict, str]:
+    try:
+        provider.check_evidence(reviewer.subscription_evidence)
+    except (OSError, ValueError):
+        raise ReviewerFailure("subscription_evidence_rejected") from None
+    try:
+        key = (
+            provider.read_key_file(reviewer.api_key_file)
+            if reviewer.api_key_file
+            else provider.read_go_key()
+        )
+    except (OSError, ValueError):
+        raise ReviewerFailure("provider_credential_unavailable") from None
+    agent = Agent(provider.chat_model(key), output_type=ToolOutput(Verdict), retries=0)
+    try:
+        result = await with_heartbeats(
+            agent.run(
+                prompt,
+                model_settings=provider.review_model_settings(session),
+                usage_limits=UsageLimits(request_limit=1),
+            ),
+            REVIEW_TIMEOUT_SECONDS,
+        )
+    except UnexpectedModelBehavior:
+        outcome = "review_output_invalid"
+    except (ModelAPIError, TimeoutError):
+        outcome = "provider_request_failed"
+    else:
+        reported = result.response.model_name
+        reported_models = [reported] if reported and PROVIDER_MODEL_NAME.fullmatch(reported) else []
+        diagnostics.append(
+            {"model": provider.MODEL, "outcome": "verdict", "reported_models": reported_models}
+        )
+        return result.output, (
+            "OpenCode Go reported model: " + reported_models[0] + ". "
+            if reported_models
+            else f"OpenCode Go model selection: {provider.MODEL}. "
+        )
+    diagnostics.append({"model": provider.MODEL, "outcome": outcome})
+    raise ReviewerFailure(outcome)
+
+
 @activity.defn(name="birbcrew.review_candidate.v1")
 async def review_candidate(raw: dict) -> dict:
     request = ReviewInput.model_validate(raw)
     raw = request.model_dump(mode="json")
     config = installation()
     config.authorize(request)
+    reviewer = "opencode-go" if isinstance(config.reviewer, OpenCodeGoReviewer) else "claude-cli"
     identity = request.review_identity
     existing = await journal.receipt("review", identity, raw)
     if existing is not None:
@@ -66,6 +200,7 @@ async def review_candidate(raw: dict) -> dict:
         return ReviewReceipt(
             candidate_commit=request.candidate.head_commit,
             review_attempt=request.review_attempt,
+            reviewer=reviewer,
             disposition="inconclusive",
             findings_digest="0" * 64,
             evidence_ref=f"execution/{identity}/review-interrupted",
@@ -117,70 +252,20 @@ async def review_candidate(raw: dict) -> dict:
             + "\nDiff:\n"
             + diff
         )
-        version = await command([str(config.claude), "--version"], config.artifact_root)
-        argv = [
-            str(config.claude),
-            "--print",
-            "--no-session-persistence",
-            "--tools",
-            "",
-            "--strict-mcp-config",
-            "--mcp-config",
-            '{"mcpServers":{}}',
-            "--settings",
-            '{"disableAllHooks":true}',
-            "--setting-sources",
-            "",
-            "--output-format",
-            "json",
-            "--json-schema",
-            json.dumps(Verdict.model_json_schema()),
-        ]
-        for model in ("default", "sonnet"):
-            try:
-                response = await command(
-                    argv + (["--model", model] if model != "default" else []),
-                    config.artifact_root,
-                    text=prompt,
-                    timeout=600,
-                    subscription=True,
-                )
-                envelope = json.loads(response)
-                if envelope.get("is_error"):
-                    raise CommandFailure(usage_unavailable(envelope))
-                verdict = Verdict.model_validate(envelope["structured_output"])
-                models = envelope.get("modelUsage", {})
-                diagnostics.append(
-                    {
-                        "model": model,
-                        "outcome": "verdict",
-                        "reported_models": [
-                            name
-                            for name in models
-                            if re.fullmatch(r"claude-[a-zA-Z0-9.-]{1,100}", name)
-                        ][:3]
-                        if isinstance(models, dict)
-                        else [],
-                    }
-                )
-                break
-            except CommandFailure as error:
-                diagnostics.append({"model": model, "outcome": str(error)})
-                if model != "default" or not error.usage_unavailable:
-                    raise
-        if verdict is None:
-            raise ValueError("review_verdict_missing")
+        if isinstance(config.reviewer, OpenCodeGoReviewer):
+            verdict, model_label = await opencode_review(
+                config.reviewer, prompt, identity, diagnostics
+            )
+        else:
+            version = await command([str(config.claude), "--version"], config.artifact_root)
+            verdict, model_label = await claude_review(
+                config.claude, config.artifact_root, prompt, diagnostics
+            )
         if await git(
             config, work, "rev-parse", "HEAD"
         ) != request.candidate.head_commit or await git(config, work, "status", "--porcelain"):
             raise ValueError("candidate_changed_during_review")
         disposition = verdict.decision
-        reported_models = diagnostics[-1]["reported_models"]
-        model_label = (
-            "Claude CLI reported model: " + ", ".join(reported_models) + ". "
-            if reported_models
-            else f"Claude CLI model selection: {model}. "
-        )
         summary = (
             model_label
             + (
@@ -191,13 +276,18 @@ async def review_candidate(raw: dict) -> dict:
         )[:2000]
         error_code = None
     except (Exception, asyncio.CancelledError) as error:
-        error_code = str(error) if isinstance(error, CommandFailure) else type(error).__name__
+        error_code = (
+            str(error)
+            if isinstance(error, (CommandFailure, ReviewerFailure))
+            else type(error).__name__
+        )
     evidence = json.dumps(
         {
             "schema_version": "birbcrew.review-evidence.v2",
             "operation_id": str(request.operation_id),
             "candidate_commit": request.candidate.head_commit,
             "review_attempt": request.review_attempt,
+            "reviewer": reviewer,
             "version": version.strip()[:120]
             if re.fullmatch(r"[a-zA-Z0-9.() _-]+\s*", version)
             else "unavailable",
@@ -212,6 +302,7 @@ async def review_candidate(raw: dict) -> dict:
     result = ReviewReceipt(
         candidate_commit=request.candidate.head_commit,
         review_attempt=request.review_attempt,
+        reviewer=reviewer,
         disposition=disposition,
         findings_digest=checksum,
         evidence_ref=ref,
