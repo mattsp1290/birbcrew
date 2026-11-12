@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -96,7 +96,9 @@ try {
   assert.match(report, /Cannot read BIRBCREW_TEMPORAL_TLS_PRIVATE_KEY_PATH \(ENOENT\)/);
   assert.ok(!report.includes(unreadable), "the gateway does not print the private key path");
   console.log("A gateway with an unreadable key file named the variable without its path and exited with status 1");
-  const stopWorker = await s.child(process.execPath, ["src/service/cli.ts", "worker", "tests/proof/fixture-profiles.mts"], env);
+  const heartbeat = file("worker.heartbeat");
+  const stopWorker = await s.child(process.execPath, ["src/service/cli.ts", "worker", "tests/proof/fixture-profiles.mts"],
+    { ...env, BIRBCREW_WORKER_HEARTBEAT_FILE: heartbeat });
   const gateway = spawn(process.execPath, ["src/service/gateway.ts", config], { env, stdio: ["ignore", "pipe", "inherit"] });
   const gatewayExit = once(gateway, "exit");
   try {
@@ -137,6 +139,8 @@ try {
       assert.equal(await completed(pi.path, requestId), reply);
     }
     console.log("Pi fixture turns completed through /v1 with gateway and worker on mTLS in namespace " + namespace);
+    await until(async () => Date.now() - (await stat(heartbeat).catch(() => ({ mtimeMs: 0 }))).mtimeMs < 10_000 || undefined, "worker heartbeat");
+    console.log("The running worker refreshed its heartbeat file");
 
     async function cli(operation: string, input: object) {
       const child = spawn(process.execPath, ["src/service/cli.ts", operation], { env, stdio: ["pipe", "pipe", "inherit"] });

@@ -16,7 +16,7 @@ JS
 npm --prefix /path/to/birbcrew run --silent gateway -- /absolute/path/to/gateway.json
 ```
 
-The gateway prints its loopback URL. Send the token as an `Authorization: Bearer <token>` header on every request. All command bodies use JSON. Run the npm command from the repository with the path to the generated gateway configuration.
+The gateway prints its loopback URL. Send the token as an `Authorization: Bearer <token>` header on every request. The only exception is `GET /healthz`, a liveness check that answers loopback peers with a constant `{"status":"ok"}` and returns no data. All command bodies use JSON. Run the npm command from the repository with the path to the generated gateway configuration.
 
 | Method and path | Body or response |
 | --- | --- |
