@@ -453,7 +453,8 @@ SHA-256 and byte count. `POST /v1/conversations`, and a handoff to the member, w
 opens its target the same way, fail `409 instructions_limit` when the conversation's
 project notes fit what the member's engine can be given but notes and instructions
 together do not, and `409 memory_limit` when notes and instructions fit but memory on top
-does not. A handoff transcript never carries instructions. A restore keeps instructions as they were. See
+does not. A handoff adds no instructions to its transcript; a source reply that quotes
+them is carried like any other reply. A restore keeps instructions as they were. See
 [member instructions](member-instructions.md).
 
 ## Validation

@@ -9,7 +9,9 @@
 -- the migration never waits in a lock queue and never joins a deadlock. A native turn's admission
 -- transaction holds only ACCESS SHARE on members, which this mode allows, and nothing on
 -- audit_events, so a running turn never delays it. After 60 s without the locks it fails with
--- 55P03 and applies nothing.
+-- 55P03 and applies nothing. Applied with 027 in one transaction it already holds both; applied
+-- with 028 alone it retries while holding 028's locks, so admissions and audited writes wait, and
+-- a spawn in flight, which holds members and waits to append its audit row, makes it fail.
 DO $$
 DECLARE deadline timestamptz := clock_timestamp() + interval '60 seconds';
 BEGIN

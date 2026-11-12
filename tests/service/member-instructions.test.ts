@@ -6,6 +6,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { after, before, test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { Pool, type PoolClient } from "pg";
+import { auditEventTypes } from "../../src/service/audit.ts";
 import type { MemberClient } from "../../src/service/client.ts";
 import { instructionsBytes, MemberStoreError, ownerInitiator, type Conversation, type Engine, type TurnRequest } from "../../src/service/domain.ts";
 import { createGateway } from "../../src/service/gateway.ts";
@@ -450,12 +451,12 @@ test("a handoff whose target its member's instructions or memory would not fit i
   // capture notes from an installation's Beans hub; this trigger stands in for that capture, for this member only.
   const noted = await g.spawn("codex", quotes);
   const capture = "instructions_notes_" + randomUUID().replaceAll("-", "");
-  await pool.query(`CREATE FUNCTION public.${capture}() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN
+  await pool.query(`CREATE FUNCTION birbcrew_ts.${capture}() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN
     INSERT INTO birbcrew_ts.conversation_notes (conversation_id, capture) VALUES (NEW.conversation_id, '${JSON.stringify(notesOf(9_000))}'::jsonb);
     RETURN NULL; END $f$`);
-  t.after(() => pool.query(`DROP FUNCTION public.${capture}() CASCADE`));
+  t.after(() => pool.query(`DROP FUNCTION birbcrew_ts.${capture}() CASCADE`));
   await pool.query(`CREATE TRIGGER ${capture} AFTER INSERT ON birbcrew_ts.conversations FOR EACH ROW
-    WHEN (NEW.member_id = '${noted.memberId}') EXECUTE FUNCTION public.${capture}()`);
+    WHEN (NEW.member_id = '${noted.memberId}') EXECUTE FUNCTION birbcrew_ts.${capture}()`);
 
   const source = await open(await g.spawn("pi", role));
   await committedTurn(source, "remember ash", "stored ash");
@@ -580,4 +581,8 @@ test("a version-28 database upgrades: members spawned before it have no instruct
   const migrations = (await readdir(sql)).map(file => Number(file.split("-")[0])).sort((a, b) => a - b);
   assert.deepEqual((await upgraded.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version>=28 ORDER BY 1")).rows.map(row => row.version),
     migrations.filter(version => version >= 28));
+  // 029 replaced 028's type CHECK, so it must still name every type, 027's and 028's included.
+  const { rows: [{ definition }] } = await upgraded.query<{ definition: string }>(`SELECT pg_get_constraintdef(oid) AS definition
+    FROM pg_constraint WHERE conrelid='birbcrew_ts.audit_events'::regclass AND conname='audit_events_type_check'`);
+  assert.deepEqual([...new Set([...definition.matchAll(/'([a-z_]+\.[a-z_]+)'/g)].map(match => match[1]))].sort(), [...auditEventTypes].sort());
 });

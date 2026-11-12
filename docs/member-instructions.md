@@ -256,11 +256,19 @@ commits it holds, on existing tables only:
 | `audit_events` | `ACCESS EXCLUSIVE`, `SHARE` | the CHECK and the index build |
 
 It takes both with `LOCK ... NOWAIT` together and retries every 20 to 100 ms, as
-migrations 25 to 28 do, so it never waits in a lock queue. Applied in one transaction
-after 27 and 28, it retries while holding their locks. A running native turn holds
+migrations 25 to 28 do, so it never waits in a lock queue. A running native turn holds
 only `ACCESS SHARE` on `members`, so the migration does not wait for it. After 60 s
 without the locks it fails with `55P03`, applies nothing, and the process exits. Stop
 every process of the previous release first, as for every migration.
+
+`migrate()` applies every pending migration in one transaction. From version 26 or
+earlier, 27 already holds both locks 29 needs, so 29 never retries. From version 27,
+29 retries for `members` while holding 28's `ACCESS EXCLUSIVE` locks, including the one
+on `audit_events`, so every admission and audited write waits for it. A spawn that
+started before the upgrade holds `members` and must append its audit row before it can
+commit, so it can never let 29 in: the upgrade fails after 60 s with `55P03`, 28
+included, and applies nothing. With the previous release stopped first, no spawn is in
+flight.
 
 Members spawned before the upgrade have no instructions and cannot be given any. After a
 rollback to a release without migration 29, the rows stay but launches no longer include

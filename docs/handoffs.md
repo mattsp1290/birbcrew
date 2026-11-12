@@ -109,8 +109,8 @@ target's first user message in its snapshot, and the reserved request's receipt 
 | `409` | `handoff_too_large` | the source's newest committed turn alone does not fit the transcript budget |
 | `409` | `trusted_conversation` | the source is attached to the [trusted-context lane](trusted-application-context.md) |
 | `409` | `history_unavailable` | the source predates the public event ledger, or a committed prompt does not match its turn's digest |
-| `409` | `memory_limit` | the target member's notes and instructions fit its engine but not with its memory, as for any open |
-| `409` | `instructions_limit` | the target member's notes fit its engine but not with its instructions, as for any open |
+| `409` | `memory_limit` | the project notes and the target member's instructions fit its engine but not with its memory, as for any open |
+| `409` | `instructions_limit` | the project notes fit the target member's engine but not with its instructions, as for any open |
 | `409` | `conflict` | the `requestId` was used with another source or member; on the target's request routes, the reserved request's ID sent with other text or with an approval deadline |
 | `409` | `handoff_pending` | on the target's request routes: its reserved request is not admitted yet |
 | `409` | `update_rejected` | after the commit: the target's workflow refused the reserved request's update, as a previous-release worker does with one over 16 KiB (see [Upgrade](#upgrade)); a retry with the same `requestId` succeeds only once that cause is removed |
