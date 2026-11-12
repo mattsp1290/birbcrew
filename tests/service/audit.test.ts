@@ -426,6 +426,10 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
       "memory.created": { payload: { memoryId } },
       "memory.deleted": { payload: { memoryId } },
       "memory.suspended": { payload: { memoryId, reason: "recovery_restore" } },
+      "usage.budget_set": { payload: { revision: 1, tokenLimit: 1000, period: "utc_day" } },
+      "usage.budget_cleared": { payload: { revision: 2 } },
+      "usage.request_refused": { conversationId, requestId, payload: { tokenLimit: 1000, usedTokens: 1000, period: "utc_day",
+        windowStart: "2031-01-01T00:00:00.000Z", budgetRevision: 1 } },
     };
     for (const type of auditEventTypes) {
       const fact = { type, ownerId, memberId, ...samples[type] } as AuditFact<typeof type>;

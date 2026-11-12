@@ -9,6 +9,7 @@ import { conversationTurnLimit, workflowGenerationTurnLimit } from "./limits.ts"
 import { memoryCapabilities } from "./memories.ts";
 import { routineCapabilities } from "./routines.ts";
 import type { MemberStore } from "./store.ts";
+import { usageCapabilities } from "./usage.ts";
 
 const listDefaultLimit = 50, listMaximumLimit = 100;
 
@@ -36,6 +37,7 @@ export const integrationCapabilities = {
     revocation: "later-proposals-only",
   },
   memories: memoryCapabilities,
+  usage: usageCapabilities,
 } as const;
 
 type Listing = "member" | "conversation";

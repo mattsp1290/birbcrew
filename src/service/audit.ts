@@ -16,10 +16,12 @@ const routineFact = "((payload->>'routineId'), (payload->>'revision')) WHERE eve
 const routineChange = { routineId: uuid, revision: z.int().min(2).max(2_147_483_647) };
 const grantFact = "(event_type, (payload->>'grantId'), (payload->>'approvalId')) WHERE event_type IN ('approval.auto_approved', 'grant.created', 'grant.revoked')";
 const memoryFact = "((payload->>'memoryId'), event_type) WHERE event_type IN ('memory.created', 'memory.deleted', 'memory.suspended')";
+const budgetFact = "(member_id, (payload->>'revision')) WHERE event_type IN ('usage.budget_set', 'usage.budget_cleared')";
+const tokenLimit = z.int().min(1).max(1_000_000_000_000);
 
 type Actor = "owner" | "system";
 /** The closed audit vocabulary. 021-audit.sql repeats these types in a CHECK, widened by
- * 024-standing-grants.sql, 025-routines.sql and 026-memories.sql. Payloads are strict: identifiers, digests, choices and statuses only,
+ * 024-standing-grants.sql, 025-routines.sql, 026-memories.sql and 031-usage.sql. Payloads are strict: identifiers, digests, choices and statuses only,
  * never prompt/reply text, tool arguments or secrets. An actor given as a function is
  * decided by the validated payload. A routine acts with its owner's authority, so rows its
  * firings cause name the owner; Crew's own decisions about a routine name the system. */
@@ -68,7 +70,7 @@ export const auditEvents = {
     payload: z.strictObject({
       routineId: uuid, scheduledFor: z.iso.datetime(), status: z.enum(["succeeded", "failed", "skipped"]),
       reason: z.enum(["missed", "overlap", "owner_unavailable", "rejected", "approval_required", "turn_failed",
-        "turn_cancelled", "turn_uncertain"]).optional(),
+        "turn_cancelled", "turn_uncertain", "usage_limit"]).optional(),
     }) },
   // No digest of the text: an entry is deletable owner content, and an unsalted digest kept in
   // this append-only table would let an export holder confirm a guess of deleted text.
@@ -77,6 +79,15 @@ export const auditEvents = {
   // Crew suspends every active entry when a restored installation resumes.
   "memory.suspended": { actor: "system", key: memoryFact,
     payload: z.strictObject({ memoryId: uuid, reason: z.literal("recovery_restore") }) },
+  "usage.budget_set": { actor: "owner", key: budgetFact,
+    payload: z.strictObject({ revision: z.int().min(1).max(2_147_483_647), tokenLimit, period: z.literal("utc_day") }) },
+  "usage.budget_cleared": { actor: "owner", key: budgetFact, payload: z.strictObject({ revision: z.int().min(2).max(2_147_483_647) }) },
+  // The first refusal the trail records: Crew's own decision under the owner's budget, made
+  // inside admission, keyed by the request so a retried refusal adds nothing. routineId: the
+  // firing that submitted it, as conversation.opened names one; the request has no admission.
+  "usage.request_refused": { actor: "system", key: "(conversation_id, request_id) WHERE event_type = 'usage.request_refused'",
+    payload: z.strictObject({ tokenLimit, usedTokens: z.int().min(0), period: z.literal("utc_day"), windowStart: z.iso.datetime(),
+      budgetRevision: z.int().min(1), routineId: uuid.optional() }) },
 } as const;
 export type AuditEventType = keyof typeof auditEvents;
 export const auditEventTypes = Object.keys(auditEvents) as AuditEventType[];

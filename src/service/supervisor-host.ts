@@ -14,6 +14,8 @@ import { commitSchema, type Conversation, type Checkpoint } from "./domain.ts";
 import { textProjection, textWriter } from "./text-stream.ts";
 import { MemberStore } from "./store.ts";
 import { commandSchema, type Launch } from "./supervisor.ts";
+import { recordSegmentUsage } from "./usage.ts";
+import { segmentUsage } from "./usage-capture.ts";
 
 const pool = new Pool({ connectionString: process.env.BIRBCREW_DATABASE_URL });
 const store = new MemberStore(pool);
@@ -199,16 +201,19 @@ async function start(launch: Launch): Promise<SegmentResult> {
       await children.finish(childKey,token,null);
       return {kind:"childDone"};
     }
+    const usage = segmentUsage.optional();
     const result = z.discriminatedUnion("kind", [
-      z.strictObject({ kind: z.literal("complete"), text: commitSchema.shape.reply, checkpoint: commitSchema.shape.checkpoint }),
+      z.strictObject({ kind: z.literal("complete"), text: commitSchema.shape.reply, checkpoint: commitSchema.shape.checkpoint, usage }),
       z.strictObject({ kind:z.literal("delegated"),checkpoint:commitSchema.shape.checkpoint,proposals:z.array(z.strictObject({
         nativeCallId:z.string().min(1).max(256),task:z.string().min(1).max(4096),
         profile:z.strictObject({role:z.enum(["analyst","recorder"]),version:z.literal(1),instructions:z.string().min(1),
           model:z.string().min(1),tools:z.array(z.literal("record_work_item")).max(1)}),
-      })).min(1).max(2) }),
+      })).min(1).max(2), usage }),
       z.strictObject({ kind: z.literal("pending"), checkpoint: commitSchema.shape.checkpoint,
-        proposal: nativeProposal }),
+        proposal: nativeProposal, usage }),
     ]).parse(reply);
+    // Before the outcome commits: the model work happened even if that commit then fails.
+    await recordSegmentUsage(pool, launch, result.usage);
     if (result.kind === "delegated") {
       if (childKey || continuation || member.childResults || member.conversation.engine !== "pi") throw new Error("Unexpected delegation");
       return {kind:"delegated",children:await children.delegate(member.conversation,requestId,token,result.proposals,result.checkpoint)};

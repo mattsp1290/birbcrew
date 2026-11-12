@@ -1,0 +1,471 @@
+import assert from "node:assert/strict";
+import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, before, test, type TestContext } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import { ActivityFailure, ApplicationFailure, WorkflowUpdateFailedError, type Client } from "@temporalio/client";
+import { Pool } from "pg";
+import { MemberClient } from "../../src/service/client.ts";
+import { ownerInitiator, type Engine, type TurnRequest } from "../../src/service/domain.ts";
+import { createGateway } from "../../src/service/gateway.ts";
+import { IntegrationApi } from "../../src/service/integration-api.ts";
+import { withNativeAdmission } from "../../src/service/native-admission.ts";
+import { InstallationRecovery } from "../../src/service/recovery.ts";
+import { FileRecoveryFence } from "../../src/service/recovery-fence.ts";
+import { RoutineApi, RoutineDispatcher, type Clock } from "../../src/service/routines.ts";
+import { MemberStore, ownerAdmissionActivity } from "../../src/service/store.ts";
+import type { Launch } from "../../src/service/supervisor.ts";
+import { checkUsageAdmission, recordSegmentUsage, UsageApi } from "../../src/service/usage.ts";
+import type { SegmentUsage } from "../../src/service/usage-capture.ts";
+
+const url = process.env.BIRBCREW_TEST_DATABASE_URL;
+if (!url) throw new Error("Set BIRBCREW_TEST_DATABASE_URL to a disposable PostgreSQL database.");
+const pool = new Pool({ connectionString: url });
+const store = new MemberStore(pool);
+before(() => store.migrate());
+after(() => pool.end());
+const sql = new URL("../../src/service/sql/", import.meta.url);
+
+/** A database migrated only up to `version`, as that release left it; dropped after the test. */
+async function databaseAt(t: TestContext, version = Infinity) {
+  const name = "usage_" + randomUUID().replaceAll("-", "");
+  await pool.query("CREATE DATABASE " + name);
+  const target = new URL(url!); target.pathname = "/" + name;
+  const db = new Pool({ connectionString: target.href });
+  t.after(async () => { await db.end(); await pool.query("DROP DATABASE " + name); });
+  if (version === Infinity) {
+    await new MemberStore(db).migrate();
+    return db;
+  }
+  await db.query("CREATE SCHEMA birbcrew_ts");
+  await db.query("CREATE TABLE birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
+  for (const file of (await readdir(sql)).sort()) {
+    const applied = Number(file.split("-")[0]);
+    if (applied > version) continue;
+    await db.query(await readFile(new URL(file, sql), "utf8"));
+    await db.query("INSERT INTO birbcrew_ts.schema_versions VALUES ($1)", [applied]);
+  }
+  return db;
+}
+
+const reported = (input: number, output = 0, more: Partial<Extract<SegmentUsage, { state: "reported" }>> = {}): SegmentUsage => ({
+  state: "reported", model: "fixture-model", inputTokens: input, outputTokens: output, cachedInputTokens: null,
+  cacheWriteTokens: null, reasoningTokens: null, costUsd: null, ...more });
+
+async function member(db: MemberStore, ownerId = "owner-" + randomUUID(), engine: Engine = "pi") {
+  const spawned = await db.spawn({ ownerId, requestId: randomUUID(), engine, profile: "fixture" });
+  return { ownerId, memberId: spawned.memberId };
+}
+async function conversation(db: MemberStore, owner: { ownerId: string; memberId: string }) {
+  const conversationId = randomUUID();
+  await db.openConversation({ ...owner, conversationId });
+  return conversationId;
+}
+
+/** Admits a request, starts its turn and reserves its native launch as the supervisor does. */
+async function launched(db: MemberStore, ownerId: string, conversationId: string, text = "hello", requestId = randomUUID()) {
+  const request = { ownerId, conversationId, requestId, text };
+  await db.recordAcceptance(request, ownerInitiator);
+  const execution = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
+  const turn = await db.beginTurn(request, execution);
+  assert.equal(turn.kind, "start"); if (turn.kind !== "start") throw new Error("unreachable");
+  await db.pool.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+    VALUES ($1,$2,$3,$4,$5,1)`, [conversationId, requestId, turn.token, execution.workflowRunId, execution.activityId]);
+  const launch: Launch = { ...request, token: turn.token, execution };
+  return { request, launch, commit: () => db.commitTurn({ ownerId, conversationId, requestId, token: turn.token, reply: "done",
+    checkpoint: { version: 1, engine: turn.conversation.engine, state: {} } }) };
+}
+/** One finished segment that reported `usage`, in a conversation of its own. */
+async function spend(db: MemberStore, owner: { ownerId: string; memberId: string }, usage?: SegmentUsage) {
+  const conversationId = await conversation(db, owner);
+  const segment = await launched(db, owner.ownerId, conversationId);
+  await recordSegmentUsage(db.pool, segment.launch, usage);
+  await segment.commit();
+  return { conversationId, requestId: segment.request.requestId };
+}
+
+async function gateway(t: TestContext, members: MemberClient, ownerId: string, clock: Clock = () => new Date()) {
+  const token = randomUUID(), stranger = randomUUID();
+  const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+  const server = createGateway(store, members, { [hash(token)]: ownerId, [hash(stranger)]: "owner-" + randomUUID() }, { clock });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const port = address.port;
+  t.after(async () => { const closed = once(server, "close"); server.close(); server.closeAllConnections(); await closed; });
+  async function api(path: string, body?: unknown, credential: string = token, method = body === undefined ? "GET" : "POST") {
+    const response = await fetch(`http://127.0.0.1:${port}${path}`, { method,
+      headers: { Authorization: "Bearer " + credential, "Content-Type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    return { status: response.status, body: await response.json().catch(() => undefined) };
+  }
+  return { api, stranger };
+}
+/** Temporal must not be reached: the budget refuses before any workflow update. */
+const unreachable = new Proxy({}, { get() { throw new Error("Temporal was used"); } }) as Client;
+const audit = async (ownerId: string, type: string) => (await pool.query(`SELECT actor_kind AS actor, initiator_kind AS initiator,
+  conversation_id AS "conversationId", request_id AS "requestId", payload FROM birbcrew_ts.audit_events
+  WHERE owner_id=$1 AND event_type=$2 ORDER BY event_id`, [ownerId, type])).rows;
+
+test("each launch records its segment's usage once, bound to the launch's execution, in an append-only ledger", async () => {
+  const owner = await member(store);
+  const conversationId = await conversation(store, owner);
+  const segment = await launched(store, owner.ownerId, conversationId);
+  const usage = reported(1200, 80, { cachedInputTokens: 900, cacheWriteTokens: 100, reasoningTokens: 20, costUsd: 0.0123 });
+  await recordSegmentUsage(pool, segment.launch, usage);
+  // A retried write for the same launch, and one whose execution is not the launch's, add nothing.
+  await recordSegmentUsage(pool, segment.launch, reported(5, 5));
+  await recordSegmentUsage(pool, { ...segment.launch, execution: { ...segment.launch.execution, attempt: 2 } }, reported(7, 7));
+  const rows = async () => (await pool.query(`SELECT token, engine, state, model, input_tokens, output_tokens, cached_input_tokens,
+    cache_write_tokens, reasoning_tokens, cost_usd::text AS cost FROM birbcrew_ts.usage_ledger WHERE owner_id=$1`, [owner.ownerId])).rows;
+  assert.deepEqual(await rows(), [{ token: segment.launch.token, engine: "pi", state: "reported", model: "fixture-model",
+    input_tokens: 1200, output_tokens: 80, cached_input_tokens: 900, cache_write_tokens: 100, reasoning_tokens: 20, cost: "0.0123000000" }]);
+  await segment.commit();
+
+  // An activity retry of the turn replays its reply and launches nothing, so it has no new row.
+  const retried = await store.beginTurn(segment.request, { ...segment.launch.execution, attempt: 2 });
+  assert.equal(retried.kind, "replay");
+  // A driver that reported nothing is recorded as unknown, never as zero.
+  const other = await launched(store, owner.ownerId, conversationId, "second");
+  await recordSegmentUsage(pool, other.launch);
+  assert.equal((await rows()).length, 2);
+  assert.deepEqual((await rows())[1], { token: other.launch.token, engine: "pi", state: "unknown", model: null, input_tokens: null,
+    output_tokens: null, cached_input_tokens: null, cache_write_tokens: null, reasoning_tokens: null, cost: null });
+  for (const change of ["UPDATE birbcrew_ts.usage_ledger SET input_tokens=0 WHERE owner_id=$1", "DELETE FROM birbcrew_ts.usage_ledger WHERE owner_id=$1"]) {
+    await assert.rejects(pool.query(change, [owner.ownerId]), { code: "23514" });
+  }
+  await assert.rejects(pool.query(`INSERT INTO birbcrew_ts.usage_ledger (owner_id,member_id,conversation_id,request_id,token,engine,state,input_tokens)
+    VALUES ($1,$2,$3,$4,$5,'pi','unknown',3)`, [owner.ownerId, owner.memberId, conversationId, other.request.requestId, other.launch.token]), { code: "23505" });
+});
+
+test("the usage routes total an owner's usage by member and conversation, mark routine requests, and show no other owner's rows", async (t) => {
+  const pi = await member(store);
+  const codex = await member(store, pi.ownerId, "codex");
+  const g = await gateway(t, {} as MemberClient, pi.ownerId);
+  const first = await spend(store, pi, reported(1000, 100, { cachedInputTokens: 400, costUsd: 0.25 }));
+  await spend(store, pi);
+  const third = await spend(store, codex, reported(300, 30, { reasoningTokens: 10 }));
+  // A routine's request: its firing row makes the admission record the routine as initiator. The
+  // routine's windows start in 2031 and the lease lasts a day, so no real-clock dispatcher drives it.
+  const routines = new RoutineApi(store, () => new Date("2031-01-06T10:00:00.000Z"));
+  const routine = await routines.create(pi.ownerId, { requestId: randomUUID(), memberId: pi.memberId, schedule: "*/15 * * * *",
+    prompt: "scheduled prompt", approvalPolicy: "wait" });
+  const firing = { conversationId: randomUUID(), requestId: randomUUID() };
+  await pool.query(`INSERT INTO birbcrew_ts.routine_firings (routine_id,scheduled_for,status,conversation_id,request_id,recorded_at,lease_until)
+    VALUES ($1,clock_timestamp(),'claimed',$2,$3,clock_timestamp(),clock_timestamp()+interval '1 day')`,
+  [routine.routineId, firing.conversationId, firing.requestId]);
+  await store.openConversation({ ...pi, conversationId: firing.conversationId });
+  const scheduled = await launched(store, pi.ownerId, firing.conversationId, "scheduled prompt", firing.requestId);
+  await recordSegmentUsage(pool, scheduled.launch, reported(50, 5));
+  await scheduled.commit();
+  const stranger = await member(store);
+  await spend(store, stranger, reported(7777, 7));
+
+  const zero = { segments: 0, unknownSegments: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0,
+    cacheWriteTokens: 0, reasoningTokens: 0, costUsd: null, costReportedSegments: 0 };
+  const routineTotals = { ...zero, segments: 1, inputTokens: 50, outputTokens: 5, totalTokens: 55 };
+  const summary = await g.api("/v1/usage");
+  assert.deepEqual(summary, { status: 200, body: { apiVersion: "1", from: null, to: null,
+    total: { segments: 4, unknownSegments: 1, inputTokens: 1350, outputTokens: 135, totalTokens: 1485, cachedInputTokens: 400,
+      cacheWriteTokens: 0, reasoningTokens: 10, costUsd: "0.25", costReportedSegments: 1 }, routine: routineTotals } });
+
+  const members = (await g.api("/v1/usage/members")).body;
+  const piTotals = { segments: 3, unknownSegments: 1, inputTokens: 1050, outputTokens: 105, totalTokens: 1155, cachedInputTokens: 400,
+    cacheWriteTokens: 0, reasoningTokens: 0, costUsd: "0.25", costReportedSegments: 1 };
+  const codexTotals = { ...zero, segments: 1, inputTokens: 300, outputTokens: 30, totalTokens: 330, reasoningTokens: 10 };
+  assert.deepEqual(members.members, [
+    { memberId: pi.memberId, engine: "pi", total: piTotals, routine: routineTotals, budget: null },
+    { memberId: codex.memberId, engine: "codex", total: codexTotals, routine: zero, budget: null },
+  ].sort((a, b) => a.memberId.localeCompare(b.memberId)));
+  const page = (await g.api("/v1/usage/members?limit=1")).body;
+  assert.equal(page.hasMore, true);
+  assert.deepEqual((await g.api("/v1/usage/members?after=" + page.nextAfter)).body.members.map((m: { memberId: string }) => m.memberId),
+    [members.members[1].memberId]);
+
+  const conversations = (await g.api("/v1/usage/conversations?memberId=" + codex.memberId)).body;
+  assert.deepEqual(conversations, { apiVersion: "1", conversations: [{ conversationId: third.conversationId, memberId: codex.memberId,
+    total: codexTotals, routine: zero }], nextAfter: third.conversationId, hasMore: false });
+  assert.equal((await g.api("/v1/usage/conversations")).body.conversations.length, 4);
+
+  const records = (await g.api("/v1/usage/records?limit=3")).body;
+  assert.deepEqual(records.records.map((r: { requestId: string; initiator: unknown }) => [r.requestId, r.initiator]), [
+    [firing.requestId, { kind: "routine", id: routine.routineId }], [third.requestId, { kind: "owner" }], [records.records[2].requestId, { kind: "owner" }],
+  ]);
+  assert.equal(records.hasMore, true);
+  const rest = (await g.api("/v1/usage/records?before=" + records.nextBefore)).body;
+  assert.deepEqual(rest.records.map((r: { requestId: string }) => r.requestId), [first.requestId]);
+  assert.deepEqual({ ...rest.records[0], usageId: undefined, recordedAt: undefined }, { usageId: undefined, recordedAt: undefined,
+    memberId: pi.memberId, conversationId: first.conversationId, requestId: first.requestId, childId: null, engine: "pi",
+    state: "reported", model: "fixture-model", inputTokens: 1000, outputTokens: 100, cachedInputTokens: 400, cacheWriteTokens: null,
+    reasoningTokens: null, costUsd: "0.25", initiator: { kind: "owner" } });
+  assert.equal((await g.api("/v1/usage/records?conversationId=" + third.conversationId)).body.records.length, 1);
+
+  // Time range: [from, to) on the database's record time.
+  const later = new Date(Date.now() + 3_600_000).toISOString(), earlier = new Date(Date.now() - 3_600_000).toISOString();
+  assert.deepEqual((await g.api("/v1/usage?from=" + later)).body.total, zero);
+  assert.deepEqual((await g.api("/v1/usage?to=" + earlier)).body.total, zero);
+  assert.equal((await g.api(`/v1/usage?from=${earlier}&to=${later}`)).body.total.segments, 4);
+  assert.deepEqual((await g.api("/v1/usage/members?from=" + later)).body.members.map((m: { total: unknown }) => m.total), [zero, zero]);
+
+  // Another owner sees none of these rows and cannot name this owner's member or conversation.
+  assert.deepEqual((await g.api("/v1/usage", undefined, g.stranger)).body.total, zero);
+  assert.deepEqual((await g.api("/v1/usage/records", undefined, g.stranger)).body.records, []);
+  assert.deepEqual((await g.api("/v1/usage/members", undefined, g.stranger)).body.members, []);
+  for (const path of ["/v1/usage/records?memberId=" + pi.memberId, "/v1/usage/records?conversationId=" + first.conversationId,
+    "/v1/usage/conversations?memberId=" + pi.memberId, "/v1/usage/budgets/" + pi.memberId]) {
+    assert.deepEqual(await g.api(path, undefined, g.stranger), { status: 404, body: { error: "not_found" } }, path);
+  }
+  assert.deepEqual((await g.api("/v1/usage/records?memberId=" + stranger.memberId)).status, 404);
+  for (const query of ["/v1/usage?limit=1", "/v1/usage?from=2031-01-06", `/v1/usage?from=${later}&to=${earlier}`, `/v1/usage?from=${later}&to=${later}`,
+    "/v1/usage?from=" + later + "&from=" + later, "/v1/usage?__proto__=1", "/v1/usage/members?limit=0", "/v1/usage/members?limit=101",
+    "/v1/usage/members?after=x", "/v1/usage/records?limit=1001", "/v1/usage/records?before=abc", "/v1/usage/records?before=0",
+    "/v1/usage/conversations?memberId=x", "/v1/usage/budgets/" + pi.memberId + "?x=1"]) {
+    assert.deepEqual(await g.api(query), { status: 400, body: { error: "invalid_input" } }, query);
+  }
+  assert.equal((await g.api("/v1/usage", {})).status, 405);
+  assert.equal((await g.api("/v1/usage/records", {}, undefined, "DELETE")).status, 405);
+  assert.equal((await g.api("/v1/usage/budgets/" + pi.memberId, {})).status, 405);
+  assert.equal((await g.api("/v1/usage", undefined, "invalid")).status, 401);
+  assert.equal((await g.api("/usage")).status, 404);
+  const capabilities = (await g.api("/v1/capabilities")).body;
+  assert.deepEqual([capabilities.usage.route, capabilities.usage.budget.period, capabilities.usage.budget.refusal], ["/v1/usage", "utc_day", "usage_limit"]);
+  assert.ok(capabilities.audit.eventTypes.includes("usage.request_refused"));
+});
+
+test("an owner sets, changes and clears a member's budget; each change is audited once", async (t) => {
+  const owner = await member(store);
+  const g = await gateway(t, {} as MemberClient, owner.ownerId);
+  const path = "/v1/usage/budgets/" + owner.memberId;
+  await spend(store, owner, reported(40, 2));
+  const window = (await g.api(path)).body.window;
+  assert.equal(window.start, new Date(new Date().setUTCHours(0, 0, 0, 0)).toISOString());
+  assert.equal(Date.parse(window.end) - Date.parse(window.start), 86_400_000);
+  assert.deepEqual(await g.api(path), { status: 200, body: { apiVersion: "1", memberId: owner.memberId, budget: null, window,
+    usedTokens: 42, remainingTokens: null, admitting: true } });
+  for (const invalid of [{}, { tokenLimit: 0 }, { tokenLimit: 1.5 }, { tokenLimit: "100" }, { tokenLimit: 1_000_000_000_001 },
+    { tokenLimit: 100, ownerId: owner.ownerId }, { tokenLimit: 100, period: "utc_day" }]) {
+    assert.deepEqual(await g.api(path, invalid, undefined, "PUT"), { status: 400, body: { error: "invalid_input" } }, JSON.stringify(invalid));
+  }
+  assert.deepEqual(await g.api(path, { tokenLimit: 100 }, g.stranger, "PUT"), { status: 404, body: { error: "not_found" } });
+  assert.deepEqual(await g.api(path, undefined, g.stranger, "DELETE"), { status: 404, body: { error: "not_found" } });
+  assert.deepEqual(await g.api("/v1/usage/budgets/" + randomUUID(), { tokenLimit: 100 }, undefined, "PUT"), { status: 404, body: { error: "not_found" } });
+
+  const set = await g.api(path, { tokenLimit: 100 }, undefined, "PUT");
+  assert.equal(set.status, 200);
+  assert.deepEqual({ ...set.body, budget: { ...set.body.budget, changedAt: undefined } }, { apiVersion: "1", memberId: owner.memberId,
+    budget: { tokenLimit: 100, period: "utc_day", revision: 1, changedAt: undefined }, window, usedTokens: 42, remainingTokens: 58, admitting: true });
+  assert.deepEqual(await g.api(path, { tokenLimit: 100 }, undefined, "PUT"), set, "the same limit again changes nothing");
+  assert.equal((await g.api(path, { tokenLimit: 40 }, undefined, "PUT")).body.admitting, false);
+  const cleared = await g.api(path, undefined, undefined, "DELETE");
+  assert.deepEqual([cleared.status, cleared.body.budget, cleared.body.admitting], [200, null, true]);
+  assert.deepEqual(await g.api(path, undefined, undefined, "DELETE"), cleared, "clearing again changes nothing");
+  assert.equal((await g.api(path, { tokenLimit: 5000 }, undefined, "PUT")).body.budget.revision, 4);
+  assert.deepEqual((await g.api("/v1/usage/members")).body.members[0].budget, { tokenLimit: 5000, period: "utc_day", revision: 4,
+    changedAt: (await g.api(path)).body.budget.changedAt, windowStart: window.start, usedTokens: 42 });
+
+  const rows = await audit(owner.ownerId, "usage.budget_set");
+  assert.deepEqual(rows.map(row => [row.actor, row.payload]), [["owner", { revision: 1, tokenLimit: 100, period: "utc_day" }],
+    ["owner", { revision: 2, tokenLimit: 40, period: "utc_day" }], ["owner", { revision: 4, tokenLimit: 5000, period: "utc_day" }]]);
+  assert.deepEqual((await audit(owner.ownerId, "usage.budget_cleared")).map(row => row.payload), [{ revision: 3 }]);
+  await assert.rejects(pool.query("DELETE FROM birbcrew_ts.usage_budgets WHERE member_id=$1", [owner.memberId]), { code: "23514" });
+  await assert.rejects(pool.query("UPDATE birbcrew_ts.usage_budgets SET token_limit=1, revision=revision+2 WHERE member_id=$1",
+    [owner.memberId]), { code: "23514" });
+});
+
+test("a member at or over its budget is refused at admission; an admitted or running request never is", async (t) => {
+  const owner = await member(store);
+  const g = await gateway(t, new MemberClient(store, unreachable), owner.ownerId);
+  const usage = new UsageApi(store);
+  await usage.setBudget(owner.ownerId, owner.memberId, { tokenLimit: 1000 });
+  await spend(store, owner, reported(900, 99));
+  await spend(store, owner); // unknown usage counts nothing
+  // Yesterday's usage is outside the window.
+  const old = await launched(store, owner.ownerId, await conversation(store, owner), "old");
+  await pool.query(`INSERT INTO birbcrew_ts.usage_ledger (owner_id,member_id,conversation_id,request_id,token,engine,state,input_tokens,output_tokens,recorded_at)
+    VALUES ($1,$2,$3,$4,$5,'pi','reported',50000,0,date_trunc('day', now(), 'UTC') - interval '1 second')`,
+  [owner.ownerId, owner.memberId, old.request.conversationId, old.request.requestId, old.launch.token]);
+  await old.commit();
+
+  // 999 of 1000 used: this request is admitted, starts, and its usage takes the member past the limit.
+  const conversationId = await conversation(store, owner);
+  const running = await launched(store, owner.ownerId, conversationId, "running");
+  await recordSegmentUsage(pool, running.launch, reported(500, 1));
+  assert.deepEqual((await usage.budget(owner.ownerId, owner.memberId)).usedTokens, 1500, "a soft cap: one request can pass the limit");
+
+  const refused = { ownerId: owner.ownerId, conversationId: await conversation(store, owner), requestId: randomUUID(), text: "refused" };
+  await assert.rejects(checkUsageAdmission(store, refused), { code: "usage_limit" });
+  await assert.rejects(store.recordAcceptance(refused, ownerInitiator), { code: "usage_limit" });
+  await assert.rejects(ownerAdmissionActivity(store)(refused), (error: unknown) =>
+    error instanceof ApplicationFailure && error.type === "usage_limit" && error.nonRetryable);
+  const submitted = await g.api(`/v1/conversations/${refused.conversationId}/requests`, { requestId: refused.requestId, text: refused.text });
+  assert.deepEqual(submitted, { status: 409, body: { error: "usage_limit" } });
+  assert.equal((await pool.query("SELECT 1 FROM birbcrew_ts.request_admissions WHERE request_id=$1", [refused.requestId])).rowCount, 0);
+  const refusals = await audit(owner.ownerId, "usage.request_refused");
+  assert.deepEqual(refusals, [{ actor: "system", initiator: "owner", conversationId: refused.conversationId, requestId: refused.requestId,
+    payload: { tokenLimit: 1000, usedTokens: 1500, period: "utc_day", windowStart: new Date(new Date().setUTCHours(0, 0, 0, 0)).toISOString(),
+      budgetRevision: 1 } }], "one row per refused request, however often it is retried");
+
+  // The running request is not interrupted and its admission is replayed, not refused.
+  await store.recordAcceptance(running.request, ownerInitiator);
+  await checkUsageAdmission(store, running.request);
+  assert.equal(await running.commit(), "done");
+  // The workflow's own admission refusing in a race reaches the caller as the same 409 code.
+  await usage.setBudget(owner.ownerId, owner.memberId, { tokenLimit: 5000 });
+  const raced = { workflow: { start: async () => {}, getHandle: () => ({ executeUpdate: async () => {
+    throw new WorkflowUpdateFailedError("Workflow Update failed", new ActivityFailure("Activity task failed", "recordAcceptance", "1",
+      undefined as never, "worker", ApplicationFailure.nonRetryable("usage_limit", "usage_limit")));
+  } }) } } as unknown as Client;
+  await assert.rejects(new MemberClient(store, raced).accept({ ...refused, requestId: randomUUID() }), { code: "usage_limit" });
+  // A larger limit, or no limit, admits again.
+  await store.recordAcceptance({ ...refused, requestId: randomUUID() }, ownerInitiator);
+  await usage.setBudget(owner.ownerId, owner.memberId, { tokenLimit: 1 });
+  await assert.rejects(store.recordAcceptance({ ...refused, requestId: randomUUID() }, ownerInitiator), { code: "usage_limit" });
+  await usage.clearBudget(owner.ownerId, owner.memberId);
+  await store.recordAcceptance({ ...refused, requestId: randomUUID() }, ownerInitiator);
+  // Another member of the owner is not limited by this one's budget.
+  const sibling = await member(store, owner.ownerId);
+  await usage.setBudget(owner.ownerId, owner.memberId, { tokenLimit: 1 });
+  await store.recordAcceptance({ ownerId: owner.ownerId, conversationId: await conversation(store, sibling), requestId: randomUUID(), text: "free" }, ownerInitiator);
+});
+
+test("a routine firing refused by its member's budget fails with usage_limit and counts toward the switch-off", async (t) => {
+  const db = await databaseAt(t);
+  const isolated = new MemberStore(db);
+  const owner = await member(isolated);
+  let now = new Date("2031-01-06T10:00:00.000Z");
+  const clock: Clock = () => new Date(now);
+  const members = {
+    async open(input: Parameters<MemberStore["openConversation"]>[0]) { return isolated.openConversation(input); },
+    async accept(input: TurnRequest) { await isolated.recordAcceptance(input, ownerInitiator); return { requestId: input.requestId }; },
+    async requestStatus(input: Parameters<MemberStore["requestStatus"]>[0]) { return isolated.requestStatus(input); },
+    async cancelPending() {},
+  } as unknown as MemberClient;
+  const integration = new IntegrationApi(isolated, members);
+  const routine = await new RoutineApi(isolated, clock).create(owner.ownerId, { requestId: randomUUID(), memberId: owner.memberId,
+    schedule: "*/15 * * * *", prompt: "scheduled prompt", approvalPolicy: "wait" });
+  await new UsageApi(isolated).setBudget(owner.ownerId, owner.memberId, { tokenLimit: 10 });
+  await spend(isolated, owner, reported(10));
+  await db.query("UPDATE birbcrew_ts.routines SET consecutive_failures=8 WHERE routine_id=$1", [routine.routineId]);
+  const dispatcher = new RoutineDispatcher({ store: isolated, members, integration, owners: [owner.ownerId], clock });
+  t.after(() => dispatcher.stop());
+  for (const minutes of [15, 30]) {
+    now = new Date(Date.parse("2031-01-06T10:00:00.000Z") + minutes * 60_000);
+    await dispatcher.tick();
+  }
+  const { rows: firings } = await db.query(`SELECT status, reason, conversation_id, request_id FROM birbcrew_ts.routine_firings
+    WHERE routine_id=$1 ORDER BY scheduled_for`, [routine.routineId]);
+  assert.deepEqual(firings.map(row => [row.status, row.reason]), [["failed", "usage_limit"], ["failed", "usage_limit"]]);
+  const { rows: [state] } = await db.query("SELECT state, disabled_reason, consecutive_failures FROM birbcrew_ts.routines WHERE routine_id=$1",
+    [routine.routineId]);
+  assert.deepEqual(state, { state: "disabled", disabled_reason: "consecutive_failures", consecutive_failures: 10 });
+  const { rows: refusals } = await db.query(`SELECT conversation_id, request_id, payload->>'routineId' AS routine FROM birbcrew_ts.audit_events
+    WHERE event_type='usage.request_refused' ORDER BY event_id`);
+  assert.deepEqual(refusals, firings.map(row => ({ conversation_id: row.conversation_id, request_id: row.request_id, routine: routine.routineId })));
+  const { rows: settled } = await db.query(`SELECT payload->>'reason' AS reason FROM birbcrew_ts.audit_events
+    WHERE event_type='routine.firing_settled' ORDER BY event_id`);
+  assert.deepEqual(settled.map(row => row.reason), ["usage_limit", "usage_limit"]);
+});
+
+test("migration 031 takes its locks without queueing, rewrites nothing, leaves its CHECKs unvalidated and never waits for a running turn", async (t) => {
+  const upgraded = await databaseAt(t, 26);
+  const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
+  const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
+    (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'codex','fixture') RETURNING member_id`, [ownerId, randomUUID()]);
+  await upgraded.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)", [ownerId, memberId, conversationId]);
+  const db = await upgraded.connect();
+  try {
+    await db.query("BEGIN");
+    const files = `SELECT pg_relation_filenode('birbcrew_ts.members') AS members, pg_relation_filenode('birbcrew_ts.native_launches') AS launches,
+      pg_relation_filenode('birbcrew_ts.audit_events') AS audit, pg_relation_filenode('birbcrew_ts.routine_firings') AS firings`;
+    const { rows: [before] } = await db.query(files);
+    await db.query(await readFile(new URL("031-usage.sql", sql), "utf8"));
+    assert.deepEqual((await db.query(files)).rows[0], before);
+    const { rows } = await db.query(`SELECT c.relname AS relation, l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
+      WHERE l.pid=pg_backend_pid() AND c.relkind='r' AND c.relnamespace='birbcrew_ts'::regnamespace
+        AND c.relname NOT IN ('usage_ledger','usage_budgets') ORDER BY 1,2`);
+    assert.deepEqual(rows, [
+      { relation: "audit_events", mode: "AccessExclusiveLock" }, { relation: "audit_events", mode: "ShareLock" },
+      { relation: "members", mode: "AccessShareLock" }, { relation: "members", mode: "ShareRowExclusiveLock" },
+      { relation: "native_launches", mode: "AccessShareLock" }, { relation: "native_launches", mode: "ShareRowExclusiveLock" },
+      { relation: "routine_firings", mode: "AccessExclusiveLock" },
+    ]);
+    const { rows: checks } = await db.query(`SELECT conname AS name, convalidated AS validated FROM pg_constraint
+      WHERE conname IN ('audit_events_type_check','routine_firings_check4') ORDER BY 1`);
+    assert.deepEqual(checks, [{ name: "audit_events_type_check", validated: false }, { name: "routine_firings_check4", validated: false }]);
+  } finally {
+    await db.query("ROLLBACK");
+    db.release();
+  }
+
+  // A launch being reserved holds native_launches in a mode the migration's lock excludes.
+  const current = new MemberStore(upgraded);
+  const execution = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
+  const start = await current.beginTurn({ ownerId, conversationId, requestId, text }, execution);
+  assert.equal(start.kind, "start"); if (start.kind !== "start") return;
+  const holder = await upgraded.connect();
+  try {
+    await holder.query("BEGIN");
+    await holder.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+      VALUES ($1,$2,$3,$4,$5,1)`, [conversationId, requestId, start.token, execution.workflowRunId, execution.activityId]);
+    let migrated = false;
+    const migrating = current.migrate().then(() => { migrated = true; });
+    for (let i = 0; i < 10; i++) {
+      await delay(30);
+      const { rows: waiting } = await upgraded.query(`SELECT pid FROM pg_locks WHERE NOT granted
+        AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`);
+      assert.deepEqual(waiting, [], "the migration retries instead of queueing");
+    }
+    assert.equal(migrated, false);
+    await holder.query("COMMIT");
+    await migrating;
+  } finally { holder.release(); }
+  assert.deepEqual((await upgraded.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version>26")).rows, [{ version: 31 }]);
+  // The turn that started before the upgrade is metered when its segment returns.
+  await recordSegmentUsage(upgraded, { ownerId, conversationId, requestId, text, token: start.token, execution }, reported(3, 4));
+  assert.equal((await upgraded.query("SELECT count(*)::integer AS n FROM birbcrew_ts.usage_ledger")).rows[0].n, 1);
+});
+
+test("migration 031 completes while a native turn holds its admission", async (t) => {
+  const upgraded = await databaseAt(t, 26);
+  const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
+  // A Codex turn's admission holds its native_launches row FOR SHARE for the whole native turn.
+  const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
+    (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'codex','fixture') RETURNING member_id`, [ownerId, randomUUID()]);
+  await upgraded.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)", [ownerId, memberId, conversationId]);
+  const current = new MemberStore(upgraded);
+  const execution = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
+  const start = await current.beginTurn({ ownerId, conversationId, requestId, text }, execution);
+  assert.equal(start.kind, "start"); if (start.kind !== "start") return;
+  await upgraded.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+    VALUES ($1,$2,$3,$4,$5,1)`, [conversationId, requestId, start.token, execution.workflowRunId, execution.activityId]);
+  const launch: Launch = { ownerId, conversationId, requestId, text, token: start.token, execution };
+  await withNativeAdmission(upgraded, launch, AbortSignal.timeout(30_000), async () => {
+    const migrated = await Promise.race([current.migrate().then(() => true), delay(5_000, false)]);
+    assert.equal(migrated, true, "migration 031 must not wait for a running native turn");
+  });
+  await recordSegmentUsage(upgraded, launch, reported(3, 4));
+  assert.equal((await upgraded.query("SELECT count(*)::integer AS n FROM birbcrew_ts.usage_ledger")).rows[0].n, 1);
+});
+
+test("a held installation refuses every usage write and still serves reads", async (t) => {
+  const db = await databaseAt(t);
+  const isolated = new MemberStore(db);
+  const owner = await member(isolated);
+  const segment = await launched(isolated, owner.ownerId, await conversation(isolated, owner));
+  const api = new UsageApi(isolated);
+  const directory = await mkdtemp(join(tmpdir(), "birbcrew-usage-hold-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const recovery = new InstallationRecovery(db, new FileRecoveryFence(join(directory, "fence")));
+  await recovery.initializeFence();
+  await recovery.freeze();
+  await assert.rejects(recordSegmentUsage(db, segment.launch, reported(1, 1)), { code: "55000" });
+  await assert.rejects(api.setBudget(owner.ownerId, owner.memberId, { tokenLimit: 5 }), { code: "55000" });
+  assert.equal((await api.summary(owner.ownerId, {})).total.segments, 0);
+  await recovery.resume({ reconcile: async () => {} });
+  await recordSegmentUsage(db, segment.launch, reported(1, 1));
+  assert.equal((await api.summary(owner.ownerId, {})).total.segments, 1);
+});

@@ -22,6 +22,7 @@ import { MemberStore } from "./store.ts";
 import { IntegrationApi, integrationCapabilities } from "./integration-api.ts";
 import { firingParameterNames, RoutineApi, RoutineDispatcher, routineListParameterNames, type Clock } from "./routines.ts";
 import { TemporalSettingsError, temporalConnectionOptions, temporalSettings } from "./temporal-config.ts";
+import { UsageApi, usageParameterNames } from "./usage.ts";
 
 const credentials = z.record(z.string().regex(/^[0-9a-f]{64}$/), z.string().min(1));
 const encoder = new EventEncoder();
@@ -194,6 +195,7 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
   const schemaVersion = () => databaseProbe ??= readSchemaVersion(store.pool.options).finally(() => { databaseProbe = undefined; });
   const routines = new RoutineApi(store, clock);
   const memories = new MemoryApi(store);
+  const usage = new UsageApi(store);
   const dispatcher = new RoutineDispatcher({ store, members, integration, owners: accounts.map(({ actor }) => actor), clock });
   async function route(request: IncomingMessage, response: ServerResponse) {
     const auth = request.headers.authorization;
@@ -259,6 +261,21 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       if (request.method === "GET") return json(response, 200, await memories.get(ownerId, memoryId));
       if (request.method === "DELETE") return json(response, 200, await memories.delete(ownerId, memoryId));
       throw new HttpError(405, "method_not_allowed");
+    }
+    const usageRoute = versioned && /^\/usage(?:\/(members|conversations|records)|\/budgets\/([^/]+))?$/.exec(path);
+    if (usageRoute) {
+      const [, listing, budgetMember] = usageRoute;
+      const view = (listing ?? "summary") as keyof typeof usageParameterNames;
+      if (budgetMember !== undefined) {
+        if (url.search) throw new HttpError(400, "invalid_input");
+        const memberId = z.uuid().parse(budgetMember);
+        if (request.method === "GET") return json(response, 200, await usage.budget(ownerId, memberId));
+        if (request.method === "PUT") return json(response, 200, await usage.setBudget(ownerId, memberId, await body(request)));
+        if (request.method === "DELETE") return json(response, 200, await usage.clearBudget(ownerId, memberId));
+        throw new HttpError(405, "method_not_allowed");
+      }
+      if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
+      return json(response, 200, await usage[view](ownerId, queryOf(url, usageParameterNames[view])));
     }
     const grantRoute = versioned && /^\/members\/([^/]+)\/grants(?:\/([^/]+)\/(revoke))?$/.exec(path);
     if (grantRoute) {

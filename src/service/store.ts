@@ -10,6 +10,8 @@ import { savedProposal, type Approval } from "./approvals.ts";
 import { appendAudit } from "./audit.ts";
 import { firingConversation, firingInitiator } from "./routines.ts";
 import { snapshotMemories } from "./memories.ts";
+import { refuseOverBudget } from "./usage.ts";
+import { ApplicationFailure } from "@temporalio/client";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Pool, PoolClient } from "pg";
@@ -73,7 +75,15 @@ export async function admittedInitiator(
  * request. The initiator is not a workflow or update argument, so recorded histories replay
  * unchanged. */
 export function ownerAdmissionActivity(store: MemberStore) {
-  return (request: TurnRequest): Promise<void> => store.recordAcceptance(request, ownerInitiator);
+  return async (request: TurnRequest): Promise<void> => {
+    try { await store.recordAcceptance(request, ownerInitiator); }
+    catch (error) {
+      // Retrying cannot change a budget refusal within the activity's deadline. MemberClient
+      // reads this failure type back as usage_limit.
+      if (error instanceof MemberStoreError && error.code === "usage_limit") throw ApplicationFailure.nonRetryable("usage_limit", "usage_limit");
+      throw error;
+    }
+  };
 }
 
 export class MemberStore {
@@ -103,7 +113,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [22, "022-conversation-owner-index.sql"], [23, "023-request-initiator.sql"], [24, "024-standing-grants.sql"], [25, "025-routines.sql"], [26, "026-memories.sql"]] as const;
+      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [22, "022-conversation-owner-index.sql"], [23, "023-request-initiator.sql"], [24, "024-standing-grants.sql"], [25, "025-routines.sql"], [26, "026-memories.sql"], [31, "031-usage.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -179,7 +189,8 @@ export class MemberStore {
     const attested=requestInitiator.parse(initiator);
     if(attested.kind!=="owner")throw new MemberStoreError("conflict");
     const digest=createHash("sha256").update(key.text).digest();
-    return this.transaction(async db=>{
+    // A budget refusal commits its audit row, then refuses.
+    const refused=await this.transaction(async db=>{
       const conversation=await conversationFor(db,key,true);
       const {rows:[prior]}=await db.query<{phase:"accepted"|"rejected";reason:string|null;prompt_digest:Buffer}>(
         "SELECT phase,reason,prompt_digest FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
@@ -199,12 +210,15 @@ export class MemberStore {
           FROM birbcrew_ts.conversations WHERE conversation_id=$1`,[key.conversationId]);
         if(budget.used>=budget.limit)throw new MemberStoreError("input_limit");
       }
-      const [initiatorKind,initiatorId]=initiatorColumns(await firingInitiator(db,key,conversation)??attested);
+      const recorded=await firingInitiator(db,key,conversation)??attested;
+      if(await refuseOverBudget(db,key,conversation.memberId,recorded.kind==="routine"?recorded.id:undefined))return true;
+      const [initiatorKind,initiatorId]=initiatorColumns(recorded);
       await db.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest,initiator_kind,initiator_id)
         VALUES($1,$2,$3,$4,$5)`,[key.conversationId,key.requestId,digest,initiatorKind,initiatorId]);
       await appendAudit(db,{type:"request.accepted",ownerId:key.ownerId,memberId:conversation.memberId,
         conversationId:key.conversationId,requestId:key.requestId,payload:{promptDigest:digest.toString("hex")}});
     });
+    if(refused)throw new MemberStoreError("usage_limit");
   }
 
   async rejectAccepted(input: z.input<typeof submitSchema>, reason:"predecessor_failed"|"predecessor_cancelled"): Promise<void> {
