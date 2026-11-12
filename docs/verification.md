@@ -110,8 +110,9 @@ timing and status.
 Set `BIRBCREW_OTLP_TRACES_ENDPOINT` to also send the same spans over OTLP/HTTP
 JSON to a collector. Give the full traces URL, such as
 `https://collector.example/v1/traces`. It must use `https`, except that plain
-`http` is allowed to `127.0.0.1` or `[::1]`, such as
-`http://127.0.0.1:4318/v1/traces`. It must have a path and must not embed a
+`http` is allowed to `127.0.0.1`, such as
+`http://127.0.0.1:4318/v1/traces`. IPv6 literal hosts such as `[::1]` are
+rejected because the exporter cannot connect to them. It must have a path and must not embed a
 user name, password, query string or fragment; the exporter sends only the
 path, so a query string would otherwise be dropped. Either sink, both or
 neither may be set. Spans come from the member worker and its native turn
@@ -128,7 +129,8 @@ turn. It can slow one, though: the host confirms a native turn only after its
 runner exits, and the runner first waits up to 250 milliseconds to flush its
 spans. A slow, stalled or unreachable collector therefore adds up to a quarter
 second to every native turn, and spans not flushed in time are dropped. The
-worker waits up to one second to flush when it stops. The exporter also
+worker waits up to one second to flush when it stops, and can then stay up
+for two more seconds while an unanswered export times out. The exporter also
 honours the standard `OTEL_EXPORTER_OTLP_HEADERS`,
 `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, certificate, client key and compression
 variables. The generic `OTEL_EXPORTER_OTLP_*` forms apply to every OTLP

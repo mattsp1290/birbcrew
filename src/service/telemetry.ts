@@ -19,16 +19,19 @@ const output = process.env.BIRBCREW_TRACE_FILE;
 const endpoint = otlpEndpoint(process.env.BIRBCREW_OTLP_TRACES_ENDPOINT);
 
 // A typo must stop startup, not silently send spans elsewhere or drop them. The value is not echoed
-// because a rejected URL may contain credentials. As in the proxy relay, plain http is allowed only to
-// numeric loopback, because collector headers from the OTLP environment variables ride on every request.
+// because a rejected URL may contain credentials. Plain http is allowed only to 127.0.0.1, because collector
+// headers from the OTLP environment variables ride on every request. IPv6 literals are refused outright, unlike
+// in the proxy relay: the exporter passes the bracketed host to node:http, which cannot resolve it, so every
+// export would fail unnoticed.
 // The exporter sends only the path, so a query or fragment (often an ingest key) would be dropped silently.
 function otlpEndpoint(value: string | undefined) {
   if (!value) return undefined;
   const url = URL.parse(value);
   if (!url || url.username || url.password || url.search || url.hash || url.pathname === "/" ||
-      !(url.protocol === "https:" || (url.protocol === "http:" && ["127.0.0.1", "[::1]"].includes(url.hostname)))) {
+      url.hostname.startsWith("[") ||
+      !(url.protocol === "https:" || (url.protocol === "http:" && url.hostname === "127.0.0.1"))) {
     throw new Error("BIRBCREW_OTLP_TRACES_ENDPOINT must be an https OTLP traces URL with a path (plain http only "
-      + "to 127.0.0.1 or [::1]), such as http://127.0.0.1:4318/v1/traces, with no credentials, query or fragment");
+      + "to 127.0.0.1), such as http://127.0.0.1:4318/v1/traces, with no IPv6 literal, credentials, query or fragment");
   }
   return url.href;
 }
@@ -48,20 +51,22 @@ const exporter: SpanExporter = {
   },
   async shutdown() {},
 };
+const exportTimeoutMs = 2_000;
 const processors: SpanProcessor[] = [];
 if (output) processors.push(new SimpleSpanProcessor(exporter));
 if (endpoint) {
   // Loaded only when configured: every native turn forks a runner that imports this module.
   const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-http");
   // Ending a span only enqueues it. A full queue drops spans, and failed exports are discarded.
-  processors.push(new BatchSpanProcessor(new OTLPTraceExporter({ url: endpoint, timeoutMillis: 5_000 }), {
-    maxQueueSize: 1_024, maxExportBatchSize: 256, scheduledDelayMillis: 1_000, exportTimeoutMillis: 5_000,
+  processors.push(new BatchSpanProcessor(new OTLPTraceExporter({ url: endpoint, timeoutMillis: exportTimeoutMs }), {
+    maxQueueSize: 1_024, maxExportBatchSize: 256, scheduledDelayMillis: 1_000, exportTimeoutMillis: exportTimeoutMs,
   }));
 }
 const provider = processors.length ? new BasicTracerProvider({
   resource: resourceFromAttributes({ "service.name": "birbcrew" }),
   spanProcessors: processors,
-  // Bounds flushTelemetry so an unreachable collector cannot hold a process open on its way out.
+  // Bounds only the flush wait. An export it abandons can still hold a returning process (the worker) open
+  // until exportTimeoutMs; the turn runner ends it with process.exit.
   forceFlushTimeoutMillis: 1_000,
   idGenerator: {
     generateTraceId: () => active.getStore()?.traceId ?? randomBytes(16).toString("hex"),

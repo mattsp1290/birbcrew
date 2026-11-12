@@ -124,6 +124,8 @@ test("a malformed endpoint fails at startup without echoing it", async (t) => {
     `http://operator:hunter2@127.0.0.1:${port}/v1/traces`, `http://127.0.0.1:${port}`, `https://127.0.0.1:${port}/`,
     // Plain http beyond numeric loopback would carry collector headers in the clear.
     `http://collector.example:${port}/v1/traces`, `http://localhost:${port}/v1/traces`,
+    // The exporter cannot resolve a bracketed IPv6 host, so these would export nothing.
+    `http://[::1]:${port}/v1/traces`, "https://[2001:db8::1]/v1/traces",
     // The exporter would drop these silently.
     `https://127.0.0.1:${port}/v1/traces?api_key=hunter2`, `https://127.0.0.1:${port}/v1/traces#hunter2`]) {
     const result = await run({ BIRBCREW_OTLP_TRACES_ENDPOINT: value }, [...ids(), "private"]);
