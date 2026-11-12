@@ -688,8 +688,8 @@ test("migration 025 never queues for a lock, so it neither waits for a native tu
     await holder.query("COMMIT");
     await migrating;
   } finally { holder.release(); }
-  const { rows: [version] } = await upgraded.query("SELECT max(version)::integer AS v FROM birbcrew_ts.schema_versions");
-  assert.equal(version.v, 25);
+  const { rows: [version] } = await upgraded.query("SELECT count(*)::integer AS n FROM birbcrew_ts.schema_versions WHERE version=25");
+  assert.equal(version.n, 1);
 });
 
 test("migration 025 completes while a native turn holds its admission", async (t) => {

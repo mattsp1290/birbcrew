@@ -398,7 +398,7 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
   try {
     await db.query("BEGIN");
     const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), digest = "0".repeat(64);
-    const routineId = randomUUID();
+    const routineId = randomUUID(), memoryId = randomUUID();
     const { rows: [{ member_id: memberId }] } = await db.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
       (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi',$3) RETURNING member_id`, [ownerId, randomUUID(), profile]);
     await db.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)",
@@ -423,6 +423,9 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
         toolName: "record_work_item", argumentDigest: digest, grantId: randomUUID() } },
       "grant.created": { conversationId, requestId, payload: { grantId: randomUUID(), approvalId: randomUUID(), scope: "member" } },
       "grant.revoked": { conversationId, payload: { grantId: randomUUID(), reason: "owner" } },
+      "memory.created": { payload: { memoryId } },
+      "memory.deleted": { payload: { memoryId } },
+      "memory.suspended": { payload: { memoryId, reason: "recovery_restore" } },
     };
     for (const type of auditEventTypes) {
       const fact = { type, ownerId, memberId, ...samples[type] } as AuditFact<typeof type>;
