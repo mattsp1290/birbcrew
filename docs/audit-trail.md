@@ -46,7 +46,15 @@ never contain prompt or reply text, tool arguments or results, notes, tokens or
 credentials. `src/service/audit.ts` validates each payload against a strict schema
 before insert, so extra fields are refused. The prompt digest is the hex SHA-256 of
 the exact UTF-8 text, the same digest that admission already stores. The argument
-digest is the one shown on the public approval card.
+digest is the one shown on the public approval card: a SHA-256 over the tool name,
+operation ID and note.
+
+Both digests are unsalted fingerprints of the text, not secrets. Anyone holding an
+export can confirm a guess, and can recover short or predictable text ("yes", "run
+the tests", a templated prompt) by trying candidates. Identical text has the same
+digest for every owner, so pooled exports link those requests across owners. Treat
+an exported trail with the same care as the prompts and notes themselves. A later
+audit version may switch to a keyed per-owner digest.
 
 ## Event types
 
@@ -120,8 +128,15 @@ parameters. It uses RFC 4180 quoting and CRLF line endings, with a header row:
 The payload cell is its JSON. Empty cells are nulls. The `Audit-Next-After` and
 `Audit-Has-More` headers carry the cursor. To export more than one page, pass
 `limit=10000` and loop on `Audit-Next-After` while `Audit-Has-More` is `true`.
-Cells are not escaped for spreadsheet formulas. Owner IDs come from the operator's
-gateway configuration.
+
+Spreadsheets run a cell that starts with `=`, `+`, `-`, `@`, tab or carriage return
+as a formula. Owner IDs are free text from the operator's gateway configuration and
+appear in the `actorId` and `initiatorId` cells. Any cell that starts with one of
+those characters, or with `'`, is written with one extra leading `'`, the usual
+mitigation, so a spreadsheet shows it as text. The file stays plain RFC 4180. A
+program reading the CSV recovers each exact value by removing one leading `'` from
+any cell that starts with it. No other column can start with these characters.
+JSON responses are not changed.
 
 ### Pages never skip a late commit
 
@@ -275,9 +290,16 @@ By direct SQL it checks:
 
 - one row per fact across concurrent duplicates, retries and replays, including
   reconciliation and quarantine;
+- that appending a sample of every registered type twice leaves one row each,
+  so every `ON CONFLICT` key matches its index;
+- that a Claude turn handed to recovery records no `request.finished` until its
+  recovered decision commits, and then only `completed`. The native session
+  restore is replaced by a given proposal;
 - rejection of `UPDATE`, `DELETE` and `TRUNCATE`, unknown types, other
   initiators, conversations of another owner or member, null natural keys and
   extra payload fields;
+- spreadsheet formula prefixes in CSV cells, and that a plain RFC 4180 reader
+  recovers the exact values;
 - migration 21 on a version-20 database with members and conversations: the locks
   it takes on existing tables, and that it completes while a native turn holds its
   admission and that turn still writes to its conversation;
@@ -300,4 +322,6 @@ way Temporal activities do. They do not run a Temporal worker or native SDK. The
 Temporal service proofs (`npm run test:api:service`, `scripts/verify-members`) do
 not assert audit rows. Codex live answers and dispatch share the audited
 `decideLocked`/`settleLocked` paths, but no test drives them through `answerLive`
-or `settleLive` and then reads the trail.
+or `settleLive` and then reads the trail. A trusted effect whose conversation has
+vanished fails rather than commit without its row, but the foreign key from
+trusted sessions makes that unreachable, so no test drives it.

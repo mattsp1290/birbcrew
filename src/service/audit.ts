@@ -126,9 +126,13 @@ export async function readAudit(pool: Pool, ownerId: string, query: AuditQuery) 
 
 const csvColumns = ["eventId", "occurredAt", "type", "actorKind", "actorId", "initiatorKind", "initiatorId",
   "memberId", "conversationId", "requestId", "payload"];
+// Spreadsheets run a cell that starts with = + - @ tab or CR as a formula; owner IDs are
+// free text. Prefixing ' keeps such a cell inert. A leading ' gets one too, so a reader
+// recovers every value exactly by dropping one leading '.
 function csvCell(value: string | null) {
   if (value === null) return "";
-  return /[",\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
+  const inert = /^[=+\-@\t\r']/.test(value) ? "'" + value : value;
+  return /[",\r\n]/.test(inert) ? `"${inert.replaceAll('"', '""')}"` : inert;
 }
 export function auditCsv(events: AuditEvent[]) {
   const lines = [csvColumns.join(",")];

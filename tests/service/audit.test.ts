@@ -7,7 +7,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Pool } from "pg";
 import { z } from "zod";
 import { ApprovalStore } from "../../src/service/approvals.ts";
-import { appendAudit, auditCsv, auditEventTypes, auditQuerySchema, auditSettleWindowMs, type AuditEvent } from "../../src/service/audit.ts";
+import { appendAudit, auditCsv, auditEventTypes, auditQuerySchema, auditSettleWindowMs,
+  type AuditEvent, type AuditEventType, type AuditFact } from "../../src/service/audit.ts";
 import { ChildStore } from "../../src/service/children.ts";
 import type { MemberClient } from "../../src/service/client.ts";
 import type { TurnRequest } from "../../src/service/domain.ts";
@@ -356,6 +357,71 @@ test("the SQL CHECK and the TypeScript registry name the same event types", asyn
   assert.deepEqual([...named].sort(), [...auditEventTypes].sort());
 });
 
+test("every event type's natural key is a working ON CONFLICT arbiter", async () => {
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), digest = "0".repeat(64);
+    const { rows: [{ member_id: memberId }] } = await db.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
+      (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi',$3) RETURNING member_id`, [ownerId, randomUUID(), profile]);
+    await db.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)",
+      [ownerId, memberId, conversationId]);
+    // Typed by the registry, so a new event type cannot be added without a sample here.
+    const samples: { [T in AuditEventType]: Omit<AuditFact<T>, "type" | "ownerId" | "memberId"> } = {
+      "member.spawned": { payload: { spawnRequestId: randomUUID(), engine: "pi", profile } },
+      "conversation.opened": { conversationId, payload: {} },
+      "request.accepted": { conversationId, requestId, payload: { promptDigest: digest } },
+      "approval.decided": { conversationId, requestId, payload: { approvalId: randomUUID(), invocationId: requestId,
+        toolName: "record_work_item", argumentDigest: digest, choice: "approve" } },
+      "work_item.committed": { conversationId, requestId, payload: { receiptId: randomUUID(), approvalId: randomUUID() } },
+      "request.cancellation_requested": { conversationId, requestId, payload: {} },
+      "request.finished": { conversationId, requestId, payload: { status: "completed" } },
+      "trusted_effect.completed": { conversationId, requestId, payload: { operationId: randomUUID(), toolName: "fixture_effect" } },
+    };
+    for (const type of auditEventTypes) {
+      const fact = { type, ownerId, memberId, ...samples[type] } as AuditFact<typeof type>;
+      await appendAudit(db, fact);
+      await appendAudit(db, fact);
+    }
+    const { rows } = await db.query<{ type: string; n: number }>(`SELECT event_type AS type, count(*)::integer AS n
+      FROM birbcrew_ts.audit_events WHERE owner_id=$1 GROUP BY 1`, [ownerId]);
+    assert.deepEqual(Object.fromEntries(rows.map(row => [row.type, row.n])), Object.fromEntries(auditEventTypes.map(type => [type, 1])));
+  } finally {
+    await db.query("ROLLBACK");
+    db.release();
+  }
+});
+
+test("CSV cells a spreadsheet would run as formulas are inert and still recover the exact value", () => {
+  const ids = ["=HYPERLINK(\"http://x\")", "+1", "-1", "@SUM(A1)", "\tlead", "\rlead", "'quoted", "plain", "a=b"];
+  const event = (id: string) => ({ eventId: "1", occurredAt: "2026-11-12T00:00:00.000000Z", type: "member.spawned",
+    actor: { kind: "owner", id }, initiator: { kind: "owner", id }, memberId: randomUUID(), conversationId: null,
+    requestId: null, payload: {} }) as AuditEvent;
+  // A plain RFC 4180 reader still parses the export.
+  const records: string[][] = [];
+  let record: string[] = [], cell = "", quoted = false;
+  const csv = auditCsv(ids.map(event));
+  for (let i = 0; i < csv.length; i++) {
+    const c = csv[i];
+    if (quoted) {
+      if (c !== '"') cell += c;
+      else if (csv[i + 1] === '"') { cell += '"'; i++; }
+      else quoted = false;
+    } else if (c === '"') quoted = true;
+    else if (c === ",") { record.push(cell); cell = ""; }
+    else if (c === "\r" && csv[i + 1] === "\n") { record.push(cell); records.push(record); record = []; cell = ""; i++; }
+    else cell += c;
+  }
+  const rows = records.slice(1);
+  assert.ok(rows.every(row => row.length === 11));
+  for (const column of [4, 6]) {
+    const cells = rows.map(row => row[column]);
+    for (const value of cells) assert.doesNotMatch(value, /^[=+\-@\t\r]/, value);
+    assert.deepEqual(cells.map(value => value.startsWith("'") ? value.slice(1) : value), ids);
+    assert.deepEqual(cells.slice(-2), ["plain", "a=b"]);
+  }
+});
+
 test("a writer left open past the read window yields a retryable 503 audit_unsettled after a bounded number of polls", async (t) => {
   const f = await fixture(); t.after(f.stop);
   const query = pool.query;
@@ -387,6 +453,47 @@ test("a writer left open past the read window yields a retryable 503 audit_unset
     writer.release();
   }
   assert.equal((await f.api("/v1/audit")).status, 200);
+});
+
+test("a Claude turn recovered to a pending decision is finished once, by its commit", async () => {
+  const ownerId = "owner-" + randomUUID(), claude = "audit-recover-" + randomUUID();
+  await pool.query(`INSERT INTO birbcrew_ts.profiles (name,engine,account_digest,volume,protected_tool)
+    VALUES ($1,'claude',$2,$3,'record_work_item')`, [claude, Buffer.alloc(32), randomUUID()]);
+  const member = await store.spawn({ ownerId, requestId: randomUUID(), engine: "claude", profile: claude });
+  const conversationId = randomUUID();
+  await store.openConversation({ ownerId, memberId: member.memberId, conversationId });
+  const request = { ownerId, conversationId, requestId: randomUUID(), text: "recover me" };
+  await store.recordAcceptance(request);
+  const run = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
+  const start = await store.beginTurn(request, run);
+  assert.equal(start.kind, "start"); if (start.kind !== "start") return;
+  const launch = [conversationId, request.requestId, start.token];
+  await pool.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+    VALUES ($1,$2,$3,$4,$5,1)`, [...launch, run.workflowRunId, run.activityId]);
+
+  // The SDK failed mid-turn. Handing the turn to recovery is not an outcome yet.
+  assert.deepEqual(await store.reconcileTurn(request, run.workflowRunId, false), { kind: "recover" });
+  assert.equal((await counts(ownerId))["request.finished"], undefined);
+  await pool.query("UPDATE birbcrew_ts.native_launches SET stopped=true WHERE conversation_id=$1 AND request_id=$2 AND token=$3", launch);
+  assert.equal((await store.stoppedProposal(request, run.workflowRunId))?.kind, "recover");
+  // recoverPending restores the native session here; its proposal is given directly.
+  const scope = { ownerId, memberId: member.memberId, conversationId, requestId: request.requestId };
+  const call = { invocationId: request.requestId, nativeCallId: "recovered-call" };
+  const approval = await approvals.propose({ ...scope, ...call, token: start.token, toolName: "record_work_item",
+    arguments: { operation_id: request.requestId } }, { version: 1, engine: "claude", state: {} }, { recoverStopped: true });
+  await approvals.decide({ ...scope, ...call, approvalId: approval.approvalId, argumentDigest: approval.argumentDigest,
+    version: approval.version, choice: "approve" });
+  const resumed = await store.beginResume(request, approval, { ...run, activityId: "resume" });
+  assert.equal(resumed.kind, "start"); if (resumed.kind !== "start") return;
+  const settled = await approvals.settle({ ...scope, ...call, approvalId: approval.approvalId, token: resumed.token });
+  assert.equal(settled.kind, "recorded");
+  await store.commitTurn({ ownerId, conversationId, requestId: request.requestId, token: resumed.token, reply: "recovered",
+    checkpoint: { version: 1, engine: "claude", state: {} } });
+
+  const { rows } = await pool.query("SELECT payload->>'status' AS status FROM birbcrew_ts.audit_events WHERE owner_id=$1 AND event_type='request.finished'", [ownerId]);
+  assert.deepEqual(rows.map(row => row.status), ["completed"]);
+  assert.deepEqual(await counts(ownerId), { "approval.decided": 1, "conversation.opened": 1, "member.spawned": 1,
+    "request.accepted": 1, "request.finished": 1, "work_item.committed": 1 });
 });
 
 test("migration 21 upgrades a v20 database with rows while a native turn holds its admission", async (t) => {
