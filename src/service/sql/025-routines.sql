@@ -178,6 +178,11 @@ ALTER TABLE birbcrew_ts.audit_events
             AND (jsonb_typeof(payload->'receiptId') = 'string') IS TRUE)
         OR (event_type = 'trusted_effect.completed' AND request_id IS NOT NULL
             AND (jsonb_typeof(payload->'operationId') = 'string') IS TRUE)
+        -- The standing-grant types 024 added; this constraint replaces 024's, so it repeats them.
+        OR (event_type IN ('approval.auto_approved', 'grant.created') AND request_id IS NOT NULL
+            AND (jsonb_typeof(payload->'approvalId') = 'string' AND jsonb_typeof(payload->'grantId') = 'string') IS TRUE)
+        OR (event_type = 'grant.revoked' AND request_id IS NULL
+            AND (jsonb_typeof(payload->'grantId') = 'string' AND NOT payload ? 'approvalId') IS TRUE)
         OR (event_type IN ('routine.created', 'routine.enabled', 'routine.disabled', 'routine.deleted')
             AND conversation_id IS NULL AND request_id IS NULL
             AND (jsonb_typeof(payload->'routineId') = 'string') IS TRUE

@@ -3,6 +3,8 @@ import { appendAudit, auditEventTypes, auditLimits } from "./audit.ts";
 import type { MemberClient } from "./client.ts";
 import { initiatorColumns, initiatorFromColumns, initiatorKinds, MemberStoreError, ownerInitiator, submitSchema, turnKey,
   type RequestInitiator } from "./domain.ts";
+import { standingChoice } from "./deferral.ts";
+import { grantListLimit } from "./grants.ts";
 import { conversationTurnLimit, workflowGenerationTurnLimit } from "./limits.ts";
 import { routineCapabilities } from "./routines.ts";
 import type { MemberStore } from "./store.ts";
@@ -23,6 +25,11 @@ export const integrationCapabilities = {
     formats: ["json", "csv"], limits: auditLimits, retention: "append-only-with-database; no-automatic-TTL",
   },
   routines: routineCapabilities,
+  standingGrants: {
+    version: 1, choices: standingChoice.options, cardField: "standingChoices", stateField: "grantedCalls", tools: ["record_work_item"], policyVersion: 1,
+    initiatorKinds: ["owner"], route: "/v1/members/{memberId}/grants", inactiveListLimit: grantListLimit,
+    revocation: "later-proposals-only",
+  },
 } as const;
 
 const keySchema = turnKey;

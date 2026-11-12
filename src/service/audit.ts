@@ -1,7 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
-import { nextStep, toolNameSchema } from "./deferral.ts";
+import { nextStep, standingChoice, toolNameSchema } from "./deferral.ts";
 import { engineSchema, type RequestInitiator } from "./domain.ts";
 
 const uuid = z.uuid();
@@ -14,10 +14,11 @@ export const trustedToolName = /^[a-z][a-z0-9_]{0,63}$/;
 const requestFact = "(event_type, conversation_id, request_id) WHERE event_type IN ('request.accepted', 'request.cancellation_requested', 'request.finished')";
 const routineFact = "((payload->>'routineId'), (payload->>'revision')) WHERE event_type IN ('routine.created', 'routine.enabled', 'routine.disabled', 'routine.deleted')";
 const routineChange = { routineId: uuid, revision: z.int().min(2).max(2_147_483_647) };
+const grantFact = "(event_type, (payload->>'grantId'), (payload->>'approvalId')) WHERE event_type IN ('approval.auto_approved', 'grant.created', 'grant.revoked')";
 
 type Actor = "owner" | "system";
 /** The closed audit vocabulary. 021-audit.sql repeats these types in a CHECK, widened by
- * 025-routines.sql. Payloads are strict: identifiers, digests, choices and statuses only,
+ * 024-standing-grants.sql and 025-routines.sql. Payloads are strict: identifiers, digests, choices and statuses only,
  * never prompt/reply text, tool arguments or secrets. An actor given as a function is
  * decided by the validated payload. A routine acts with its owner's authority, so rows its
  * firings cause name the owner; Crew's own decisions about a routine name the system. */
@@ -31,8 +32,16 @@ export const auditEvents = {
   "approval.decided": { actor: "owner", key: "((payload->>'approvalId')) WHERE event_type = 'approval.decided'",
     payload: z.strictObject({
       approvalId: uuid, invocationId: uuid, toolName: toolNameSchema, argumentDigest: sha256,
-      choice: z.enum(["approve", "deny", ...nextStep.options]),
+      choice: z.enum(["approve", "deny", ...nextStep.options, ...standingChoice.options]),
     }) },
+  "approval.auto_approved": { actor: "system", key: grantFact, payload: z.strictObject({
+    approvalId: uuid, invocationId: uuid, toolName: z.literal("record_work_item"), argumentDigest: sha256, grantId: uuid,
+  }) },
+  "grant.created": { actor: "owner", key: grantFact,
+    payload: z.strictObject({ grantId: uuid, approvalId: uuid, scope: z.enum(["conversation", "member"]) }) },
+  // The owner revokes through the gateway; Crew revokes every grant when a restored installation resumes.
+  "grant.revoked": { actor: (payload: { reason: string }) => payload.reason === "owner" ? "owner" : "system", key: grantFact,
+    payload: z.strictObject({ grantId: uuid, reason: z.enum(["owner", "recovery_restore"]) }) },
   "work_item.committed": { actor: "system", key: "((payload->>'receiptId')) WHERE event_type = 'work_item.committed'",
     payload: z.strictObject({ receiptId: uuid, approvalId: uuid }) },
   // `policy` marks an intent a routine's fail_closed policy requested with its owner's authority.

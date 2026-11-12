@@ -50,9 +50,11 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   [scheduled routines](scheduled-routines.md#what-a-firing-records)). Named CHECK
   constraints (`audit_events_initiator_check` and
   `request_admissions_initiator_kind_check`) allow only these two kinds, and a
-  routine only on a request-tied audit row. Member handoff or standing approvals
-  must widen both in their own migration. No operator or application kind exists
+  routine only on a request-tied audit row. Member handoff must widen both in its
+  own migration. No operator or application kind exists
   yet. Operator CLI commands (`npm run members`) act as the owner they name.
+  Standing grants (migration 24) added no kind: a call a grant approves keeps its
+  request's initiator, and `approval.auto_approved` names the system as its actor.
 - `event_type`, `member_id`, `conversation_id`, `request_id` and a small
   `payload` object.
 
@@ -87,7 +89,8 @@ audit version may switch to a keyed per-owner digest.
 
 The registry is the `auditEvents` object in `src/service/audit.ts`.
 `audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
-`025-routines.sql`, lists the same types.
+`024-standing-grants.sql` and then `025-routines.sql`, lists the same types.
+Each widening replaces the whole constraint, so the latest migration lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
 
@@ -96,7 +99,10 @@ A test checks that the two lists match. `GET /v1/capabilities` lists them under
 | `member.spawned` | owner | `spawn` inserts a member | member | `spawnRequestId`, `engine`, `profile` |
 | `conversation.opened` | owner | `openConversation` inserts a conversation | conversation | `{}`, or `routineId` when a routine firing opened it |
 | `request.accepted` | owner | `recordAcceptance` commits the durable admission | conversation + request | `promptDigest` |
-| `approval.decided` | owner | `decideLocked` stores a choice: Claude/Pi cards, Pi child cards and Codex live calls | `approvalId` | `approvalId`, `invocationId`, `toolName`, `argumentDigest`, `choice` |
+| `approval.decided` | owner | `decideLocked` stores a choice: Claude/Pi cards, Pi child cards and Codex live calls. `choice` may be a standing choice | `approvalId` | `approvalId`, `invocationId`, `toolName`, `argumentDigest`, `choice` |
+| `grant.created` | owner | A standing choice creates a grant; on the card's conversation and request | `grantId` | `grantId`, `approvalId`, `scope` |
+| `approval.auto_approved` | system | `proposeLocked` inserts a call a standing grant approved, with no card | `approvalId` | `approvalId`, `invocationId`, `toolName`, `argumentDigest`, `grantId` |
+| `grant.revoked` | owner, or system for `recovery_restore` | The owner revokes a grant, or a restored installation resumes; on its conversation for a conversation grant | `grantId` | `grantId`, `reason` |
 | `work_item.committed` | system | `settleLocked` inserts the work-item receipt, including Codex live dispatch | `receiptId` | `receiptId`, `approvalId` |
 | `request.cancellation_requested` | owner | First durable cancellation fact: the v1 intent, or the cancellation marker written by the legacy cancel route | conversation + request | `receiptId` when the v1 intent came first; `policy: "fail_closed"` when a routine's policy requested it |
 | `request.finished` | system | `commitTurn` (`completed`), `rejectAccepted` (`cancelled`/`failed`), `rejectUnstartedAdmission` (`failed`), final `reconcileTurn` or delegation quarantine (`uncertain`) | conversation + request | `status`, optional `reason` |
@@ -266,6 +272,13 @@ conversation's workflow fails, as after any failed admission. Their v1 cancel
 backfills admissions the same way and fails for every request that has a turn,
 even one already admitted. Stop every process of the previous release before the
 first upgraded one starts, as for migration 21.
+
+Migration 24 replaces `audit_events_type_check` with a wider constraint, `NOT VALID`,
+in one `ALTER TABLE`, and adds one partial unique index for the three
+[standing grant](standing-grants.md#upgrade) event types. It holds `ACCESS EXCLUSIVE`
+on `audit_events` until the migration commits, so audited writes and audit reads wait
+for it. The constraint is not checked against existing rows. Building the index reads
+the table once.
 
 Migration 25 widens `audit_events_initiator_check` and `audit_events_type_check`
 the same way, adds two partial unique indexes for the routine facts and widens the
@@ -498,6 +511,9 @@ By direct SQL it checks:
   both CHECKs), that a request without an admission row is still recorded as
   owner-initiated, and that an admission given a bare string or no initiator is
   refused before anything is written;
+- migration 24 on a version-23 database with a pending card: the exact locks it
+  takes, that `deferred_calls` is neither rewritten nor scanned, that it completes
+  while a native turn holds its admission, and that its constraints are `NOT VALID`;
 - that the TypeScript and SQL registries match, for event types and for
   initiator kinds.
 

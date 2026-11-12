@@ -241,6 +241,12 @@ snapshot or copied from another fence, and never deleted. See
    npm run recovery -- resume /absolute/target-operator.ts /private/generation
    ```
 
+   Activating a restored installation revokes every standing grant that is not
+   already revoked, with reason `recovery_restore`, in the same transaction, and
+   audits each one: the restore can bring back grants revoked after its recovery
+   point. Owners answer cards again to create new ones. A held source that resumes
+   without a restore keeps its grants. See [standing grants](standing-grants.md#recovery).
+
    After successful reconciliation and activation, restart matching Temporal
    services/workers **with consumer ingress still disabled**. Let recovery
    reconcile lost native processes and verify the required held/interrupted/
@@ -380,7 +386,9 @@ a restore whose identity is past the fence's epoch, because its epoch file is
 missing or behind, starts above every ID in the restored database; that an
 unreadable epoch file fails every fence operation; that an exhausted epoch is
 refused before authority moves; and that after a fence returns no epoch or one
-below the minimum, the fence can be upgraded and the restore retried. The native fixture archives stopped Claude/Codex/Pi session state,
+below the minimum, the fence can be upgraded and the restore retried. It restores an
+archive taken before a grant was revoked and checks that the resumed target revokes
+every grant while a source that resumed without a restore keeps its own. The native fixture archives stopped Claude/Codex/Pi session state,
 restores it under a different host root mounted at `/native`, and performs actual
 SDK follow-ups with fresh synthetic proxy credentials. It makes no live requests.
 The coordinated proof additionally backs up and restores one actual generation

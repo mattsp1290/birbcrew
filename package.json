@@ -32,6 +32,7 @@
     "test:audit": "node --test tests/service/audit.test.ts",
     "test:routines": "node --test tests/service/routine-schedule.test.ts tests/service/routines.test.ts",
     "test:routines:service": "node tests/proof/routines.mts",
+    "test:grants": "node --test tests/service/standing-grants.test.ts",
     "test:api:service": "node tests/proof/integration-api.mts",
     "test:recovery:coordinated": "node tests/proof/coordinated-recovery.mts",
     "test:temporal:tls": "node tests/proof/temporal-tls.mts"
