@@ -17,7 +17,9 @@ policies (`routines`), `standingGrants` (the standing
 choices, the card and state fields, the grantable tool, policy version and
 initiator kinds, the grants route and the inactive-list limit), `memories` (the
 member memory route, limits, injection and deletion semantics per engine), `webhooks`
-(the webhook route, kinds, signature, retry and restore semantics), health
+(the webhook route, kinds, signature, retry and restore semantics, and
+`insecureTargets`, which says an operator setting for testing exists, not whether it
+is on), health
 dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public

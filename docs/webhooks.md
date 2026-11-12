@@ -66,12 +66,16 @@ delivery to one endpoint carries the same value. A receiver:
    compares it with the header in constant time;
 4. takes `webhookId` and `eventId` from the signed body as the event's identity.
    Crew may send one event more than once (see [delivery](#delivery)), each time
-   with a new timestamp and signature, up to about three hours apart, or later
-   after a gateway crash. Keep the identities of events you have **finished
-   handling** in durable storage, and answer one you have already handled with
-   `2xx` without acting again, so Crew stops retrying it. Record an identity only
-   after handling succeeds: if handling fails and you answer with an error, Crew's
-   retry must still be handled.
+   with a new timestamp and signature: retries span about three hours, a gateway
+   crash can resend later, and a handler slower than Crew's 10-second timeout sees
+   the retry while it still runs. Record the identity **in the same transaction
+   as the effect** (or make the effect unique on the identity), so a crash between
+   them can neither lose the event nor act twice. Answer an identity already
+   recorded with `2xx` and do nothing, so Crew stops retrying it. If handling
+   fails, record nothing and answer with an error, so the retry is handled. Keep
+   identities for at least 24 hours. A receiver that cannot finish in a few
+   seconds should record the identity and a job in one transaction, answer `2xx`,
+   and do the work afterwards.
 
 ```js
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -87,10 +91,11 @@ function verify(secret, headers, rawBody, now = Date.now() / 1000) {
   return `${webhookId}/${eventId}`;
 }
 
-// const key = verify(...);              null: answer 401
-// if (await handled.has(key))           answer 200, do nothing
-// await handle(JSON.parse(rawBody));    on failure: answer 500, record nothing
-// await handled.add(key);               then answer 200
+// const key = verify(...);                      null: answer 401
+// BEGIN;
+//   INSERT INTO handled (key) VALUES (key) ON CONFLICT DO NOTHING;   no row inserted: COMMIT, answer 200
+//   ...the effect, or a job row for it...
+// COMMIT;                                        answer 200; on any failure ROLLBACK and answer 500
 ```
 
 ## The secret and where it is kept
@@ -201,7 +206,8 @@ unreferenced 1-second interval that the gateway clears when it closes. Each pass
 1. Reads the recovery phase. A held or restored installation ends the pass with
    nothing read or written. With no enabled endpoint, nothing that has occurred can
    be sent (an endpoint receives only events from when it is enabled), so at most
-   once a minute the pass moves the cursor to the newest audit event and ends.
+   once a minute the pass moves the cursor to the audit horizon, if it can read one
+   without waiting, and ends.
 2. **Fans out.** It reads the audit horizon the way `GET /v1/audit` does, so no
    transaction that commits late is skipped, and takes the cursor row
    (`webhook_cursor`) with `FOR UPDATE SKIP LOCKED`: one gateway fans out at a
@@ -284,7 +290,10 @@ again before every attempt:
 loopback and private addresses, for local testing only. It is off unless set to
 exactly `1`. It never allows link-local, the listed metadata addresses or the other
 special addresses. `capabilities.webhooks.schemes` reports only `https`, the
-default.
+default, and `insecureTargets` says the setting exists and is off by default; neither
+reports whether this gateway has it on. Names are resolved through DNS only, so
+`localhost` and other hosts-file names may not resolve: test with an IP literal
+such as `http://127.0.0.1:8080/`.
 Turning it off later refuses the endpoints it let in at their next attempt, with
 `url_refused` or `address_refused`.
 
@@ -446,12 +455,16 @@ receiver in the test process and a settable clock. It checks:
 - a fan-out waiting for an audit writer whose lower ID commits after a higher one,
   then delivering both;
 - an attempt abandoned by a stopped dispatcher, untouched until its lease ends,
-  then sent again; a stale holder's settle matching nothing; and a lost tenth
-  attempt failing as `interrupted` without a send;
+  then sent again; the stale holder's own settle, run late, changing neither the
+  row nor the failure count; and a lost tenth attempt failing as `interrupted`
+  without a send;
+- an audit row that does not fit its kind skipped without holding up later
+  events;
 - 300 events, more than one fan-out batch, delivered in full, at most 100 per
   endpoint per pass, with the cursor ending at the horizon;
 - the cursor moving to the end of the trail, at most once a minute, while no
-  endpoint is enabled;
+  endpoint is enabled, but not while an enable holds the cursor (and without
+  waiting for it), nor once an endpoint is enabled;
 - the gateway's own loop delivering for the owners it serves, and sending and
   fanning out nothing once it closes;
 - owner isolation, and owners outside a gateway's token map;

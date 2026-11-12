@@ -87,6 +87,7 @@ In Kubernetes pass the command as `args:`; setting `command:` replaces `tini`.
 | `BIRBCREW_STATE_DIR` | worker | `/var/lib/birbcrew/native` | Native state directory. Keep the image default. |
 | `HOME` | both | `/tmp` | Writable home for SDK caches. |
 | `BIRBCREW_WORKER_HEARTBEAT_FILE` | worker | unset | Absolute path the worker touches every 5 seconds from the start of its Temporal workers until shutdown begins. See [Health](#health). |
+| `BIRBCREW_WEBHOOK_ALLOW_INSECURE_TARGETS` | gateway | unset | `1` lets webhooks use plain `http` and loopback or private addresses, for local testing only. Any other value leaves it off. See [outbound webhooks](webhooks.md#network-safety). |
 | `BIRBCREW_PI_ATTESTATION`, `OPENCODE_GO_API_KEY` | worker | unset | Pi on OpenCode Go. See [Provider accounts](#provider-accounts). |
 | `BIRBCREW_CODEX_ATTESTATION`, `BIRBCREW_CODEX_AUTH_HOME` | worker | unset | Codex with a ChatGPT subscription. |
 
