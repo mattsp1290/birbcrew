@@ -67,7 +67,9 @@ For an existing local installation, set `BIRBCREW_DATABASE_URL` to a dedicated
 PostgreSQL database, `BIRBCREW_TEMPORAL_ADDRESS` to the Temporal endpoint,
 and `BIRBCREW_STATE_DIR` to an absolute private directory on persistent storage.
 These are trusted local operator commands. The owner field comes from the local
-operator. Use the fixture profile to run without provider accounts.
+operator. Use the fixture profile to run without provider accounts. The
+[persistent deployment guide](docs/persistent-deployment.md) covers the container
+image, the Temporal namespace and mTLS settings, storage and the database role.
 
 ```sh
 npm run members -- worker tests/proof/fixture-profiles.mts
