@@ -1,6 +1,6 @@
 import { ApprovalStore, decisionSchema } from "./approvals.ts";
 import { ApplicationFailure, Client, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError, WorkflowUpdateFailedError } from "@temporalio/client";
-import { MemberStoreError, openSchema, submitSchema, conversationKey, turnKey, type Conversation } from "./domain.ts";
+import { MemberStoreError, openSchema, turnRequestSchema, conversationKey, turnKey, type Conversation } from "./domain.ts";
 import type { MemberStore } from "./store.ts";
 import type { memberConversation } from "./workflow.ts";
 
@@ -79,7 +79,7 @@ export class MemberClient {
     return status;
   }
 
-  private async reconcileAcceptance(request: ReturnType<typeof submitSchema.parse>) {
+  private async reconcileAcceptance(request: ReturnType<typeof turnRequestSchema.parse>) {
     if((await this.store.requestAdmission(request))?.phase!=="accepted")return;
     const {ownerId,conversationId,requestId}=request;
     const status=await this.requestStatus({ownerId,conversationId,requestId});
@@ -122,10 +122,11 @@ export class MemberClient {
 
   async accept(input: unknown, deadline?: number): Promise<{ requestId: string }> {
     if (deadline !== undefined) return this.temporal.connection.withDeadline(deadline, () => this.accept(input));
-    const request = submitSchema.parse(input);
+    const request = turnRequestSchema.parse(input);
     const conversation = await this.store.getConversation({ ownerId: request.ownerId, conversationId: request.conversationId });
     await this.reconcileAcceptance(request);
     if (await this.store.committedReply(request) === undefined) {
+      await this.store.checkAdmission(request);
       try {
         await this.throughRollover(conversation, handle => handle.executeUpdate<string, [typeof request]>("acceptTurn", { args: [request] }));
       } catch (error) {
@@ -137,11 +138,12 @@ export class MemberClient {
   }
 
   async submit(input: unknown): Promise<string> {
-    const request = submitSchema.parse(input);
+    const request = turnRequestSchema.parse(input);
     const conversation = await this.store.getConversation({ ownerId: request.ownerId, conversationId: request.conversationId });
     await this.reconcileAcceptance(request);
     const reply = await this.store.committedReply(request);
     if (reply !== undefined) return reply;
+    await this.store.checkAdmission(request);
     try {
       return await this.throughRollover(conversation, handle => handle.executeUpdate<string, [typeof request]>("submitTurn", { args: [request] }));
     } catch (error) {

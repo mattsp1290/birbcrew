@@ -4,7 +4,7 @@ import {
 } from "@temporalio/workflow";
 import { workflowGenerationTurnLimit, historyRequiresRollover } from "./limits.ts";
 import { acceptsChoice } from "./deferral.ts";
-import { submitSchema, type Conversation, type TurnRequest } from "./domain.ts";
+import { turnRequestSchema, type Conversation, type TurnRequest } from "./domain.ts";
 import type { Approval, Decision, Choice } from "./approvals.ts";
 import type { ChildKey, ChildStore } from "./children.ts";
 import type { MemberActivities, Resume } from "./activities.ts";
@@ -234,7 +234,9 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   }
 
   function validate(value: TurnRequest): TurnRequest {
-    const parsed = submitSchema.safeParse(value);
+    // The bound every internal path shares. Admission, outside workflow code, decides which request
+    // may use more than the public prompt bound; validators do not run on replay.
+    const parsed = turnRequestSchema.safeParse(value);
     if (!parsed.success) throw ApplicationFailure.nonRetryable("Invalid turn request");
     const request = parsed.data;
     if (request.ownerId !== conversation.ownerId || request.conversationId !== conversation.conversationId) {
