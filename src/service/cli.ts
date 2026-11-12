@@ -6,6 +6,7 @@ import { Pool } from "pg";
 import { MemberClient } from "./client.ts";
 import { MemberStore } from "./store.ts";
 import { spawnSchema } from "./domain.ts";
+import { flushTelemetry } from "./telemetry.ts";
 import { temporalConnectionOptions, temporalSettings } from "./temporal-config.ts";
 
 async function main() {
@@ -30,7 +31,11 @@ async function main() {
         await registerProfiles(pool, profiles, stateDir);
         await runMemberWorker(store, temporal, profiles, resolve(configPath), stateDir);
       } finally {
-        await close?.();
+        try {
+          await close?.();
+        } finally {
+          await flushTelemetry();
+        }
       }
       return;
     }
