@@ -146,3 +146,17 @@ export function memberActivities(store: MemberStore, supervisor: Supervisor, pro
   };
 }
 export type MemberActivities = ReturnType<typeof memberActivities>;
+
+/** The conversation workflow's expireApproval activity (docs/approval-expiry.md). It touches only
+ * the database, so it runs on the member task queue, not an engine's. */
+export function expiryActivity(store: MemberStore) {
+  const ledger = new ApprovalStore(store.pool);
+  return async (approval: Approval) => {
+    try {
+      return await ledger.expireTurn(approval);
+    } catch (error) {
+      if (error instanceof MemberStoreError) throw ApplicationFailure.nonRetryable(error.code);
+      throw error;
+    }
+  };
+}

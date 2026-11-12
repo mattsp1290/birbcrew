@@ -408,7 +408,7 @@ async function databaseAt(t: TestContext, version: number) {
 }
 
 test("migration 029 takes its locks without queueing, rewrites nothing and leaves its CHECK unvalidated", async (t) => {
-  const upgraded = await databaseAt(t, 26);
+  const upgraded = await databaseAt(t, 28);
   const ownerId = "owner-" + randomUUID();
   const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
     (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi','fixture') RETURNING member_id`, [ownerId, randomUUID()]);
@@ -460,7 +460,7 @@ test("migration 029 takes its locks without queueing, rewrites nothing and leave
 });
 
 test("migration 029 completes while a native turn holds its admission", async (t) => {
-  const upgraded = await databaseAt(t, 26);
+  const upgraded = await databaseAt(t, 28);
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
   const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
     (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi','fixture') RETURNING member_id`, [ownerId, randomUUID()]);
@@ -479,8 +479,8 @@ test("migration 029 completes while a native turn holds its admission", async (t
   await current.commitTurn({ ownerId, conversationId, requestId, token: start.token, reply: "still running", checkpoint: { version: 1, engine: "pi", state: {} } });
 });
 
-test("a version-26 database upgrades: members spawned before it have no instructions, later spawns may", async (t) => {
-  const upgraded = await databaseAt(t, 26);
+test("a version-28 database upgrades: members spawned before it have no instructions, later spawns may", async (t) => {
+  const upgraded = await databaseAt(t, 28);
   const ownerId = "owner-" + randomUUID(), before = randomUUID();
   const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
     (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'codex','fixture') RETURNING member_id`, [ownerId, randomUUID()]);
@@ -492,5 +492,8 @@ test("a version-26 database upgrades: members spawned before it have no instruct
   const spawned = await current.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture", instructions: role });
   const later = await current.openConversation({ ownerId, memberId: spawned.memberId, conversationId: randomUUID() });
   assert.equal(instructionsIn((await conversationContext(upgraded, later))!), role);
-  assert.deepEqual((await upgraded.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version>=26 ORDER BY 1")).rows.map(row => row.version), [26, 29]);
+  // migrate() brought it to the newest migration in the directory, whatever that is.
+  const migrations = (await readdir(sql)).map(file => Number(file.split("-")[0])).sort((a, b) => a - b);
+  assert.deepEqual((await upgraded.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version>=28 ORDER BY 1")).rows.map(row => row.version),
+    migrations.filter(version => version >= 28));
 });

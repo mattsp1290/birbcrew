@@ -185,8 +185,21 @@ without applying anything. Restart it once the other sessions are done (see
 From version 24 both run in one transaction, and 26 retries while holding 25's
 locks, so admissions and audited writes wait meanwhile; an open of the previous
 release still in flight makes it fail after the 60 s (see
-[member memory](memories.md#upgrade)). Migration 29 (member instructions) does the same
-for `members` and `audit_events` (see [member instructions](member-instructions.md#upgrade)).
+[member memory](memories.md#upgrade)). Migration 27 (conversation handoff) does the
+same for all four tables. It also raises the internal turn bound from 16 KiB to 64 KiB
+for a handoff's first request, which a previous-release worker refuses, and a
+previous-release gateway or worker ignores handoff seals, so stopping the previous
+release first is required for it; rolling back past it is unsupported (see
+[conversation handoff](handoffs.md#upgrade)). Migration 28 (approval expiry) does the
+same for `deferred_calls`, `request_admissions`, `routines`, `routine_firings` and
+`audit_events`, retrying while it holds 27's locks when both run in one transaction. A
+previous-release workflow worker never expires a card that has a deadline, while the
+database refuses a decision past it, so stopping the previous release first is required
+for it too; rolling back once a request with a deadline was accepted is unsupported (see
+[approval expiry](approval-expiry.md#upgrade-in-flight-workflows-and-recovery)).
+Migration 29 (member instructions) does the same for `members` and `audit_events`,
+retrying while it holds 27's and 28's locks when they run in one transaction (see
+[member instructions](member-instructions.md#upgrade)).
 
 A Kubernetes Deployment's default `RollingUpdate` strategy starts new pods while
 old ones still run, which is exactly what this forbids. Scale every Deployment

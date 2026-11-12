@@ -66,7 +66,7 @@ CREATE TRIGGER member_instructions_fixed BEFORE UPDATE OR DELETE OR TRUNCATE ON 
 CREATE TRIGGER recovery_write_barrier BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON birbcrew_ts.member_instructions
     FOR EACH STATEMENT EXECUTE FUNCTION birbcrew_ts.require_active_installation();
 
--- 021's recipe. This constraint replaces 026's, so it repeats every type 026 lists. Keep it in
+-- 021's recipe. This constraint replaces 028's, so it repeats every type 028 lists. Keep it in
 -- step with auditEvents in src/service/audit.ts. The instructions row belongs to no conversation
 -- or request and never carries text: only its SHA-256 and byte count.
 ALTER TABLE birbcrew_ts.audit_events
@@ -96,6 +96,10 @@ ALTER TABLE birbcrew_ts.audit_events
         OR (event_type IN ('memory.created', 'memory.deleted', 'memory.suspended')
             AND conversation_id IS NULL AND request_id IS NULL
             AND (jsonb_typeof(payload->'memoryId') = 'string') IS TRUE)
+        OR (event_type = 'conversation.handed_off' AND conversation_id IS NOT NULL AND request_id IS NULL
+            AND (jsonb_typeof(payload->'handoffId') = 'string') IS TRUE)
+        OR (event_type = 'approval.expired' AND request_id IS NOT NULL
+            AND (jsonb_typeof(payload->'approvalId') = 'string') IS TRUE)
         OR (event_type = 'member.instructions_set' AND conversation_id IS NULL AND request_id IS NULL
             AND (jsonb_typeof(payload->'digest') = 'string') IS TRUE
             AND (jsonb_typeof(payload->'bytes') = 'number') IS TRUE)) NOT VALID;

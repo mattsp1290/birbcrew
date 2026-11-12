@@ -145,7 +145,8 @@ one creation event. Both answers report `allow_always`.
 
 A conversation grant ends, with `status: "conversation_closed"`, when its
 conversation stops accepting requests: its committed turns reach the conversation's
-limit, or a cancellation, an uncertain turn or a rejected admission has closed it. A
+limit, a [handoff](handoffs.md#sealing) has sealed it, or a cancellation, an uncertain
+turn or a rejected admission has closed it. A
 conversation workflow that fails without leaving one of those facts keeps its grant
 listed as `active` until revoked, although no new call can be proposed there.
 

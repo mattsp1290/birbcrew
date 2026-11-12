@@ -116,6 +116,10 @@ it covers proceed without a card and name the grant. Grants are listed and revok
 through `/v1/members/{memberId}/grants`. Crew cannot tell a person from an automated
 client holding the owner's token, so a grant covers both.
 
+An owner can give a request or a routine an [approval deadline](docs/approval-expiry.md)
+of one minute to seven days. A Claude or Pi card still undecided at its deadline is
+settled without a person: Crew cancels the request and records `approval.expired`.
+
 An owner can save [member memory](docs/memories.md) through `/v1/memories`: up to 32
 short facts per member. Each conversation of the member gets the facts that were
 active when it opened, as system context framed as reference data. Only the owner
@@ -123,6 +127,14 @@ writes memory; the model cannot. Deleting a fact erases its text, but Codex, and
 Claude where its SDK records the prompt, keep the context a conversation's first turn
 saw, and native session files and Pi checkpoints keep copies. Memory reaches every
 later conversation of the member, so whoever holds the owner's token can steer them all.
+
+An owner can [hand a conversation off](docs/handoffs.md) to another of their members,
+often of another engine, through `/v1/conversations/{conversationId}/handoffs`. The source
+is sealed and stays readable. A fresh target conversation's first request carries a
+verbatim transcript of the source's newest committed turns, up to 64 KiB, as a user
+message quoted as data; tool calls, approvals and native state do not cross. The owner
+continues in the target. Model replies from the source reach the target at user rank, so
+hand off only conversations whose replies you would paste into a prompt yourself.
 
 An owner can give a member [instructions](docs/member-instructions.md) when they spawn
 it: up to 16,384 bytes describing its role. They are fixed for the life of the member,

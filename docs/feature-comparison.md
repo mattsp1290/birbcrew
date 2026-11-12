@@ -162,7 +162,7 @@ Each line states what Crew does at `47f3c0f` and where the feature stops.
 
 | # | Crew | Detail |
 | --- | --- | --- |
-| 13 | Yes | A `record_work_item` call opens an approval card. A `choose_next_step` call opens a question. See [the gateway guide](member-gateway.md). |
+| 13 | Yes | A `record_work_item` call opens an approval card. A `choose_next_step` call opens a question. See [the gateway guide](member-gateway.md). An owner can give a request or a routine an approval deadline of one minute to seven days, after which Crew cancels a Claude or Pi request whose card is still undecided and records the expiry; see [approval expiry](approval-expiry.md). |
 | 14 | Yes | An owner can answer a card with `allow_conversation` or `allow_always`. A grant matches the tool, not its arguments. A grant never expires by time and never applies to a routine. See [standing grants](standing-grants.md). |
 | 15 | No | Crew has no deny rule and no rule language. The eligibility of a grant is fixed in code. |
 | 16 | Yes | `GET /v1/audit` returns an append-only trail of 19 event types as JSON or CSV. The only filter is `conversationId`. Refused HTTP calls leave no row. No retention limit and no deletion route exist. See [the audit trail](audit-trail.md). |

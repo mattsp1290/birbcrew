@@ -16,6 +16,7 @@ import {RoutineApi,RoutineDispatcher} from '../../src/service/routines.ts';
 import {ApprovalStore} from '../../src/service/approvals.ts';
 import {revokeGrant} from '../../src/service/grants.ts';
 import {conversationContext,MemoryApi} from '../../src/service/memories.ts';
+import {HandoffApi} from '../../src/service/handoffs.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 const exec=promisify(execFile);
@@ -374,6 +375,35 @@ test('a restored installation revokes every standing grant as it resumes; a held
  assert.equal((await call(new MemberStore(restored),restored)).grantId,undefined);
 });
 
+test('a card keeps its absolute deadline across a restore, and past it only the restored installation settles it, once',async context=>{
+ const t=await setup(context);
+ const ownerId='owner';const {memberId}=await t.store.spawn({ownerId,requestId:randomUUID(),engine:'pi',profile:'fixture'});
+ const key={ownerId,conversationId:randomUUID(),requestId:randomUUID()};
+ await t.store.openConversation({ownerId,memberId,conversationId:key.conversationId});
+ const request={...key,text:'record at the recovery point',approvalDeadlineSeconds:60};
+ await t.store.recordAcceptance(request,ownerInitiator);
+ const start=await t.store.beginTurn(request);assert.equal(start.kind,'start');if(start.kind!=='start') return;
+ const card=await new ApprovalStore(t.pool).propose({...key,memberId,token:start.token,invocationId:key.requestId,nativeCallId:'call',
+  toolName:'record_work_item',arguments:{operation_id:key.requestId}});
+ assert.ok(card.expiresAt);
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);
+ const restored=await restoreBundle(t);const recovery=new InstallationRecovery(restored,t.fence);
+ await recovery.acceptRestore(t.bundle,pins,randomUUID());
+ await recovery.resume(t.hooks,manifest);
+ const {rows:[row]}=await restored.query('SELECT expires_at,expired_at FROM birbcrew_ts.deferred_calls WHERE approval_id=$1',[card.approvalId]);
+ assert.deepEqual([row.expires_at.toISOString(),row.expired_at],[card.expiresAt,null],'the deadline is a time, not a duration restarted by the restore');
+ // The deadline passed while the installation was held and restored.
+ await restored.query('UPDATE birbcrew_ts.deferred_calls SET expires_at=clock_timestamp() WHERE approval_id=$1',[card.approvalId]);
+ const ledger=new ApprovalStore(restored);
+ await assert.rejects(ledger.decide({...key,memberId,invocationId:key.requestId,nativeCallId:'call',approvalId:card.approvalId,
+  argumentDigest:card.argumentDigest,version:card.version,choice:'approve'}),{code:'conflict'});
+ assert.deepEqual(await Promise.all([ledger.expireTurn(card),ledger.expireTurn(card)]),[{kind:'expired'},{kind:'expired'}]);
+ assert.equal((await restored.query("SELECT count(*)::integer AS n FROM birbcrew_ts.audit_events WHERE event_type='approval.expired'")).rows[0].n,1);
+ // The held source writes nothing.
+ await assert.rejects(new ApprovalStore(t.pool).expireTurn(card),{code:'55000'});
+});
+
 test('capture accepts the memory tables, and a held installation refuses every memory write',async context=>{
  const t=await setup(context);
  const {memberId}=await spawn(t.store);const api=new MemoryApi(t.store);
@@ -392,6 +422,38 @@ test('capture accepts the memory tables, and a held installation refuses every m
  assert.deepEqual(await api.get('owner',kept.memoryId),kept,'reads still work');
  await t.recovery.resume(t.hooks);
  assert.equal((await api.delete('owner',kept.memoryId)).state,'deleted');
+});
+
+test('capture accepts the handoff table, and a held installation refuses every handoff write',async context=>{
+ const t=await setup(context);
+ const {memberId}=await spawn(t.store);
+ const members={async open(input:Parameters<MemberStore['openConversation']>[0]){return t.store.openConversation(input);},
+  async accept(input:TurnRequest){await t.store.recordAcceptance(input,ownerInitiator);return {requestId:input.requestId};}} as unknown as MemberClient;
+ const api=new HandoffApi(t.store,members);
+ async function committed() {
+  const conversationId=randomUUID(),requestId=randomUUID(),text='remember '+requestId;
+  await t.store.openConversation({ownerId:'owner',memberId,conversationId});
+  await t.store.recordAcceptance({ownerId:'owner',conversationId,requestId,text},ownerInitiator);
+  const start=await t.store.beginTurn({ownerId:'owner',conversationId,requestId,text});
+  assert.equal(start.kind,'start');if(start.kind!=='start') throw new Error('unreachable');
+  await t.store.commitTurn({ownerId:'owner',conversationId,requestId,token:start.token,reply:'stored',checkpoint:{version:1,engine:'pi',state:{}}});
+  return conversationId;
+ }
+ const [handed,held]=[await committed(),await committed()];
+ const kept=await api.create('owner',handed,{requestId:randomUUID(),memberId});
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);
+ assert.equal(manifest.inventory.conversation_handoffs,1);
+ for(const write of [()=>api.create('owner',held,{requestId:randomUUID(),memberId}),
+  ()=>t.pool.query(`INSERT INTO birbcrew_ts.conversation_handoffs (owner_id,request_id,source_conversation_id,source_member_id,
+    target_conversation_id,target_member_id,transcript,transcript_digest,carried_turns,omitted_turns,uncertain_turns)
+    SELECT owner_id,$1,$2,source_member_id,target_conversation_id,target_member_id,transcript,transcript_digest,1,0,0
+    FROM birbcrew_ts.conversation_handoffs`,[randomUUID(),held])]) {
+  await assert.rejects(write(),{code:'55000'});
+ }
+ assert.equal((await api.read('owner',handed)).outgoing?.handoffId,kept.handoffId,'reads still work');
+ await t.recovery.resume(t.hooks);
+ assert.equal((await api.create('owner',held,{requestId:randomUUID(),memberId})).carriedTurns,1);
 });
 
 test('a restored installation suspends every active memory as it resumes; a held source keeps its own',async context=>{
