@@ -141,8 +141,9 @@ if (endpoint) {
 const provider = processors.length ? new BasicTracerProvider({
   resource: resourceFromAttributes(resource),
   spanProcessors: processors,
-  // Bounds only the flush wait. An export it abandons can still hold a returning process (the worker) open
-  // until exportTimeoutMs; the turn runner ends it with process.exit.
+  // Bounds only the flush wait. An export it abandons can still hold a returning process (the worker) open: for
+  // about exportTimeoutMs once connected, but until the operating system gives up when a connection attempt is
+  // never answered, because node:http starts its timeout only on connect. The turn runner ends it with process.exit.
   forceFlushTimeoutMillis: 1_000,
   idGenerator: {
     generateTraceId: () => active.getStore()?.traceId ?? randomBytes(16).toString("hex"),

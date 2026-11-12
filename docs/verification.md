@@ -130,8 +130,12 @@ turn. It can slow one, though: the host confirms a native turn only after its
 runner exits, and the runner first waits up to 250 milliseconds to flush its
 spans. A slow, stalled or unreachable collector therefore adds up to a quarter
 second to every native turn, and spans not flushed in time are dropped. The
-worker waits up to one second to flush when it stops, and can then stay up
-for two more seconds while an unanswered export times out. The exporter also
+worker waits up to one second to flush when it stops. An export still in
+flight can then keep it up longer: about two seconds when the collector
+accepts the connection and stays silent, but until the operating system gives
+up on the connection attempt, about two minutes on Linux, when nothing answers
+the collector's address, and for as long as a collector keeps trickling an
+answer. The orchestrator's stop timeout ends it in those cases. The exporter also
 honours the standard `OTEL_EXPORTER_OTLP_HEADERS`,
 `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, certificate, client key and compression
 variables. The generic `OTEL_EXPORTER_OTLP_*` forms apply to every OTLP
