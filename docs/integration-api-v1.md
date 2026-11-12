@@ -16,7 +16,8 @@ contract (event types, page limits, formats) and the scheduled-routine limits an
 policies (`routines`), `standingGrants` (the standing
 choices, the card and state fields, the grantable tool, policy version and
 initiator kinds, the grants route and the inactive-list limit), `memories` (the
-member memory route, limits, injection and deletion semantics per engine), health
+member memory route, limits, injection and deletion semantics per engine), `webhooks`
+(the webhook route, kinds, signature, retry and restore semantics), health
 dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
@@ -44,6 +45,9 @@ proof of the operator's provider access or configured profile availability.
 | `POST /v1/members/{memberId}/grants/{grantId}/revoke` | Revoke a standing grant for later calls, body `{}`; repeating returns the same grant |
 | `POST /v1/memories`, `GET /v1/memories` | Create (`requestId`, `memberId`, `text`) and list member memory entries |
 | `GET`/`DELETE /v1/memories/{memoryId}` | Read one entry, or erase its text and keep a tombstone |
+| `POST /v1/webhooks`, `GET /v1/webhooks` | Create (`requestId`, `url`, `kinds`; the response alone carries the signing secret) and list webhook endpoints |
+| `GET`/`DELETE /v1/webhooks/{webhookId}`, `POST .../enable`, `POST .../disable` | Read, tombstone, enable or disable one endpoint |
+| `GET /v1/webhooks/{webhookId}/deliveries` | Delivery rows, newest event first |
 
 Authentication is required even for capabilities and health. There is no
 unauthenticated route. A request without a valid token gets `401` before the gateway
@@ -393,6 +397,23 @@ conversation's first turn, and Claude's SDK may resend the prompt it recorded th
 on those engines a deletion may reach only conversations that have not run a turn.
 `capabilities.memories.startedConversations` says which. See
 [member memory](memories.md) for the trust boundary and what deletion does not erase.
+
+## Outbound webhooks
+
+An owner can register up to 10 enabled HTTPS endpoints. Crew posts to an endpoint
+when an event it selected happens: a card or question became pending
+(`approval.pending`), a request finished (`request.finished`), a routine firing
+settled (`routine.firing_settled`), or Crew disabled a routine after ten failures
+(`routine.disabled`). Each is derived from a committed audit event. The body
+carries IDs, the kind, the time and a status only; fetch details with your token.
+Each request is signed with HMAC-SHA256 over a timestamp and the body, using a
+secret that only the create response returns. Delivery is at least once and
+unordered, with ten attempts over about three hours, and an endpoint that gives up
+ten deliveries in a row is disabled. Crew sends only to public addresses over
+HTTPS, unless the operator allows insecure targets for local testing, follows no
+redirect and sends no credential. `webhook.*` audit rows belong
+to no member, so their `memberId` is `null`. See [outbound webhooks](webhooks.md)
+for the receiver's checks, the secret's storage and the restore behaviour.
 
 ## Validation
 

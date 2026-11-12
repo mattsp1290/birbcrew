@@ -119,7 +119,7 @@ vendor cloud.
 | 31 | Desktop app | No | Yes | Yes | Yes | No | Yes | No | No | No |
 | 32 | Mobile app | No | Part | Yes | Yes | Part | Yes | Part | Yes | Part |
 | 33 | Slack, Teams, SMS, or another chat surface | No | Yes | Yes | Part | No | Yes | Part | No | Yes |
-| 34 | Notifications when nobody is watching | No | Yes | Yes | Part | Part | Part | No | Yes | Yes |
+| 34 | Notifications when nobody is watching | Part | Yes | Yes | Part | Part | Part | No | Yes | Yes |
 | 35 | Voice | No | Yes | Yes | Yes | No | Part | Yes | Part | Yes |
 
 ### Operations
@@ -193,7 +193,7 @@ Each line states what Crew does at `47f3c0f` and where the feature stops.
 | 31 | No | None. |
 | 32 | No | None. |
 | 33 | No | None. [The first milestone](first-milestone.md) puts Slack out of scope. |
-| 34 | No | A pending card and a finished routine appear only to a client that polls or holds an AG-UI stream open. Crew has no webhook and no push. |
+| 34 | Part | An owner registers up to 10 HTTPS webhook endpoints. Crew posts a signed body of IDs and a status when a card or question becomes pending, a request finishes, a routine firing settles, or Crew disables a routine. Crew sends no push, email, or chat message itself. See [outbound webhooks](webhooks.md). |
 | 35 | No | None. |
 
 ### Operations

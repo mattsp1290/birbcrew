@@ -185,7 +185,8 @@ without applying anything. Restart it once the other sessions are done (see
 From version 24 both run in one transaction, and 26 retries while holding 25's
 locks, so admissions and audited writes wait meanwhile; an open of the previous
 release still in flight makes it fail after the 60 s (see
-[member memory](memories.md#upgrade)).
+[member memory](memories.md#upgrade)). Migration 30 (outbound webhooks) does the
+same for `audit_events` alone (see [outbound webhooks](webhooks.md#upgrade)).
 
 A Kubernetes Deployment's default `RollingUpdate` strategy starts new pods while
 old ones still run, which is exactly what this forbids. Scale every Deployment
