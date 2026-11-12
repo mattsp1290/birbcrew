@@ -46,10 +46,9 @@ bounded to 2 seconds: a PostgreSQL round trip that reads the highest applied sch
 version, and a Temporal frontend `GetSystemInfo` call on the gateway's connection. The
 probe never starts, signals or describes a workflow. A ready Temporal result proves only
 that the frontend answers: `GetSystemInfo` names no namespace, so it does not show that
-the namespace the gateway uses exists, or that workers are polling. Concurrent health
-requests share one database probe, and that probe never waits for a pooled connection
-or a lock past its bound. It returns `200` when every dependency is ready and `503`
-with the same body shape otherwise, for example:
+the namespace the gateway uses exists, or that workers are polling. It returns `200`
+when every dependency is ready and `503` with the same body shape otherwise, for
+example:
 
 ```json
 {
@@ -63,12 +62,33 @@ with the same body shape otherwise, for example:
 ```
 
 The top-level `status` is `ready` or `not_ready`. Each dependency reports `ready` or
-`unavailable` (failed or exceeded its bound). When the database is ready,
-`schemaVersion` is the highest migration version it has applied, which is the largest
-version in the migration list in `src/service/store.ts`; versions are not necessarily
-contiguous. It is `null` when the database is unavailable. Driver errors, addresses
-and connection strings are never returned. The gateway applies its migrations at
-startup, so compare `schemaVersion` with the release you deployed.
+`unavailable` (failed or exceeded its bound). Driver errors, addresses and connection
+strings are never returned.
+
+The database probe opens its own short-lived PostgreSQL connection with the gateway's
+connection settings instead of borrowing one from the gateway's pool. It never queues
+behind other requests or takes a pool slot, and a saturated pool does not affect it:
+the database is `ready` whenever a fresh connection can read the schema version, even
+while every pooled connection is busy. Each step of that connection has the same
+2-second bound: connecting (including TLS and authentication), the read (the server
+cancels it if it is blocked on a lock, and the gateway abandons it if the server goes
+silent) and closing. Concurrent health requests share one probe, so health polling
+holds at most one database connection beyond the pool at a time. A response never
+waits past its bound. A probe still running then reports `unavailable` and ends within
+three times the bound (6 seconds), whether the server refuses connections, drops
+packets, accepts a connection and never answers, or answers slowly. The next health
+request after that starts a fresh probe, so health stops reporting `unavailable`
+within about 6 seconds of PostgreSQL becoming reachable again.
+
+When the database is ready, `schemaVersion` is the highest migration number applied to
+it. It is `null` when the database is unavailable. Migration numbers are not
+contiguous, and a later release can add a migration numbered below one that an earlier
+release already applied, so a database can gain a migration without `schemaVersion`
+changing. `schemaVersion` therefore names the newest migration present, not the full
+applied set, and cannot by itself identify a release. The gateway applies its
+migrations at startup, so a value below the largest number in the deployed release's
+migration list (in `src/service/store.ts`) means the database is behind that release;
+an equal value does not prove that every migration is present.
 
 `GET /v1/members` and `GET /v1/conversations` return only the authenticated owner's
 rows:

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { connect as connectTcp, createServer as createTcpServer, type Socket } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { after, before, test } from "node:test";
 import { Pool } from "pg";
@@ -394,6 +395,31 @@ async function serve(gatewayStore: MemberStore, members: MemberClient) {
   };
 }
 
+// Accepts TCP and never answers until released, then forwards new connections to the test database. Only the
+// health probe's startup message carries statement_timeout, so `probes` counts its connections and not the
+// gateway's cancellation flusher's.
+async function stallingRelay() {
+  const target = new URL(url!), sockets = new Set<Socket>(), probes: Socket[] = [];
+  let stalled = true;
+  const track = (socket: Socket) => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); socket.on("error", () => {}); };
+  const server = createTcpServer(socket => {
+    track(socket);
+    socket.once("data", chunk => {
+      if (chunk.includes("statement_timeout")) probes.push(socket);
+      if (stalled) return;
+      const upstream = connectTcp(Number(target.port || 5432), target.hostname);
+      track(upstream); upstream.on("close", () => socket.destroy());
+      upstream.write(chunk); socket.pipe(upstream).pipe(socket);
+    });
+  });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  return {
+    port: address.port, probes, open: (socket: Socket) => sockets.has(socket), release() { stalled = false; },
+    async close() { const closed = once(server, "close"); server.close(); for (const socket of sockets) socket.destroy(); await closed; },
+  };
+}
+
 test("v1 health is authenticated, strict and reports every ready dependency", async (t) => {
   const { rows: [{ version }] } = await pool.query("SELECT max(version)::integer AS version FROM birbcrew_ts.schema_versions");
   const gateway = await serve(store, { async temporalReachable() {} } as unknown as MemberClient); t.after(gateway.stop);
@@ -410,14 +436,16 @@ test("v1 health answers 503 with the same shape, bounded and without dependency 
   const { rows: [{ version }] } = await pool.query("SELECT max(version)::integer AS version FROM birbcrew_ts.schema_versions");
   const secret = "do-not-leak-" + randomUUID();
   const refused = new Pool({ connectionString: `postgresql://probe:${secret}@127.0.0.1:1/absent` });
-  t.after(() => refused.end());
+  const silent = await stallingRelay();
+  const unanswered = new Pool({ connectionString: `postgresql://probe:${secret}@127.0.0.1:${silent.port}/absent` });
+  t.after(async () => { await silent.close(); await refused.end(); await unanswered.end(); });
   const cases = [
     { store, members: { async temporalReachable() { throw new Error("connect ECONNREFUSED " + secret); } },
       dependencies: { database: { status: "ready", schemaVersion: version }, temporal: { status: "unavailable" } } },
     { store: new MemberStore(refused), members: { async temporalReachable() {} },
       dependencies: { database: { status: "unavailable", schemaVersion: null }, temporal: { status: "ready" } } },
-    // Both dependencies hang: the probes run concurrently and each is cut off.
-    { store: new MemberStore({ connect: () => new Promise(() => {}) } as unknown as Pool), members: { temporalReachable: () => new Promise(() => {}) },
+    // Both dependencies hang (the database accepts TCP and never answers): the probes run concurrently and each is cut off.
+    { store: new MemberStore(unanswered), members: { temporalReachable: () => new Promise(() => {}) },
       dependencies: { database: { status: "unavailable", schemaVersion: null }, temporal: { status: "unavailable" } } },
   ];
   for (const { store: target, members, dependencies } of cases) {
@@ -425,7 +453,7 @@ test("v1 health answers 503 with the same shape, bounded and without dependency 
     try {
       const started = Date.now();
       const response = await gateway.get("/v1/health");
-      assert.ok(Date.now() - started < probeTimeout * 1.5, "both dependency probes run concurrently, each bounded");
+      assert.ok(Date.now() - started < probeTimeout + 1_500, "both dependency probes run concurrently, each bounded");
       assert.equal(response.status, 503);
       const report = await response.json();
       assert.deepEqual(report, { apiVersion: "1", status: "not_ready", dependencies });
@@ -435,7 +463,7 @@ test("v1 health answers 503 with the same shape, bounded and without dependency 
   }
 });
 
-test("v1 health gives back a blocked probe's pooled connection so other routes keep serving", { timeout: 20_000 }, async (t) => {
+test("v1 health has the server cancel a lock-blocked probe read and leaves the pool serving", { timeout: 20_000 }, async (t) => {
   const single = new Pool({ connectionString: url, max: 1 });
   const gateway = await serve(new MemberStore(single), { async temporalReachable() {} } as unknown as MemberClient);
   t.after(async () => { await gateway.stop(); await single.end(); });
@@ -446,11 +474,11 @@ test("v1 health gives back a blocked probe's pooled connection so other routes k
     const blocked = await gateway.get("/v1/health");
     assert.equal(blocked.status, 503);
     assert.equal((await blocked.json()).dependencies.database.status, "unavailable");
-    assert.equal((await gateway.get("/v1/members")).status, 200, "the only pooled connection was not stranded on the lock");
+    assert.equal((await gateway.get("/v1/members")).status, 200, "the blocked probe holds no pooled connection");
     // The server cancels the blocked read itself; abandoning it client-side would leave a backend waiting on the lock.
     const waiting = async () => (await pool.query(`SELECT count(*)::integer AS n FROM pg_stat_activity
       WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%FROM birbcrew_ts.schema_versions'`)).rows[0].n;
-    for (const started = Date.now(); await waiting() && Date.now() - started < probeTimeout;) await delay(50);
+    for (const started = Date.now(); await waiting() && Date.now() - started < 2 * probeTimeout;) await delay(50);
     assert.equal(await waiting(), 0, "no probe backend is left waiting while the lock is still held");
   } finally {
     await lock.query("ROLLBACK");
@@ -458,45 +486,54 @@ test("v1 health gives back a blocked probe's pooled connection so other routes k
   }
 });
 
-test("v1 health on a saturated pool answers 503 within its bound and queues at most one probe", { timeout: 30_000 }, async (t) => {
+test("v1 health probes on its own connection, so a saturated pool still reports the database ready", { timeout: 30_000 }, async (t) => {
+  const { rows: [{ version }] } = await pool.query("SELECT max(version)::integer AS version FROM birbcrew_ts.schema_versions");
   const single = new Pool({ connectionString: url, max: 1 });
   const gateway = await serve(new MemberStore(single), { async temporalReachable() {} } as unknown as MemberClient);
   t.after(async () => { await gateway.stop(); await single.end(); });
-  const statements: string[] = [], seen = new WeakSet<object>();
-  single.on("acquire", client => {
-    if (seen.has(client)) return; seen.add(client);
-    const query = client.query.bind(client) as (...args: unknown[]) => unknown;
-    client.query = ((...args: unknown[]) => {
-      statements.push(typeof args[0] === "string" ? args[0] : (args[0] as { text: string }).text);
-      return query(...args);
-    }) as typeof client.query;
-  });
   const held = await single.connect();
   let released = false;
   try {
-    const health = async () => {
-      const started = Date.now(), response = await gateway.get("/v1/health");
-      assert.ok(Date.now() - started < probeTimeout * 1.5, "health is bounded while the pool is saturated");
-      assert.equal(response.status, 503);
-      assert.equal((await response.json()).dependencies.database.status, "unavailable");
-    };
-    // The gateway's cancellation flusher queues one scan of its own on the saturated pool.
-    for (const started = Date.now(); !single.waitingCount && Date.now() - started < 3_000;) await delay(10);
-    assert.equal(single.waitingCount, 1);
-    const calls = [health(), health()];
-    await delay(probeTimeout / 2);
-    await Promise.all([...calls, health()]);
-    await health();
-    assert.equal(single.waitingCount, 2, "concurrent and repeated health calls share one queued probe");
     const real = gateway.get("/v1/members");
-    for (const started = Date.now(); single.waitingCount < 3 && Date.now() - started < probeTimeout;) await delay(10);
-    assert.equal(single.waitingCount, 3);
-    statements.length = 0;
+    const started = Date.now(), response = await gateway.get("/v1/health");
+    assert.ok(Date.now() - started < probeTimeout + 1_500);
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).dependencies.database, { status: "ready", schemaVersion: version });
+    assert.equal(await Promise.race([real.then(() => "served"), delay(100, "waiting")]), "waiting", "the pool really is saturated");
     held.release(); released = true;
     assert.equal((await real).status, 200);
-    assert.ok(!statements.some(text => text.includes("schema_versions")), "the abandoned probe ran no query ahead of the real request");
-    assert.equal((await gateway.get("/v1/health")).status, 200, "the next probe starts afresh once the pool frees");
   } finally { if (!released) held.release(); }
+});
+
+test("v1 health is not pinned by a database that accepts connections and never answers", { timeout: 30_000 }, async (t) => {
+  const { rows: [{ version }] } = await pool.query("SELECT max(version)::integer AS version FROM birbcrew_ts.schema_versions");
+  const relay = await stallingRelay();
+  const relayed = new URL(url!); relayed.hostname = "127.0.0.1"; relayed.port = String(relay.port);
+  const relayedPool = new Pool({ connectionString: relayed.toString() });
+  relayedPool.on("error", () => {});
+  const gateway = await serve(new MemberStore(relayedPool), { async temporalReachable() {} } as unknown as MemberClient);
+  t.after(async () => { await gateway.stop(); await relay.close(); await relayedPool.end(); });
+  const unavailable = async () => {
+    const started = Date.now(), response = await gateway.get("/v1/health");
+    assert.ok(Date.now() - started < probeTimeout + 1_500, "health is bounded while the database is silent");
+    assert.equal(response.status, 503);
+    assert.deepEqual((await response.json()).dependencies.database, { status: "unavailable", schemaVersion: null });
+  };
+  const closes = async (socket: Socket) => {
+    for (const started = Date.now(); relay.open(socket) && Date.now() - started < 2 * probeTimeout;) await delay(10);
+    return !relay.open(socket);
+  };
+  const calls = [unavailable(), unavailable()];
+  await delay(probeTimeout / 2);
+  await Promise.all([...calls, unavailable()]);
+  assert.equal(relay.probes.length, 1, "concurrent and overlapping health calls share one connection attempt");
+  assert.ok(await closes(relay.probes[0]), "the probe gives up its stalled connection");
+  relay.release();
+  const recovered = await gateway.get("/v1/health");
+  assert.equal(recovered.status, 200, "the next call probes afresh instead of joining the stalled probe");
+  assert.deepEqual((await recovered.json()).dependencies.database, { status: "ready", schemaVersion: version });
+  assert.equal(relay.probes.length, 2);
+  assert.ok(await closes(relay.probes[1]), "a successful probe ends its connection");
 });
 
 test("v1 listings page an owner's members and conversations without gaps, duplicates or text", async (t) => {

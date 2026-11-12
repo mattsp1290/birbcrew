@@ -9,7 +9,7 @@ import { EventType as E, type Event } from "@ag-ui/core";
 import { RunAgentInputSchema } from "@ag-ui/core/schemas";
 import { EventEncoder } from "@ag-ui/encoder";
 import { Client, Connection, WorkflowUpdateFailedError } from "@temporalio/client";
-import { Pool } from "pg";
+import { Client as PgClient, Pool, type PoolOptions } from "pg";
 import { z } from "zod";
 import { decisionSchema } from "./approvals.ts";
 import { MemberClient } from "./client.ts";
@@ -68,25 +68,24 @@ async function probe<T>(check: () => Promise<T>): Promise<T | undefined> {
   finally { timer.abort(); }
 }
 
-// probe() only ends the HTTP wait, and pg's query_timeout starts after pool acquisition and only abandons the
-// client, so each step is bounded here: a client granted after the deadline goes straight back unused,
-// statement_timeout makes the server cancel a lock-blocked read, and query_timeout covers a silent socket.
-// The acquisition bound is per probe so real routes keep the pool's unbounded wait (no connectionTimeoutMillis).
-async function readSchemaVersion(pool: Pool): Promise<number | null> {
-  const deadline = Date.now() + probeTimeout;
-  const client = await pool.connect();
-  if (Date.now() >= deadline) { client.release(); throw new Error("probe deadline passed"); }
-  const bounded = (text: string) => ({ text, query_timeout: probeTimeout });
+// probe() only ends the HTTP wait. The read itself uses its own connection, never the pool: pool.connect() has
+// no bound (real routes keep an unbounded wait), so a connect stalled on a silent or unreachable host would pin
+// the shared probe and a pool slot until the OS gave up, or forever. Settings are the ones pg-pool hands its own
+// clients, plus password, which pg-pool makes non-enumerable so a spread drops it. connectionTimeoutMillis covers
+// TCP, TLS and authentication; statement_timeout makes the server cancel a lock-blocked read; query_timeout
+// covers a silent socket; end() gets the same bound before the socket is destroyed. So this settles within
+// 3 * probeTimeout whatever the server does.
+async function readSchemaVersion(options: PoolOptions): Promise<number | null> {
+  const client = new PgClient({ ...options, password: options.password,
+    connectionTimeoutMillis: probeTimeout, statement_timeout: probeTimeout, query_timeout: probeTimeout });
+  client.on("error", () => {}); // a socket error after the probe gave up must not crash the gateway
   try {
-    await client.query(bounded(`BEGIN READ ONLY; SET LOCAL statement_timeout = ${Math.max(1, deadline - Date.now())}`));
-    const { rows: [row] } = await client.query<{ version: number | null }>(
-      bounded("SELECT max(version) AS version FROM birbcrew_ts.schema_versions"));
-    await client.query(bounded("COMMIT"));
-    client.release();
+    await client.connect();
+    const { rows: [row] } = await client.query<{ version: number | null }>("SELECT max(version) AS version FROM birbcrew_ts.schema_versions");
     return row.version;
-  } catch (error) {
-    client.release(true);
-    throw error;
+  } finally {
+    const ended = await Promise.race([client.end().then(() => true), delay(probeTimeout, false, { ref: false })]);
+    if (!ended) client.connection.stream.destroy();
   }
 }
 
@@ -171,10 +170,10 @@ async function observe(
 export function createGateway(store: MemberStore, members: MemberClient, owners: Record<string, string>) {
   const integration = new IntegrationApi(store, members);
   const accounts = Object.entries(credentials.parse(owners)).map(([hash, actor]) => ({ digest: Buffer.from(hash, "hex"), actor }));
-  // One database probe at a time, shared by concurrent health calls: polling adds at most one queued connection
-  // request or statement, even while a connect to an unreachable server is still pending.
+  // One database probe at a time, shared by concurrent health calls, so polling holds at most one probe connection.
+  // A stalled probe pins this slot only until readSchemaVersion's own bounds end it.
   let databaseProbe: Promise<number | null> | undefined;
-  const schemaVersion = () => databaseProbe ??= readSchemaVersion(store.pool).finally(() => { databaseProbe = undefined; });
+  const schemaVersion = () => databaseProbe ??= readSchemaVersion(store.pool.options).finally(() => { databaseProbe = undefined; });
   async function route(request: IncomingMessage, response: ServerResponse) {
     const auth = request.headers.authorization;
     if (!auth?.startsWith("Bearer ") || auth.length === 7) throw new HttpError(401, "authentication_required");
