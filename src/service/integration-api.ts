@@ -142,7 +142,7 @@ export class IntegrationApi {
 
   /**
    * Coarse snapshot phase only; never message text. Phase is null where the snapshot reports history_unavailable.
-   * conversations has no owner index yet, so this walks its primary key filtering owner_id until one is added.
+   * Backed by the owner indexes from migration 022, one per query shape.
    */
   async listConversations(ownerId: string, query: unknown) {
     const { limit, after, memberId } = conversationListQuery.parse(query);
