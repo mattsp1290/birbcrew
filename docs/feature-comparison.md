@@ -165,7 +165,7 @@ Each line states what Crew does at `47f3c0f` and where the feature stops.
 | 13 | Yes | A `record_work_item` call opens an approval card. A `choose_next_step` call opens a question. See [the gateway guide](member-gateway.md). |
 | 14 | Yes | An owner can answer a card with `allow_conversation` or `allow_always`. A grant matches the tool, not its arguments. A grant never expires by time and never applies to a routine. See [standing grants](standing-grants.md). |
 | 15 | No | Crew has no deny rule and no rule language. The eligibility of a grant is fixed in code. |
-| 16 | Yes | `GET /v1/audit` returns an append-only trail of 19 event types as JSON or CSV. The only filter is `conversationId`. Refused HTTP calls leave no row. No retention limit and no deletion route exist. See [the audit trail](audit-trail.md). |
+| 16 | Yes | `GET /v1/audit` returns an append-only trail of 19 event types as JSON or CSV. It filters by conversation, member, event type, actor kind, initiator kind, routine and time window, combined with AND. No filter reads payload fields, such as an approval's choice or the `routineId` of a routine's own rows. Refused HTTP calls leave no row. No retention limit and no deletion route exist. See [the audit trail](audit-trail.md) and [audit filters](audit-filters.md). |
 | 17 | Yes | Each request admission records an initiator of kind `owner` or `routine`. The audit trail copies the initiator from the admission. |
 | 18 | No | Grant matching runs only inside the transaction that records a call. |
 | 19 | No | Members have no computer. |

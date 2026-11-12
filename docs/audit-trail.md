@@ -136,8 +136,10 @@ filter for another owner's conversation returns an empty page, not `404`.
 | `after` | Return events with a larger `eventId`. Decimal, default `0`. |
 | `limit` | Default 100 in both formats. At most 1000 for JSON and 10000 for CSV (the hard row cap). |
 | `conversationId` | Only events for this conversation. |
+| `memberId`, `eventType`, `actorKind`, `initiatorKind`, `initiatorId`, `from`, `to` | Only events that match: see [audit filters](audit-filters.md). |
 | `format` | `json` (default) or `csv`. |
 
+Filters combine with AND and never change the cursor rules below.
 Query validation is strict. An unknown or repeated parameter, or a malformed or
 out-of-range value, returns `400 invalid_input`. Other methods return `405`.
 
@@ -297,6 +299,11 @@ Migration 26 replaces `audit_events_type_check` the same way, with every earlier
 type and the three memory types, and adds one partial unique index for them. It takes
 `audit_events` together with `members` and `conversations` without queueing, so it
 never waits for a native turn; [member memory](memories.md#upgrade) lists its locks.
+
+Migration 27 adds three indexes for the filters and changes no constraint or
+trigger. It holds `SHARE` on `audit_events`, taken the same way, so audited writes
+wait for the index builds; applied alone, from version 26, reads continue.
+[Audit filters](audit-filters.md#upgrade-and-recovery) lists its locks.
 
 The audit table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest

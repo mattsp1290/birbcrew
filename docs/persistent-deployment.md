@@ -185,7 +185,10 @@ without applying anything. Restart it once the other sessions are done (see
 From version 24 both run in one transaction, and 26 retries while holding 25's
 locks, so admissions and audited writes wait meanwhile; an open of the previous
 release still in flight makes it fail after the 60 s (see
-[member memory](memories.md#upgrade)).
+[member memory](memories.md#upgrade)). Migration 27 (audit filters) takes `SHARE`
+on `audit_events` the same way and builds three indexes, so audited writes wait for
+a time that grows with the audit table, and a long autovacuum of that table can
+also make it fail after the 60 s (see [audit filters](audit-filters.md#upgrade-and-recovery)).
 
 A Kubernetes Deployment's default `RollingUpdate` strategy starts new pods while
 old ones still run, which is exactly what this forbids. Scale every Deployment
