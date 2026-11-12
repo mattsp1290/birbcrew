@@ -286,6 +286,13 @@ test("a retried requestId returns the same handoff, drives its reserved request 
   const answers = await Promise.all(Array.from({ length: 6 }, () => f.handoff(raced, target, racedId)));
   assert.deepEqual(new Set(answers.map(answer => answer.status)), new Set([201]));
   assert.equal(new Set(answers.map(answer => answer.body.target.conversationId)).size, 1);
+  // One requestId sent concurrently for two sources: one handoff, and the other is a conflict.
+  const [left, right] = [await f.open(member), await f.open(member)];
+  for (const id of [left, right]) await f.turn(id, "contended", "once");
+  const contended = randomUUID();
+  const both = await Promise.all([f.handoff(left, target, contended), f.handoff(right, target, contended)]);
+  assert.deepEqual(both.map(answer => answer.status).sort(), [201, 409]);
+  assert.deepEqual(both.find(answer => answer.status === 409)?.body, { error: "conflict" });
 });
 
 test("a sealed source refuses new requests and a second handoff, and stays readable", async (t) => {

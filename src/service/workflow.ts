@@ -234,8 +234,9 @@ export async function memberConversation(conversation: Conversation): Promise<vo
   }
 
   function validate(value: TurnRequest): TurnRequest {
-    // The bound every internal path shares. Admission, outside workflow code, decides which request
-    // may use more than the public prompt bound; validators do not run on replay.
+    // The bound every internal path shares; admission, outside workflow code, decides which request
+    // may use more than the public prompt bound. enqueue repeats this check on replay, so it may only
+    // widen: every request a recorded history holds passed the narrower bound.
     const parsed = turnRequestSchema.safeParse(value);
     if (!parsed.success) throw ApplicationFailure.nonRetryable("Invalid turn request");
     const request = parsed.data;

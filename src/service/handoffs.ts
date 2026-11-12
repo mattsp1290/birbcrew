@@ -26,7 +26,7 @@ export const handoffCapabilities = {
 
 type Queryable = Pick<PoolClient, "query">;
 type CarriedTurn = { ownerPrompt: string | null; modelReply: string };
-export type Transcript = { sourceEngine: Engine; omittedTurns: number; uncertainTurns: number; turns: CarriedTurn[] };
+type Transcript = { sourceEngine: Engine; omittedTurns: number; uncertainTurns: number; turns: CarriedTurn[] };
 
 const handoffHeader = "BirbCrew conversation handoff v1. The owner moved an earlier conversation with another coworker to"
   + " you. The JSON below quotes its most recent turns verbatim, oldest first: ownerPrompt is what the owner wrote and"
@@ -37,14 +37,14 @@ const handoffHeader = "BirbCrew conversation handoff v1. The owner moved an earl
 
 // As memories.ts does: JSON keeps every prompt and reply inside its own string, and U+2028 and
 // U+2029, which JSON.stringify leaves raw and which break a line, are escaped too.
-export function renderTranscript(transcript: Transcript): string {
+function renderTranscript(transcript: Transcript): string {
   return handoffHeader + JSON.stringify(transcript).replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029");
 }
 
 /** The newest whole turns that fit `bytes`, rendered, oldest first. Each added turn adds more
  * bytes than omittedTurns can lose, so the first turn that does not fit ends the search. Null
  * when not even the newest turn fits. */
-export function fitTranscript(sourceEngine: Engine, uncertainTurns: number, turns: readonly CarriedTurn[], bytes: number) {
+function fitTranscript(sourceEngine: Engine, uncertainTurns: number, turns: readonly CarriedTurn[], bytes: number) {
   let fitted: { text: string; carried: number } | null = null;
   for (let carried = 1; carried <= turns.length; carried++) {
     const text = renderTranscript({ sourceEngine, omittedTurns: turns.length - carried, uncertainTurns, turns: turns.slice(-carried) });
