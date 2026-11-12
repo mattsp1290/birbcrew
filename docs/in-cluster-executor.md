@@ -20,7 +20,7 @@ The approved-goal activity worker (`python -m birbcrew.execution.worker`) can ru
 }
 ```
 
-These fields go into the existing installation file. Its other fields are unchanged.
+These fields go into the existing installation file. Its other fields are unchanged. Replace `<socket name>` with the name the Codex container reports; see [Run Codex beside the worker](#run-codex-beside-the-worker).
 
 - If `reviewer` is absent, the Claude reviewer is selected. Configurations written before this field existed keep their behavior.
 - `{"kind": "claude"}` requires `claude`, and any other reviewer rejects it. A configuration that breaks either rule fails to load.
@@ -32,7 +32,7 @@ These fields go into the existing installation file. Its other fields are unchan
   - Without `api_key_file`, the key comes from the `OPENCODE_GO_API_KEY` assignment in `$HOME/.profile`, as before.
   - Crew never writes the key to evidence or receipts. A test that enables debug logging for a review checks that the key does not appear in the log output.
 
-At startup, the worker reads the configured key and parses the attestation; if either fails, it exits. It does not check the attestation's age at startup.
+At startup, the worker reads the configured key and parses the attestation; if either fails, it exits with `opencode_go_key_unusable` or `subscription_evidence_unusable`, without echoing file contents. It does not check the attestation's age at startup. When `codex_socket` is set, the worker also waits up to 120 seconds for that socket to appear and exits with `codex_socket_unavailable` if it does not.
 
 Each review sends the unchanged prompt to `https://opencode.ai/inference/go/openai/v1` as one Chat Completions request:
 - The request offers a single tool, `final_result`, built from the `Verdict` schema with `"strict": true`, and sets `tool_choice` to `required`.
@@ -56,7 +56,7 @@ Forge reads receipts through Crew's contract module, and its web client keeps it
 
 What the image contains:
 - The locked Python dependencies, installed under `/venv`.
-- Debian `git`, `gh`, `openssh-client` and `tini`. Their versions come from the Debian release of the base image, not from separate pins.
+- Debian `git`, `gh`, `openssh-client` and `tini`. Their versions are not pinned; they are whatever the base image's Debian release serves when you build.
 - Codex, from the npm platform package that `package-lock.json` pins for `@openai/codex` 0.167.1. The build checks the package against the lock file's sha512 value. It leaves out the package's voice resources, and Node is not installed.
 
 The image runs as UID/GID 10001 (`crew`, home `/home/crew`), with `tini` as its entrypoint and the activity worker as its default command. The build context contains only `pyproject.toml`, `uv.lock` and `src/birbcrew`.
@@ -82,7 +82,7 @@ Run the Codex app-server in the foreground as its container's main process. Do n
 
 `CODEX_HOME` (`/home/crew/.codex`) must exist before the server starts.
 - The server listens on `/tmp/codex-daemon-10001/<socket name>`. It also links `$CODEX_HOME/app-server-control/app-server-control.sock` to that path.
-- To read the socket name, run `readlink` on that link in the server container. The name stays the same as long as the `CODEX_HOME` path does not change.
+- To read the socket name, run `readlink` on that link in the server container, and recheck it after a Codex upgrade.
 - Mount the shared volume at `/tmp`. The server rejects a volume mounted directly at `/tmp/codex-daemon-10001`.
 
 Each activity starts `codex app-server proxy` in the worker container.
@@ -91,7 +91,11 @@ Each activity starts `codex app-server proxy` in the worker container.
 
 Codex supports headless sign-in with `codex login --device-auth`. Without a keyring, it stores the credential in `$CODEX_HOME/auth.json`. Before submitting work, an operator can call `account/read`. While signed out, it reports `"account": null` and `"requiresOpenaiAuth": true`.
 
-On SIGTERM, the worker stops polling and lets running activities finish for up to 660 seconds; after that it cancels them. Give the pod a longer termination grace period, such as 690 seconds. A review interrupted any other way leaves an unconfirmed claim that needs operator reconciliation, as on the Mac host.
+On SIGTERM, the worker stops polling and lets running activities finish for up to 660 seconds. After that it cancels them. Give the pod a longer termination grace period, such as 690 seconds.
+
+- **Review.** The window covers a whole review.
+- **Author turn.** An author turn can run longer (`turn_timeout_seconds`, up to 3600). If it is cancelled at shutdown, it does not interrupt the Codex turn. Temporal retries the activity on the next worker, which resumes the turn. Each such restart uses one of Forge's three activity attempts.
+- **Other interruptions.** An eviction, an OOM kill or a SIGKILL after the window leaves an unconfirmed claim that needs operator reconciliation. In a pod these are more frequent than on the Mac host.
 
 ## Mounts
 
@@ -106,9 +110,9 @@ On SIGTERM, the worker stops polling and lets running activities finish for up t
 | `subscription_evidence` file | worker, read-only | OpenCode Go attestation. |
 | `api_key_file` | worker | A private copy owned by UID 10001, mode 0400 or 0600. |
 | `/home/crew/.ssh/` | worker, read-only | Deploy key and a `known_hosts` entry for `github.com`. OpenSSH reads this directory from the passwd entry, not `$HOME`. |
-| `gh` credentials | worker | Prefer `GH_CONFIG_DIR` pointing at a mounted `hosts.yml`. Every child process inherits the worker's environment, so `GH_TOKEN` would also reach Git, the acceptance command and the Codex proxy. |
+| `gh` credentials | worker | `GH_TOKEN`, or `GH_CONFIG_DIR` pointing at a mounted `hosts.yml`. Every child process inherits the worker's environment and UID. Git, the acceptance command and the Codex proxy can therefore reach either form. `GH_CONFIG_DIR` only keeps the token out of environment dumps. |
 
-Keep the OpenCode Go key, SSH key and GitHub credentials out of the Codex container. The worker runs Git with those credentials against the checkout's configuration. Mount the checkout read-only in the Codex container so the author cannot change that configuration.
+Keep the OpenCode Go key, SSH key and GitHub credentials out of the Codex container. Put them on worker-only volumes, never on the shared `/tmp`. Both containers run as UID 10001, so file modes do not separate them. The worker runs Git with those credentials against the checkout's configuration. Mount the checkout read-only in the Codex container so the author cannot change that configuration.
 
 The author's writes to `worktree_root` are limited only by the Codex sandbox, which is not verified in this container. Treat the separation as defense in depth for a trusted-owner pilot, not as isolation.
 
@@ -117,7 +121,8 @@ Kubernetes Secret volumes usually expose keys as root-owned symbolic links, whic
 ## What was verified
 
 - **Tests.** `uv run --group dev pytest` covers:
-  - Settings: reviewer selection, the `claude` path rules, absolute paths, key-file permissions and contents, the existing `$HOME/.profile` reader, the startup check, the SIGTERM drain, and `--sock` reaching the proxy argv for authoring and interruption.
+  - Settings: reviewer selection, the `claude` path rules, absolute paths, key-file permissions and contents, the existing `$HOME/.profile` reader, the startup checks (including that they do not echo file contents), and `--sock` reaching the proxy argv for authoring and interruption.
+  - Worker wiring with a stand-in Temporal worker: SIGTERM ends the wait, and the 660-second grace period is passed. The drain itself is Temporal's `graceful_shutdown_timeout`; this repository does not test it.
   - Reviews, using a local scripted model and a local HTTP stub: approved; changes requested; malformed, missing or conflicting verdicts; provider HTTP and connection failures; timeouts; expired, future, timezone-less or invalid attestations; a single request with no retry; closing the provider client; and heartbeats while a request is pending.
 - **Image runs.** The image was built for linux/arm64 and for linux/amd64 (emulated). Both were run with `--user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp`. Both reported `codex-cli 0.167.1`, git 2.47.3, gh 2.46.0 and OpenSSH 10.0p2, and imported `birbcrew.execution.worker`.
 - **Two-container Codex on linux/arm64.**
@@ -125,6 +130,7 @@ Kubernetes Secret volumes usually expose keys as root-owned symbolic links, whic
   - With `CODEX_HOME` shared as well, the client worked through both the default link and `--sock`.
   - Without `CODEX_HOME`, it worked through `--sock` and failed through the default link.
   - `account/read` returned the signed-out state, and the server exited 0 on SIGTERM.
+  - Three server starts with fresh volumes and the same `CODEX_HOME` path used the same socket name.
 - **SSH lookup.** With `HOME` pointed elsewhere, OpenSSH in the image still looked for identities under `/home/crew/.ssh`.
 - **Codex prototype.** A separate Codex 0.167.1 container prototype established three facts: what `daemon start` does, that the server rejects a volume mounted at `/tmp/codex-daemon-10001`, and where device sign-in stores its credential.
 

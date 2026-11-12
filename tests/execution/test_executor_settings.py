@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import traceback
 from pathlib import Path
 
 import pytest
@@ -256,15 +257,54 @@ def test_worker_preflight_rejects_unusable_reviewer_configuration(setup, tmp_pat
     config, _, _ = setup
     preflight_reviewer(installed(config, claude="/opt/claude"))
     preflight_reviewer(opencode_settings(config, tmp_path))
-    with pytest.raises(ValueError, match="private to this user"):
+    with pytest.raises(ValueError, match="^opencode_go_key_unusable$"):
         preflight_reviewer(opencode_settings(config, tmp_path, 0o644))
     broken = opencode_settings(config, tmp_path)
     broken.reviewer.subscription_evidence.write_text("{}")
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValueError, match="^subscription_evidence_unusable$"):
         preflight_reviewer(broken)
     broken.reviewer.subscription_evidence.unlink()
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(ValueError, match="^subscription_evidence_unusable$"):
         preflight_reviewer(broken)
+
+
+def test_worker_preflight_never_echoes_file_contents(setup, tmp_path):
+    from birbcrew.execution.review import preflight_reviewer
+
+    config, _, _ = setup
+    swapped = opencode_settings(config, tmp_path)
+    secret = "fixture-token-" + "A" * 40
+    write_key(swapped.reviewer.subscription_evidence, secret + "\n")
+    with pytest.raises(ValueError) as caught:
+        preflight_reviewer(swapped)
+    printed = "".join(traceback.format_exception(caught.value))
+    assert "subscription_evidence_unusable" in printed and secret[:14] not in printed
+
+
+def test_configured_codex_socket_must_appear(tmp_path):
+    import socket
+    import tempfile
+
+    from birbcrew.execution.daemon import wait_for_socket
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        path = Path(directory) / "codex.sock"
+        with pytest.raises(ValueError, match="codex_socket_unavailable"):
+            asyncio.run(wait_for_socket(path, 0.2))
+        path.write_text("")
+        with pytest.raises(ValueError, match="codex_socket_unavailable"):
+            asyncio.run(wait_for_socket(path, 0.2))
+        path.unlink()
+
+        async def appears_later():
+            listener = socket.socket(socket.AF_UNIX)
+            asyncio.get_running_loop().call_later(0.3, listener.bind, str(path))
+            try:
+                await wait_for_socket(path, 5)
+            finally:
+                listener.close()
+
+        asyncio.run(appears_later())
 
 
 def test_worker_drains_activities_on_sigterm(setup, monkeypatch, tmp_path):
@@ -274,6 +314,7 @@ def test_worker_drains_activities_on_sigterm(setup, monkeypatch, tmp_path):
 
     config, _, _ = setup
     started = []
+    unhandled = []
 
     class FakeWorker:
         def __init__(self, client, **options):
@@ -292,11 +333,26 @@ def test_worker_drains_activities_on_sigterm(setup, monkeypatch, tmp_path):
     monkeypatch.setattr(worker, "installation", lambda: config)
     monkeypatch.setattr(worker, "temporal_client", client)
     monkeypatch.setattr(worker, "Worker", FakeWorker)
-    asyncio.run(asyncio.wait_for(worker.main(), 5))
+    previous = signal.signal(signal.SIGTERM, lambda *args: unhandled.append(args))
+    try:
+        asyncio.run(asyncio.wait_for(worker.main(), 5))
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert not unhandled
     assert started[0]["graceful_shutdown_timeout"].total_seconds() == 660
     assert started[1] == "drained"
     unusable = opencode_settings(config, tmp_path, 0o640)
     monkeypatch.setattr(worker, "installation", lambda: unusable)
-    with pytest.raises(ValueError, match="private to this user"):
+    with pytest.raises(ValueError, match="opencode_go_key_unusable"):
+        asyncio.run(worker.main())
+    missing = installed(config, claude="/opt/claude", codex_socket=str(tmp_path / "absent.sock"))
+    monkeypatch.setattr(worker, "installation", lambda: missing)
+
+    async def no_socket(path, timeout):
+        assert (path, timeout) == (missing.codex_socket, 120)
+        raise ValueError("codex_socket_unavailable")
+
+    monkeypatch.setattr(worker, "wait_for_socket", no_socket)
+    with pytest.raises(ValueError, match="codex_socket_unavailable"):
         asyncio.run(worker.main())
     assert len(started) == 2

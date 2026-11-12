@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import stat
 from pathlib import Path
 
 from temporalio import activity
@@ -103,3 +105,17 @@ class Daemon:
             except TimeoutError:
                 self.process.terminate()
                 await self.process.wait()
+
+
+async def wait_for_socket(path: Path, timeout: float) -> None:
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                try:
+                    if stat.S_ISSOCK(os.stat(path).st_mode):
+                        return
+                except FileNotFoundError:
+                    pass
+                await asyncio.sleep(1)
+    except TimeoutError:
+        raise ValueError("codex_socket_unavailable") from None

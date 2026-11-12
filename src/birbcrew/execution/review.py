@@ -125,11 +125,18 @@ def reviewer_key(reviewer: OpenCodeGoReviewer) -> str:
 
 
 def preflight_reviewer(config: ExecutionSettings) -> None:
-    if isinstance(config.reviewer, OpenCodeGoReviewer):
+    if not isinstance(config.reviewer, OpenCodeGoReviewer):
+        return
+    try:
         reviewer_key(config.reviewer)
+    except (OSError, ValueError):
+        raise ValueError("opencode_go_key_unusable") from None
+    try:
         provider.SubscriptionEvidence.model_validate_json(
             config.reviewer.subscription_evidence.read_text()
         )
+    except (OSError, ValueError):
+        raise ValueError("subscription_evidence_unusable") from None
 
 
 async def opencode_review(
