@@ -2,13 +2,19 @@ import { createHash } from "node:crypto";
 import { applyChild, endChildStep, insertToolResult, type ChildChange, type ObservedChild } from "./child-observation.ts";
 import { EventType as E, type Event, type Message } from "@ag-ui/core";
 import type { Pool, PoolClient } from "pg";
-import { toolChoices } from "./deferral.ts";
+import { standingChoice, toolChoices } from "./deferral.ts";
+import type { ActiveGrant } from "./grants.ts";
 import type { Approval, ToolOutcome } from "./approvals.ts";
 import { MemberStoreError, type Conversation } from "./domain.ts";
 
 const retainedEvents = 256;
+// The per-request call cap, so every granted call of the current request stays listed while the
+// snapshot stays bounded. The audit trail keeps every one.
+const retainedGrantedCalls = 16;
 
-type PublicApproval = Omit<Approval, "argumentDigest" | "ownerId" | "nativeCallId"> & { expiresAt?: string; choices: typeof toolChoices.record_work_item };
+type PublicApproval = Omit<Approval, "argumentDigest" | "ownerId" | "nativeCallId" | "grantId"> & {
+  expiresAt?: string; choices: typeof toolChoices.record_work_item; standingChoices?: typeof standingChoice.options;
+};
 type PublicQuestion = Omit<PublicApproval, "choices"> & { choices: typeof toolChoices.choose_next_step };
 type Phase = "idle" | "running" | "waiting" | "complete" | "cancelled" | "failed";
 interface ClosedCall {
@@ -18,8 +24,12 @@ interface ClosedCall {
   delivery: "confirmed" | "unknown";
   receiptId?: string;
 }
+// A call a standing grant approved, which had no card. Per call, so creating or revoking a
+// member-wide grant republishes no conversation's snapshot.
+type GrantedCall = ActiveGrant & { requestId: string; approvalId: string };
 type Projection = {
   interruptedCalls?: ClosedCall[];
+  grantedCalls?: GrantedCall[];
   liveOperations?: (Omit<ClosedCall,"effect"> & {effect:"pending" | ClosedCall["effect"]})[];
   conversationId: string;
   memberId: string;
@@ -38,7 +48,7 @@ type Change = ChildChange
   | ({ kind: "reply"; requestId: string; cancelled?: boolean } & ({ text: string } | { itemCount: number }))
   | { kind: "toolValue"; invocationId: string; publicId: string; requestId: string }
   | { kind: "toolPreview"; invocationId: string; publicId: string }
-  | { kind: "call"; approval: Approval; expiresAt?: string }
+  | { kind: "call"; approval: Approval; expiresAt?: string; standing?: true; grant?: ActiveGrant }
   | ({ kind: "liveClosed" } & ClosedCall)
   | { kind: "liveDelivered"; requestId: string; approvalId: string }
   | { kind: "answered" | "resume"; approvalId: string }
@@ -205,9 +215,11 @@ function apply(snapshot: StoredSnapshot, change: Change): Event[] {
         toolName, summary } = change.approval;
       commitPreamble(invocationId === requestId ? undefined : invocationId);
       const card = { ...(change.expiresAt && {expiresAt:change.expiresAt}), memberId, conversationId, requestId, invocationId, approvalId, version, policyVersion, toolName, summary };
-      if (toolName === "choose_next_step") (state.pendingQuestions ??= []).push({ ...card, choices: toolChoices.choose_next_step });
-      else state.pendingApprovals.push({ ...card, choices: toolChoices.record_work_item });
-      state.phase = "waiting";
+      if (change.grant) state.grantedCalls = [...state.grantedCalls ?? [], { requestId, approvalId, ...change.grant }].slice(-retainedGrantedCalls);
+      else if (toolName === "choose_next_step") (state.pendingQuestions ??= []).push({ ...card, choices: toolChoices.choose_next_step });
+      else state.pendingApprovals.push({ ...card, choices: toolChoices.record_work_item,
+        ...(change.standing && { standingChoices: standingChoice.options }) });
+      if (!change.grant) state.phase = "waiting";
       const attribution = invocationId === requestId ? {} : { subagentRunId: invocationId };
       const args = toolName === "choose_next_step" ? "{}" : JSON.stringify({ operation_id: requestId });
       const messageId = approvalId + "/assistant";

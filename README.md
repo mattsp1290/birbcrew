@@ -106,3 +106,9 @@ protected tool requests and attach independent AG-UI observers to these members.
 The [audit trail](docs/audit-trail.md) records who spawned, opened, submitted,
 decided, cancelled and completed what, and when. Each owner can page or export
 their own trail as CSV through `GET /v1/audit`.
+
+An owner can answer a work-item approval with a [standing grant](docs/standing-grants.md)
+for the rest of the conversation or for every conversation of the member. Later calls
+it covers proceed without a card and name the grant. Grants are listed and revoked
+through `/v1/members/{memberId}/grants`. Crew cannot tell a person from an automated
+client holding the owner's token, so a grant covers both.

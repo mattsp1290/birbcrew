@@ -9,6 +9,9 @@ import {MemberStore} from '../../src/service/store.ts';
 import {InstallationRecovery,readRecoveryManifest,RecoveryRefusedError,type RecoveryPins,type RecoveryHooks} from '../../src/service/recovery.ts';
 import {FileRecoveryFence,fenceEpochLimit} from '../../src/service/recovery-fence.ts';
 import {auditQuerySchema,readAudit} from '../../src/service/audit.ts';
+import {ApprovalStore} from '../../src/service/approvals.ts';
+import {ownerInitiator} from '../../src/service/domain.ts';
+import {revokeGrant} from '../../src/service/grants.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 const exec=promisify(execFile);
@@ -285,6 +288,51 @@ test('a restored audit trail never reissues an event ID, even when one generatio
  assert.deepEqual([firstOnB,onB,onC],[1n<<44n,(2n<<44n)-1n,2n<<44n].map(String),'each timeline starts at its epoch times 2^44');
  // The previous release parses state.json strictly, so after a rollback it must still read it.
  assert.deepEqual(Object.keys(JSON.parse((await fenceState(t)).state!)).sort(),['generation','installation','instance','phase']);
+});
+
+test('a restored installation revokes every standing grant as it resumes; a held source keeps its own',async context=>{
+ const t=await setup(context);
+ const {memberId}=await spawn(t.store);
+ async function call(store:MemberStore,pool:Pool) {
+  const conversationId=randomUUID(),requestId=randomUUID(),text='record '+requestId,key={ownerId:'owner',conversationId,requestId};
+  await store.openConversation({ownerId:'owner',memberId,conversationId});
+  await store.recordAcceptance({...key,text},ownerInitiator);
+  const start=await store.beginTurn({...key,text});
+  assert.equal(start.kind,'start');if(start.kind!=='start') throw new Error('unreachable');
+  return new ApprovalStore(pool).propose({...key,memberId,token:start.token,invocationId:requestId,nativeCallId:'call',
+   toolName:'record_work_item',arguments:{operation_id:requestId}});
+ }
+ async function grant(choice:'allow_always'|'allow_conversation') {
+  const {ownerId,conversationId,requestId,invocationId,nativeCallId,approvalId,argumentDigest,version}=await call(t.store,t.pool);
+  await new ApprovalStore(t.pool).decide({ownerId,memberId,conversationId,requestId,invocationId,nativeCallId,approvalId,argumentDigest,version,choice});
+  return {grant_id:(await t.pool.query('SELECT grant_id FROM birbcrew_ts.tool_grants WHERE approval_id=$1',[approvalId])).rows[0].grant_id as string,
+   conversation_id:choice==='allow_always'?null:conversationId};
+ }
+ // The conversation grant first: once the member-wide grant exists, a later card never appears.
+ const scoped=await grant('allow_conversation'),always=await grant('allow_always');
+ const grants=async(pool:Pool)=>(await pool.query('SELECT grant_id,conversation_id,revocation_reason FROM birbcrew_ts.tool_grants ORDER BY created_at')).rows;
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);
+ assert.equal(manifest.inventory.tool_grants,2);
+ // A held source that resumes without a restore keeps its grants: they are current.
+ await t.recovery.resume(t.hooks);
+ assert.deepEqual(await grants(t.pool),[{...scoped,revocation_reason:null},{...always,revocation_reason:null}]);
+ // The owner revokes one after the recovery point. Restoring the generation brings it back.
+ await revokeGrant(t.pool,{ownerId:'owner',memberId,grantId:always.grant_id});
+ await t.recovery.holdForRestore(manifest.generation,t.hooks);
+ const restored=await restoreBundle(t);const recovery=new InstallationRecovery(restored,t.fence);
+ await recovery.acceptRestore(t.bundle,pins,randomUUID());
+ assert.deepEqual(await grants(restored),[{...scoped,revocation_reason:null},{...always,revocation_reason:null}]);
+ await recovery.resume(t.hooks,manifest);
+ assert.deepEqual(await grants(restored),[{...scoped,revocation_reason:'recovery_restore'},{...always,revocation_reason:'recovery_restore'}]);
+ const {rows:audit}=await restored.query(`SELECT actor_kind,actor_id,conversation_id,payload FROM birbcrew_ts.audit_events
+  WHERE event_type='grant.revoked' ORDER BY event_id`);
+ assert.deepEqual(audit,[scoped,always].map(g=>({actor_kind:'system',actor_id:null,conversation_id:g.conversation_id,
+  payload:{grantId:g.grant_id,reason:'recovery_restore'}})));
+ await assert.rejects(recovery.resume(t.hooks,manifest),/Not held/);
+ assert.equal((await restored.query("SELECT count(*)::integer AS n FROM birbcrew_ts.audit_events WHERE event_type='grant.revoked'")).rows[0].n,2);
+ // The restored installation asks again.
+ assert.equal((await call(new MemberStore(restored),restored)).grantId,undefined);
 });
 
 test('a restore past the fence epoch, its epoch file missing or behind, starts above every ID the restored identity drew',async context=>{

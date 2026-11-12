@@ -413,6 +413,10 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
       "request.cancellation_requested": { conversationId, requestId, payload: {} },
       "request.finished": { conversationId, requestId, payload: { status: "completed" } },
       "trusted_effect.completed": { conversationId, requestId, payload: { operationId: randomUUID(), toolName: "fixture_effect" } },
+      "approval.auto_approved": { conversationId, requestId, payload: { approvalId: randomUUID(), invocationId: requestId,
+        toolName: "record_work_item", argumentDigest: digest, grantId: randomUUID() } },
+      "grant.created": { conversationId, requestId, payload: { grantId: randomUUID(), approvalId: randomUUID(), scope: "member" } },
+      "grant.revoked": { conversationId, payload: { grantId: randomUUID(), reason: "owner" } },
     };
     for (const type of auditEventTypes) {
       const fact = { type, ownerId, memberId, ...samples[type] } as AuditFact<typeof type>;
@@ -709,6 +713,69 @@ test("migration 23 records a v21 database's admissions as owner-initiated withou
   const { rows: events } = await upgraded.query(`SELECT request_id AS "requestId", initiator_kind AS kind, initiator_id AS id
     FROM birbcrew_ts.audit_events WHERE event_type='request.finished' ORDER BY event_id`);
   assert.deepEqual(events, [rejected, running].map(({ requestId }) => ({ requestId, kind: "owner", id: ownerId })));
+});
+
+test("migration 24 adds standing grants to a v23 database without rewriting or scanning deferred_calls or waiting for a native turn", async (t) => {
+  const upgraded = await databaseAt(t, 23);
+  const current = new MemberStore(upgraded);
+  const ownerId = "owner-" + randomUUID(), conversationId = randomUUID();
+  const { memberId } = await current.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
+  await current.openConversation({ ownerId, memberId, conversationId });
+  const running = { ownerId, conversationId, requestId: randomUUID(), text: "running at upgrade" };
+  await current.recordAcceptance(running, ownerInitiator);
+  const execution = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
+  const start = await current.beginTurn(running, execution);
+  assert.equal(start.kind, "start"); if (start.kind !== "start") return;
+  await upgraded.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+    VALUES ($1,$2,$3,$4,$5,1)`, [conversationId, running.requestId, start.token, execution.workflowRunId, execution.activityId]);
+  // A card the v23 release left pending.
+  const { rows: [card] } = await upgraded.query<{ approval_id: string; argument_digest: string }>(`INSERT INTO birbcrew_ts.deferred_calls
+    (conversation_id,request_id,invocation_id,native_call_id,tool_name,arguments,argument_digest,policy_version,decision_version)
+    VALUES ($1,$2,$2,'v23-call','record_work_item',$3,$4,1,1) RETURNING approval_id, argument_digest`,
+    [conversationId, running.requestId, { operation_id: running.requestId }, "0".repeat(64)]);
+
+  // Exclusive locks only on deferred_calls and audit_events; neither existing table is rewritten,
+  // and deferred_calls is not scanned. Only the new unique index build reads audit_events.
+  const db = await upgraded.connect();
+  try {
+    await db.query("BEGIN");
+    const table = `SELECT pg_relation_filenode('birbcrew_ts.deferred_calls') AS calls, pg_relation_filenode('birbcrew_ts.audit_events') AS audit,
+      pg_stat_get_xact_numscans('birbcrew_ts.deferred_calls'::regclass)::integer AS scans`;
+    const { rows: [before] } = await db.query(table);
+    await db.query(await readFile(new URL("024-standing-grants.sql", sql), "utf8"));
+    assert.deepEqual((await db.query(table)).rows[0], before);
+    const { rows } = await db.query(`SELECT c.relname AS relation, l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
+      WHERE l.pid=pg_backend_pid() AND c.relkind='r' AND c.relnamespace='birbcrew_ts'::regnamespace
+        AND c.relname<>'tool_grants' ORDER BY 1,2`);
+    assert.deepEqual(rows, [
+      { relation: "audit_events", mode: "AccessExclusiveLock" }, { relation: "audit_events", mode: "ShareLock" },
+      { relation: "conversations", mode: "AccessShareLock" }, { relation: "conversations", mode: "ShareRowExclusiveLock" },
+      { relation: "deferred_calls", mode: "AccessExclusiveLock" }, { relation: "deferred_calls", mode: "AccessShareLock" },
+      { relation: "deferred_calls", mode: "ShareRowExclusiveLock" },
+      { relation: "members", mode: "AccessShareLock" }, { relation: "members", mode: "ShareRowExclusiveLock" },
+    ]);
+  } finally {
+    await db.query("ROLLBACK");
+    db.release();
+  }
+
+  await withNativeAdmission(upgraded, { ...running, token: start.token, execution }, AbortSignal.timeout(30_000), async () => {
+    const migrated = await Promise.race([current.migrate().then(() => true), delay(5_000, false)]);
+    assert.equal(migrated, true, "migration 24 must not wait for a running native turn");
+    await current.appendText({ ownerId, conversationId, requestId: running.requestId, token: start.token },
+      running.requestId + "/assistant", 0, "still running");
+  });
+
+  const { rows: constraints } = await upgraded.query(`SELECT conrelid::regclass::text AS "table", conname AS name, convalidated AS validated
+    FROM pg_constraint WHERE conname IN ('deferred_calls_grant_scope_check','deferred_calls_grant_id_check','deferred_calls_grant_id_fkey',
+      'audit_events_type_check') ORDER BY 2`);
+  assert.deepEqual(constraints.map(c => c.validated), [false, false, false, false]);
+  // The card left pending by v23 takes a standing answer like a new one.
+  const ledger = new ApprovalStore(upgraded);
+  assert.equal(await ledger.decide({ ownerId, memberId, conversationId, requestId: running.requestId, invocationId: running.requestId,
+    nativeCallId: "v23-call", approvalId: card.approval_id, argumentDigest: card.argument_digest, version: 1, choice: "allow_always" }), "allow_always");
+  const { rows: events } = await upgraded.query("SELECT event_type FROM birbcrew_ts.audit_events WHERE owner_id=$1 ORDER BY event_id", [ownerId]);
+  assert.deepEqual(events.map(row => row.event_type).slice(-2), ["approval.decided", "grant.created"]);
 });
 
 test("a request's audit rows carry the initiator its admission recorded; one without an admission records the owner", async (t) => {

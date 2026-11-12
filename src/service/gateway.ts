@@ -14,6 +14,7 @@ import { z } from "zod";
 import { decisionSchema } from "./approvals.ts";
 import { AuditUnsettledError, auditCsv, auditParameterNames, auditQuerySchema, readAudit } from "./audit.ts";
 import { MemberClient } from "./client.ts";
+import { listGrants, revokeGrant } from "./grants.ts";
 import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from "./domain.ts";
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
 import { MemberStore } from "./store.ts";
@@ -145,6 +146,17 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       response.writeHead(200, { "Content-Type": "text/csv; charset=utf-8", "Cache-Control": "no-store",
         "Content-Disposition": 'attachment; filename="audit.csv"', "Audit-Next-After": page.nextAfter, "Audit-Has-More": String(page.hasMore) });
       return response.end(auditCsv(page.events));
+    }
+    const grantRoute = versioned && /^\/members\/([^/]+)\/grants(?:\/([^/]+)\/(revoke))?$/.exec(path);
+    if (grantRoute) {
+      if (url.search) throw new HttpError(400, "invalid_input");
+      const memberId = z.uuid().parse(grantRoute[1]);
+      if (!grantRoute[2] && request.method === "GET") return json(response, 200, await listGrants(store.pool, { ownerId, memberId }));
+      if (grantRoute[2] && request.method === "POST") {
+        z.strictObject({}).parse(await body(request));
+        return json(response, 200, await revokeGrant(store.pool, { ownerId, memberId, grantId: z.uuid().parse(grantRoute[2]) }));
+      }
+      throw new HttpError(405, "method_not_allowed");
     }
     const requestRoute = versioned && /^\/conversations\/([^/]+)\/requests(?:\/([^/]+)(\/cancel)?)?$/.exec(path);
     if (requestRoute) {
