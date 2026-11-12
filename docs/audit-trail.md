@@ -204,8 +204,12 @@ process of the previous release before the first upgraded process starts, rather
 than rolling the upgrade through running instances. Rolling back to an earlier
 release breaks completeness for as long as it runs. An earlier release also does
 not move the audit identity when it accepts a restore, so once a later release
-writes to that timeline again, its new IDs can repeat ones consumers hold; accept
-restores only with a release that includes migration 21.
+writes to that timeline again, its new IDs can repeat ones consumers hold. A
+release that includes migration 21 cannot accept such a generation instead:
+acceptance requires the application commit and lockfile of the release that
+captured it. So prefer generations captured by a release that includes migration
+21, and move the identity by hand after an earlier release accepts a restore, as
+[below](#after-an-earlier-release-accepted-a-restore) describes.
 
 Migration 21 creates the table and only references existing ones. Its foreign keys
 take `SHARE ROW EXCLUSIVE` and `ACCESS SHARE` on `members` and `conversations` until
@@ -286,6 +290,69 @@ Across a restore, a consumer sees this:
 
 The response does not carry the epoch, because recovery state is never exposed
 through the gateway.
+
+### After an earlier release accepted a restore
+
+A generation captured while a release without migration 21 ran, before the
+upgrade or after a rollback, can be accepted only by that release, and it leaves
+the identity where the dump put it. Move the identity by hand once, for the
+timeline that will serve, before any process of a release with migration 21 runs
+on it. Do it after the earlier release's `accept-restore` and before `resume`,
+while the restored installation is held: its write barrier refuses every audit
+insert before the insert draws an ID, and `setval` is not a table write, so the
+barrier permits it. If the earlier release has already resumed the timeline, stop
+every Crew process first; that release draws no audit IDs, so none were drawn.
+
+The steps below are for the included `FileRecoveryFence`, whose directory is
+`$FENCE`; run the SQL against the restored database as the schema owner.
+
+1. Stop every Crew process and recovery command of either release. Take the
+   fence's lock, so that no recovery command can run until you release it:
+   `mkdir -m 700 "$FENCE/lock"`. If `lock` already exists, a recovery command is
+   running or crashed. Establish which before you go on, as for any lock debris.
+2. Read the fence's stored epoch `S`, the `epoch` in `$FENCE/epoch.json`. A
+   missing file means 0 only if no release with migration 21 has ever
+   transferred authority; otherwise it is lost, and the
+   [recovery guide](coordinated-recovery.md#if-the-fence-epoch-file-is-lost-or-damaged)
+   says how to choose `S`. Read the epoch `D` of the restored identity's position
+   and its highest ID:
+
+   ```sql
+   SELECT greatest((SELECT last_value FROM birbcrew_ts.audit_events_event_id_seq),
+                   (SELECT coalesce(max(event_id), 0) FROM birbcrew_ts.audit_events)) >> 44;
+   ```
+
+   The new epoch is `E = max(S, D) + 1`. It must be below 524,288.
+3. Raise the fence's epoch to `E` before the identity moves, with an atomic
+   replace:
+
+   ```sh
+   (umask 077 && printf '{"epoch":%d}' "$E" > "$FENCE/.epoch-manual")
+   sync "$FENCE/.epoch-manual"
+   mv "$FENCE/.epoch-manual" "$FENCE/epoch.json"
+   sync "$FENCE"
+   ```
+
+4. Move the identity, writing `E` as a number:
+
+   ```sql
+   SELECT setval(pg_get_serial_sequence('birbcrew_ts.audit_events', 'event_id'),
+                 E::bigint << 44, false);
+   ```
+
+5. Release the lock: `rmdir "$FENCE/lock"`.
+6. Check that `$FENCE/epoch.json` holds `E`, and that
+   `SELECT last_value, is_called FROM birbcrew_ts.audit_events_event_id_seq`
+   returns `E × 2^44` and `f`. Then `resume`, with either release. The first audit
+   event a release with migration 21 writes on this timeline has ID `E × 2^44`,
+   and the next transfer gets epoch `E + 1`.
+
+The fence's epoch rises before the identity moves, so a crash between the steps
+leaves it higher than needed, never lower; repeat from step 1. If a release with
+migration 21 already wrote to the timeline before the repair, the IDs it drew
+above the dump's position may repeat ones consumers hold. The repair stops any
+further repeats, and consumers that keep copies should re-read from a cursor below
+the dump's highest ID.
 
 ## Not covered
 
