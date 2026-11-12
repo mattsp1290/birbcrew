@@ -121,6 +121,22 @@ try {
     assert.deepEqual(await requests(), [{ engine: "pi", system: [role, fact].sort(), messages: [], continuation: false }]);
     console.log("pi: a routine firing's conversation gave the model the instructions");
 
+    // A handoff target opens like any conversation of its member: the transcript arrives as its first user
+    // message, the target member's instructions stay in its system context, and the source's never cross.
+    const source = await open(pi.memberId);
+    await turn(source, "remember birch");
+    await requests();
+    const takeover = marker();
+    const target = await member("claude", "fixture.v1", "Take over handed-off work. " + takeover);
+    const handoff = await api(`/v1/conversations/${source}/handoffs`, { body: { requestId: randomUUID(), memberId: target.memberId } });
+    const received = await until(async () => {
+      const receipt = await api(`/v1/conversations/${handoff.target.conversationId}/requests/${handoff.firstRequestId}`);
+      return receipt.status === "completed" ? receipt : undefined;
+    }, "handoff turn completed", 120_000);
+    assert.equal(received.result.text, "acknowledged 1 turns from pi");
+    assert.deepEqual(await requests(), [{ engine: "claude", system: [takeover], messages: [], continuation: false }]);
+    console.log("claude: a handoff target's first turn had its own member's instructions as system context and none of the source's");
+
     // Claude and Codex get them on the first turn and on every later one.
     const native: string[] = [];
     for (const engine of ["claude", "codex"] as const) {
@@ -137,14 +153,14 @@ try {
     }
 
     // No marker reaches what observers, receipts, listings or the audit trail return.
-    const all = [role, ...native];
+    const all = [role, takeover, ...native];
     const leaked = async (statement: string) => [...(await s.sql(statement)).matchAll(/BIRBNOTE_[A-Z0-9]+/g)].map(match => match[0]);
-    for (const table of ["public_events", "public_snapshots", "request_admissions", "audit_events"]) {
+    for (const table of ["public_events", "public_snapshots", "request_admissions", "audit_events", "conversation_handoffs"]) {
       assert.deepEqual(await leaked(`SELECT to_jsonb(t) FROM birbcrew_ts.${table} t`), [], table);
     }
     assert.deepEqual(await leaked("SELECT reply FROM birbcrew_ts.turns"), []);
     const published = JSON.stringify([await api(`/v1/conversations/${a}`), await api("/v1/members"), await api("/v1/conversations"),
-      await api("/v1/audit?limit=1000")]) + await api("/v1/audit?format=csv&limit=10000");
+      await api(`/v1/conversations/${source}/handoff`), await api("/v1/audit?limit=1000")]) + await api("/v1/audit?format=csv&limit=10000");
     assert.deepEqual(all.filter(value => published.includes(value)), []);
     assert.equal((await api(`/v1/members/${pi.memberId}/instructions`)).instructions.text, "You review database migrations. " + role);
     console.log("no instruction text reached public events, snapshots, receipts, listings or the audit trail; the owner route returns it");

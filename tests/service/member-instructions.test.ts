@@ -388,6 +388,90 @@ test("instructions count toward the engine's context limit, and an open they wou
   assert.equal((await openWithNotes(claude, largestNotes)).verdict, "memory_limit");
 });
 
+/** Admits and commits one turn, as the conversation's workflow and worker would. */
+async function committedTurn(conversation: Conversation, text: string, reply: string) {
+  const request = { ownerId: conversation.ownerId, conversationId: conversation.conversationId, requestId: randomUUID(), text };
+  await store.recordAcceptance(request, ownerInitiator);
+  const begun = await store.beginTurn(request, { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 });
+  assert.equal(begun.kind, "start"); if (begun.kind !== "start") return;
+  await store.commitTurn({ ownerId: request.ownerId, conversationId: request.conversationId, requestId: request.requestId, token: begun.token,
+    reply, checkpoint: { version: 1, engine: conversation.engine, state: {} } });
+}
+
+test("a handoff target opens like any conversation of its member: its instructions lead its context, and the handoff carries none", async (t) => {
+  const g = await gateway(t);
+  const mark = () => "BIRBNOTE_" + randomUUID().replaceAll("-", "").toUpperCase();
+  const sourceRole = role + " " + mark(), fact = "Deploys need a second reviewer.";
+  for (const engine of ["pi", "claude", "codex"] as const) {
+    const targetRole = "You take over handed-off work. " + mark();
+    const target = await g.spawn(engine, targetRole);
+    const { memoryId } = await memories.create(g.ownerId, { requestId: randomUUID(), memberId: target.memberId, text: fact });
+    const source = await open(await g.spawn("pi", sourceRole));
+    await committedTurn(source, "remember ash", "stored ash");
+    const handoff = await g.api(`/v1/conversations/${source.conversationId}/handoffs`, { requestId: randomUUID(), memberId: target.memberId });
+    assert.equal(handoff.status, 201, handoff.text);
+    const opened = { ownerId: g.ownerId, memberId: target.memberId, engine, profile, conversationId: handoff.body.target.conversationId };
+    // The system context any open of the target member gets: its own instructions, then its memory. The
+    // transcript is the reserved request's text, a user turn, so it is not here.
+    assert.equal(await conversationContext(pool, opened), instructionsContext(targetRole) + "\n" + memoryContext([{ memoryId, text: fact }]), engine);
+    // The transcript quotes the committed prompt and reply only: neither member's instructions.
+    const { rows: [{ transcript }] } = await pool.query<{ transcript: string }>(
+      "SELECT transcript FROM birbcrew_ts.conversation_handoffs WHERE handoff_id=$1", [handoff.body.handoffId]);
+    assert.deepEqual(JSON.parse(transcript.slice(transcript.indexOf("\n") + 1)).turns, [{ ownerPrompt: "remember ash", modelReply: "stored ash" }]);
+    assert.equal(/BIRBNOTE_|take over|never propose/.test(transcript), false, engine);
+  }
+
+  // A handoff target is a conversation of its member, so instructions cannot be added once one exists.
+  const plain = await g.spawn("claude");
+  const source = await open(await g.spawn("pi"));
+  await committedTurn(source, "remember elm", "stored elm");
+  const handoff = await g.api(`/v1/conversations/${source.conversationId}/handoffs`, { requestId: randomUUID(), memberId: plain.memberId });
+  assert.equal(handoff.status, 201, handoff.text);
+  await assert.rejects(pool.query("INSERT INTO birbcrew_ts.member_instructions (owner_id,member_id,body) VALUES ($1,$2,$3)",
+    [g.ownerId, plain.memberId, role]), { code: "23514", message: /before the member opens a conversation/ });
+  assert.equal(await conversationContext(pool, { ownerId: g.ownerId, memberId: plain.memberId, engine: "claude", profile,
+    conversationId: handoff.body.target.conversationId }), undefined, "no instructions, no context");
+
+  // The handoff records and the audit trail name the handoffs by identifiers, counts and digests only.
+  const json = (await g.api("/v1/audit?limit=1000")).text, csv = (await g.api("/v1/audit?format=csv&limit=10000")).text;
+  assert.equal([...json.matchAll(/"type":"conversation\.handed_off"/g)].length, 4);
+  const records = await pool.query("SELECT to_jsonb(h) - 'transcript' AS row FROM birbcrew_ts.conversation_handoffs h WHERE owner_id=$1", [g.ownerId]);
+  assert.equal(records.rowCount, 4);
+  for (const exported of [json, csv, JSON.stringify(records.rows)]) assert.equal(/BIRBNOTE_|take over|never propose/.test(exported), false);
+});
+
+test("a handoff whose target its member's instructions or memory would not fit is refused as an open is, and writes nothing", async (t) => {
+  const g = await gateway(t);
+  const quotes = '"'.repeat(instructionsBytes);
+  // memory_limit: the largest instructions fit a Codex launch alone, and so do 17 full entries, but not together.
+  const crowded = await g.spawn("codex", quotes);
+  for (let i = 0; i < 17; i++) await memories.create(g.ownerId, { requestId: randomUUID(), memberId: crowded.memberId, text: '"'.repeat(1_024) });
+  // instructions_limit: project notes a Codex launch carries alone, but not beside the largest instructions. Opens
+  // capture notes from an installation's Beans hub; this trigger stands in for that capture, for this member only.
+  const noted = await g.spawn("codex", quotes);
+  const capture = "instructions_notes_" + randomUUID().replaceAll("-", "");
+  await pool.query(`CREATE FUNCTION public.${capture}() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN
+    INSERT INTO birbcrew_ts.conversation_notes (conversation_id, capture) VALUES (NEW.conversation_id, '${JSON.stringify(notesOf(9_000))}'::jsonb);
+    RETURN NULL; END $f$`);
+  t.after(() => pool.query(`DROP FUNCTION public.${capture}() CASCADE`));
+  await pool.query(`CREATE TRIGGER ${capture} AFTER INSERT ON birbcrew_ts.conversations FOR EACH ROW
+    WHEN (NEW.member_id = '${noted.memberId}') EXECUTE FUNCTION public.${capture}()`);
+
+  const source = await open(await g.spawn("pi", role));
+  await committedTurn(source, "remember ash", "stored ash");
+  for (const [target, code] of [[crowded, "memory_limit"], [noted, "instructions_limit"]] as const) {
+    const refused = { status: 409, body: { error: code }, text: JSON.stringify({ error: code }) };
+    assert.deepEqual(await g.api("/v1/conversations", { conversationId: randomUUID(), memberId: target.memberId }), refused, "an open");
+    assert.deepEqual(await g.api(`/v1/conversations/${source.conversationId}/handoffs`, { requestId: randomUUID(), memberId: target.memberId }),
+      refused, "a handoff");
+    assert.equal((await pool.query("SELECT count(*)::integer AS n FROM birbcrew_ts.conversations WHERE member_id=$1", [target.memberId])).rows[0].n, 0);
+  }
+  // No handoff row, audit row or seal: the source still admits requests.
+  assert.equal((await pool.query("SELECT 1 FROM birbcrew_ts.conversation_handoffs WHERE source_conversation_id=$1", [source.conversationId])).rowCount, 0);
+  assert.equal((await pool.query("SELECT 1 FROM birbcrew_ts.audit_events WHERE event_type='conversation.handed_off' AND owner_id=$1", [g.ownerId])).rowCount, 0);
+  assert.equal((await g.api(`/v1/conversations/${source.conversationId}/requests`, { requestId: randomUUID(), text: "still open" })).status, 202);
+});
+
 /** A database migrated only up to `version`, as that release left it; dropped after the test. */
 async function databaseAt(t: TestContext, version: number) {
   const name = "instructions_" + randomUUID().replaceAll("-", "");
