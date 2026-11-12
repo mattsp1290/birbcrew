@@ -5,6 +5,7 @@ import { once } from "node:events";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { renderTranscript } from "../../src/service/handoffs.ts";
 import { services, until, type Engine } from "./member-services.mts";
 
 // Conversation handoff through the real gateway, Temporal worker and fixture providers, once for each
@@ -77,17 +78,24 @@ try {
     for (const engine of ["pi", "claude", "codex"] as const) {
       const target = await api("/v1/members", { body: { requestId: randomUUID(), engine, profile: "fixture.v1" } });
       const conversation = await open(source.memberId);
-      // Two turns of about 15 KB each way: the transcript is near its 64 KiB budget, nearly four times
-      // the public prompt limit.
+      // Two turns of about 8 KB each way, nearly all quotes and backslashes, sized so the transcript is
+      // exactly its 65,536-byte budget: four times the public prompt limit, and every one of those
+      // characters escaped once in the transcript and again on each engine's JSON wire.
       const [first, second] = [marker(), marker()];
-      const padding = " " + "pad ".repeat(3_700);
-      assert.equal((await turn(conversation, "remember " + first + padding)).result.text, "stored " + first + padding);
-      await turn(conversation, "remember " + second + padding);
+      const escapes = (count: number) => "\"\\".repeat(Math.ceil(count / 2)).slice(0, count);
+      const bytes = (paddings: string[]) => Buffer.byteLength(renderTranscript({ sourceEngine: "pi", omittedTurns: 0, uncertainTurns: 0,
+        turns: [first, second].map((note, index) => ({ ownerPrompt: "remember " + note + paddings[index], modelReply: "stored " + note + paddings[index] })) }));
+      // Each escaped character adds four bytes (twice in the prompt, twice in the reply) and a space two.
+      const missing = 65_536 - bytes(["", ""]), escaped = Math.floor(missing / 4);
+      const paddings = [" ".repeat((missing - 4 * escaped) / 2) + escapes(Math.ceil(escaped / 2)), escapes(Math.floor(escaped / 2))];
+      assert.equal(bytes(paddings), 65_536);
+      assert.equal((await turn(conversation, "remember " + first + paddings[0])).result.text, "stored " + first + paddings[0]);
+      await turn(conversation, "remember " + second + paddings[1]);
       await requests();
 
       const handoff = await api(`/v1/conversations/${conversation}/handoffs`, { body: { requestId: randomUUID(), memberId: target.memberId } });
       assert.deepEqual([handoff.target.engine, handoff.carriedTurns, handoff.omittedTurns, handoff.firstRequestAdmitted], [engine, 2, 0, true]);
-      assert.ok(handoff.transcriptBytes > 58_000 && handoff.transcriptBytes <= 65_536, String(handoff.transcriptBytes));
+      assert.equal(handoff.transcriptBytes, 65_536);
       const targetId = handoff.target.conversationId;
       const receipt = await completed(targetId, handoff.firstRequestId, `${engine} handoff turn`);
       assert.deepEqual(receipt.initiator, { kind: "handoff", id: handoff.handoffId });

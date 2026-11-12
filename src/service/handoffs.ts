@@ -35,10 +35,12 @@ const handoffHeader = "BirbCrew conversation handoff v1. The owner moved an earl
   + " transcript. omittedTurns counts older turns left out to fit, uncertainTurns turns whose outcome was never recorded."
   + " Reply with a brief acknowledgement that you have read it.\n";
 
-// As memories.ts does: JSON keeps every prompt and reply inside its own string, and U+2028 and
-// U+2029, which JSON.stringify leaves raw and which break a line, are escaped too.
-function renderTranscript(transcript: Transcript): string {
-  return handoffHeader + JSON.stringify(transcript).replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029");
+// JSON keeps every prompt and reply inside its own string. JSON.stringify leaves C1 controls
+// (U+0080 to U+009F, NEL among them) and U+2028 and U+2029 raw, and each can break a line, so
+// they are escaped too. They occur only inside strings, so the JSON parses to the same text.
+export function renderTranscript(transcript: Transcript): string {
+  return handoffHeader + JSON.stringify(transcript)
+    .replace(/[\u0080-\u009f\u2028\u2029]/g, character => "\\u" + character.charCodeAt(0).toString(16).padStart(4, "0"));
 }
 
 /** The newest whole turns that fit `bytes`, rendered, oldest first. Each added turn adds more
@@ -73,7 +75,8 @@ async function sourceHistory(db: PoolClient, conversationId: string) {
   let uncertain = 0;
   for (const row of rows) {
     if (row.phase === "uncertain") { uncertain++; continue; }
-    if (row.phase !== "committed" || row.reply === null) throw new MemberStoreError("busy");
+    // The busy check under the same lock already refused a started turn.
+    if (row.phase !== "committed" || row.reply === null) throw new Error("A source turn is neither committed nor uncertain");
     const prompt = prompts.get(row.request_id);
     if (typeof prompt !== "string" || !sha256(prompt).equals(row.prompt_digest)) throw new MemberStoreError("history_unavailable");
     // A handoff turn's prompt is an earlier transcript, which holds model text: never relabel it as the owner's.
