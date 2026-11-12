@@ -164,15 +164,22 @@ test("v1 HTTP contract enforces ownership, strict identity, capability version a
   const receipt = await response.json();
   assert.equal(receipt.apiVersion, "1"); assert.equal(receipt.status, "accepted");
   assert.equal(receipt.acceptance.boundary, "sql_admission_and_temporal_queue");
+  assert.deepEqual(receipt.initiator, { kind: "owner" });
   assert.deepEqual(await (await f.api(path, body)).json(), receipt);
   assert.equal((await f.api(path, { ...body, text: body.text.trim() })).status, 409);
   assert.equal((await f.api(path, { ...body, ownerId: f.ownerId })).status, 400);
+  // No body can choose what started a request: the admission records it.
+  const initiator = { kind: "owner" };
+  assert.equal((await f.api(path, { requestId: randomUUID(), text: "set initiator", initiator })).status, 400);
+  assert.equal((await f.api(path + "/" + requestId + "/cancel", { initiator })).status, 400);
+  assert.equal((await f.api(`/conversations/${f.conversationId}/inputs`, { requestId: randomUUID(), text: "set initiator", initiator })).status, 400);
   assert.equal((await f.api(path + "/" + requestId, undefined, f.stranger)).status, 404);
   assert.equal((await f.api(path, body, f.stranger)).status, 404);
   assert.equal((await f.api(path + "/" + requestId + "/cancel", {}, f.stranger)).status, 404);
   assert.equal((await f.api(path + "/" + requestId, undefined, "invalid")).status, 401);
   const capabilities = await (await f.api("/v1/capabilities")).json();
   assert.equal(capabilities.apiVersion, "1");
+  assert.deepEqual(capabilities.initiatorKinds, ["owner"]);
   const before = f.counts();
   assert.deepEqual(await (await f.api(path + "/" + requestId)).json(), receipt);
   assert.deepEqual(f.counts(), before);
@@ -310,12 +317,14 @@ test("legacy committed turn without an admission retains result and cancellation
   const result = await response.json();
   assert.equal(result.status, "completed");
   assert.equal(result.result.text, "legacy original result");
+  assert.equal(result.initiator, undefined, "no admission recorded what started it");
   const before = f.counts();
   const cancel = await f.api(path + "/cancel", {}); assert.equal(cancel.status, 202);
   const receipt = await cancel.json();
   assert.equal(receipt.status, "completed");
   assert.deepEqual(receipt.result, result.result);
   assert.ok(receipt.cancellation.receiptId);
+  assert.deepEqual(receipt.initiator, { kind: "owner" }, "the backfilled admission records the owner");
   assert.equal((await pool.query("SELECT count(*)::integer n FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2", [f.conversationId, requestId])).rows[0].n, 1);
   const repeated = await (await f.api(path + "/cancel", {})).json();
   assert.equal(repeated.cancellation.receiptId, receipt.cancellation.receiptId);

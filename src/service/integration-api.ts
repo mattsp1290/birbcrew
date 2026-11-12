@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { appendAudit, auditEventTypes, auditLimits } from "./audit.ts";
 import type { MemberClient } from "./client.ts";
-import { initiatorColumns, MemberStoreError, ownerInitiator, submitSchema, turnKey } from "./domain.ts";
+import { initiatorColumns, initiatorFromColumns, initiatorKinds, MemberStoreError, ownerInitiator, submitSchema, turnKey,
+  type RequestInitiator } from "./domain.ts";
 import { conversationTurnLimit, workflowGenerationTurnLimit } from "./limits.ts";
 import type { MemberStore } from "./store.ts";
 
@@ -14,6 +15,7 @@ export const integrationCapabilities = {
   rollover: { version: 1, maximumTurns: conversationTurnLimit, generationTurns: workflowGenerationTurnLimit },
   proxy: { version: 1, protocols: ["anthropic-messages", "openai-responses", "openai-chat-completions"] },
   trustedContext: { version: 1, transport: "operator-configured-local-runtime", httpSubmission: false },
+  initiatorKinds,
   observation: { version: 1, protocol: "AG-UI", mode: "snapshot-and-bounded-tail", cursorExpiry: "reconnect-for-snapshot" },
   audit: {
     version: 1, route: "/v1/audit", eventTypes: auditEventTypes, pagination: "event-id-keyset-no-skipped-commits",
@@ -30,6 +32,8 @@ export interface RequestReceipt {
   requestId: string;
   acceptance: { boundary: "sql_admission_and_temporal_queue" };
   status: Status;
+  /** Absent for a request admitted before admissions were durable. */
+  initiator?: RequestInitiator;
   result?: { text: string };
   reason?: string;
   cancellation?: { receiptId: string; delivery: "pending" | "delivered"; nativeTermination: "confirmed" | "unconfirmed"; effects: "not_assessed" };
@@ -61,9 +65,9 @@ export class IntegrationApi {
     // This observes Temporal only: it never starts a workflow or dispatches inference.
     await this.members.requestStatus(key);
     const { rows: [row] } = await this.store.pool.query<{
-      admission: string; reason: string | null; phase: string | null; reply: string | null;
-      receipt_id: string | null; delivered_at: Date | null; stopped: boolean; waiting: boolean;
-    }>(`SELECT a.phase AS admission,a.reason,t.phase,t.reply,x.receipt_id,x.delivered_at,
+      admission: string | null; reason: string | null; initiator_kind: string | null; initiator_id: string | null;
+      phase: string | null; reply: string | null; receipt_id: string | null; delivered_at: Date | null; stopped: boolean; waiting: boolean;
+    }>(`SELECT a.phase AS admission,a.reason,a.initiator_kind,a.initiator_id,t.phase,t.reply,x.receipt_id,x.delivered_at,
        EXISTS(SELECT 1 FROM birbcrew_ts.deferred_calls d WHERE d.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND d.request_id=COALESCE(a.request_id,t.request_id) AND d.decision IS NULL) AS waiting,
        (EXISTS(SELECT 1 FROM birbcrew_ts.tool_cancellations tc WHERE tc.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND tc.request_id=COALESCE(a.request_id,t.request_id))
         AND EXISTS(SELECT 1 FROM birbcrew_ts.native_launches n WHERE n.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND n.request_id=COALESCE(a.request_id,t.request_id))
@@ -83,6 +87,7 @@ export class IntegrationApi {
     return {
       apiVersion: "1", conversationId: key.conversationId, requestId: key.requestId,
       acceptance: { boundary: "sql_admission_and_temporal_queue" }, status,
+      ...(row.initiator_kind ? { initiator: initiatorFromColumns(row.initiator_kind, row.initiator_id) } : {}),
       ...(row.phase === "committed" ? { result: { text: row.reply! } } : {}),
       ...(row.reason ? { reason: row.reason } : {}),
       ...(row.receipt_id ? { cancellation: {
