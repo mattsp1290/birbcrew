@@ -1,6 +1,6 @@
 import { progressActivity } from "./progress-activity.ts";
 import { answerLive, cancelLive } from "./codex-calls.ts";
-import { writeFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { ChildStore } from "./children.ts";
@@ -11,6 +11,11 @@ import { memberActivities } from "./activities.ts";
 import { memberTaskQueue, activityQueue } from "./queues.ts";
 import type { MemberStore } from "./store.ts";
 import { temporalConnectionOptions, type TemporalSettings } from "./temporal-config.ts";
+
+async function touch(path: string) {
+  const file = await open(path, "a");
+  try { const now = new Date(); await file.utimes(now, now); } finally { await file.close(); }
+}
 
 export async function runMemberWorker(store: MemberStore, temporal: TemporalSettings, profiles: ReadonlyMap<string, MemberProfile>,
   configPath: string, stateDir: string, heartbeat?: string) {
@@ -41,7 +46,7 @@ export async function runMemberWorker(store: MemberStore, temporal: TemporalSett
     if (workers.length === 1) throw new Error("No member engines configured");
     const running = workers.map((worker) => worker.run());
     const beats = heartbeat === undefined ? undefined : setInterval(() => {
-      if (workers.every((worker) => worker.getState() === "RUNNING")) void writeFile(heartbeat, "").catch(() => {});
+      if (workers.every((worker) => worker.getState() === "RUNNING")) void touch(heartbeat).catch(() => {});
     }, 5000);
     try {
       await Promise.race([Promise.all(running), supervisor.exited.then(() => { throw new Error("SDK supervisor stopped"); })]);

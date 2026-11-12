@@ -27,10 +27,11 @@ proof of the operator's provider access or configured profile availability.
 | `POST /v1/conversations/{conversationId}/events` | Independent, read-only AG-UI observation |
 | `POST /v1/conversations/{conversationId}/human` | Existing explicit human-decision contract |
 
-Authentication is required even for capabilities. The unversioned `GET /healthz`
-liveness check is outside this API and returns only a constant. Other owners get `404`, not a
+Authentication is required even for capabilities. Other owners get `404`, not a
 confirmation of a request's existence. Versioned request bodies are strict: unknown
-fields (including an attempted `ownerId` override) fail `400`.
+fields (including an attempted `ownerId` override) fail `400`. The only
+unauthenticated route is the unversioned `GET /healthz` liveness check, which
+answers loopback peers with a constant and is not part of this API.
 
 ### Identity and equivalence
 

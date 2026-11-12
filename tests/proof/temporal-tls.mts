@@ -139,8 +139,11 @@ try {
       assert.equal(await completed(pi.path, requestId), reply);
     }
     console.log("Pi fixture turns completed through /v1 with gateway and worker on mTLS in namespace " + namespace);
-    await until(async () => Date.now() - (await stat(heartbeat).catch(() => ({ mtimeMs: 0 }))).mtimeMs < 10_000 || undefined, "worker heartbeat");
-    console.log("The running worker refreshed its heartbeat file");
+    const beat = await until(async () => (await stat(heartbeat).catch(() => undefined))?.mtimeMs, "first worker heartbeat");
+    await until(async () => (await stat(heartbeat)).mtimeMs > beat || undefined, "refreshed worker heartbeat", 15_000);
+    assert.equal((await fetch(endpoint + "/healthz")).status, 200);
+    assert.equal((await fetch(endpoint + "/v1/capabilities")).status, 401);
+    console.log("The worker refreshed its heartbeat file; the gateway answered /healthz and still required a token for /v1");
 
     async function cli(operation: string, input: object) {
       const child = spawn(process.execPath, ["src/service/cli.ts", operation], { env, stdio: ["pipe", "pipe", "inherit"] });

@@ -198,31 +198,43 @@ probes, which target the pod IP, cannot reach it. Use exec probes, which run
 inside the container's network namespace.
 
 - **Gateway:** `GET /healthz` is the only route that needs no bearer token. It
-  answers loopback peers with a constant `{"status":"ok"}` and reads no
-  database or Temporal state. Any other method, path or peer gets the normal
-  `401`. Replace `8080` with the configured port:
+  answers a loopback peer that requests exactly `/healthz` with a constant
+  `{"status":"ok"}` and reads no database or Temporal state. Any other method,
+  request target (including a query string) or peer goes through the normal
+  authentication and gets `401`. Replace `8080` with the configured port. Starting
+  Node takes a few hundred milliseconds on a small CPU limit, so raise the
+  timeout:
 
   ```yaml
   livenessProbe:
+    timeoutSeconds: 5
     exec:
       command: ["node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r => process.exit(r.status === 200 ? 0 : 1), () => process.exit(1))"]
   ```
 
 - **Worker:** set `BIRBCREW_WORKER_HEARTBEAT_FILE=/tmp/crew-worker.heartbeat`.
-  The file's age shows whether the event loop is running and every Temporal
-  worker reports `RUNNING`. It does not depend on PostgreSQL or Temporal
-  reachability.
+  The worker refuses to start if that directory is not writable. The file's age
+  shows whether the event loop is running and every Temporal worker reports
+  `RUNNING`. It does not depend on PostgreSQL or Temporal reachability. Startup
+  runs migrations and bundles workflow code, so give it a startup probe:
 
   ```yaml
+  startupProbe:
+    periodSeconds: 10
+    failureThreshold: 30
+    exec:
+      command: ["sh", "-c", "test $(( $(date +%s) - $(stat -c %Y /tmp/crew-worker.heartbeat) )) -lt 30"]
   livenessProbe:
-    initialDelaySeconds: 60
+    periodSeconds: 10
     exec:
       command: ["sh", "-c", "test $(( $(date +%s) - $(stat -c %Y /tmp/crew-worker.heartbeat) )) -lt 30"]
   ```
 
-**Verified** in the hardened containers above:
-- The gateway probe received `200 {"status":"ok"}`, and unauthenticated `/v1` requests still received `401`.
-- The worker probe passed, failed while the worker process was stopped with `SIGSTOP` for 35 seconds, and passed again after `SIGCONT`.
-- A gateway that cannot open its Temporal connection, and a worker whose namespace is missing, both exit with status 1, so the restart policy handles those failed starts.
+**Verified** in the hardened containers above: the gateway probe received
+`200 {"status":"ok"}`, while `/healthz?x=1`, `http://x/healthz`, `//` and
+unauthenticated `/v1` requests received `401`; the worker probe passed, failed
+while the worker process was stopped with `SIGSTOP` for 35 seconds, and passed
+again after `SIGCONT`; a heartbeat path in a missing directory stopped the
+worker with status 1.
 
 **Unverified:** these probes have not been run under kubelet.

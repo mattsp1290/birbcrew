@@ -1,4 +1,6 @@
-import { isAbsolute, resolve } from "node:path";
+import { constants } from "node:fs";
+import { access } from "node:fs/promises";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { json } from "node:stream/consumers";
 import { Client, Connection } from "@temporalio/client";
@@ -23,7 +25,12 @@ async function main() {
     if (operation === "worker") {
       const stateDir = process.env.BIRBCREW_STATE_DIR, heartbeat = process.env.BIRBCREW_WORKER_HEARTBEAT_FILE;
       if (!stateDir || !configPath) throw new Error("Supply BIRBCREW_STATE_DIR and the trusted provider module path");
-      if (heartbeat !== undefined && !isAbsolute(heartbeat)) throw new Error("BIRBCREW_WORKER_HEARTBEAT_FILE must be an absolute path");
+      if (heartbeat !== undefined) {
+        if (!isAbsolute(heartbeat)) throw new Error("BIRBCREW_WORKER_HEARTBEAT_FILE must be an absolute path");
+        await access(dirname(heartbeat), constants.W_OK).catch(() => {
+          throw new Error("BIRBCREW_WORKER_HEARTBEAT_FILE must be in an existing writable directory");
+        });
+      }
       const { runMemberWorker } = await import("./worker.ts");
       const { registerProfiles } = await import("./deployment.ts");
       const { profiles, close } = await import(pathToFileURL(resolve(configPath)).href);

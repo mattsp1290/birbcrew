@@ -49,6 +49,7 @@ function json(response: ServerResponse, status: number, data: unknown) {
   response.end(JSON.stringify(data));
 }
 
+// The listener is already loopback-only; this keeps the route closed if the bind address ever changes.
 function isLoopback(address: string | undefined) {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
@@ -127,9 +128,10 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
   const integration = new IntegrationApi(store, members);
   const accounts = Object.entries(credentials.parse(owners)).map(([hash, actor]) => ({ digest: Buffer.from(hash, "hex"), actor }));
   async function route(request: IncomingMessage, response: ServerResponse) {
-    // Kubelet exec probes run inside the pod without a bearer token; the answer is constant and reads no state.
-    if (request.method === "GET" && new URL(request.url ?? "/", "http://localhost").pathname === "/healthz" &&
-        isLoopback(request.socket.remoteAddress)) return json(response, 200, { status: "ok" });
+    // Exec probes carry no bearer token. Matching the raw target keeps every other request on the unchanged auth path.
+    if (request.method === "GET" && request.url === "/healthz" && isLoopback(request.socket.remoteAddress)) {
+      return json(response, 200, { status: "ok" });
+    }
     const auth = request.headers.authorization;
     if (!auth?.startsWith("Bearer ") || auth.length === 7) throw new HttpError(401, "authentication_required");
     const hash = createHash("sha256").update(auth.slice(7)).digest();
