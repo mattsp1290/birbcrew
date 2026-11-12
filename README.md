@@ -106,3 +106,6 @@ protected tool requests and attach independent AG-UI observers to these members.
 The [audit trail](docs/audit-trail.md) records who spawned, opened, submitted,
 decided, cancelled and completed what, and when. Each owner can page or export
 their own trail as CSV through `GET /v1/audit`.
+[Scheduled routines](docs/scheduled-routines.md) let an owner give a member a cron
+schedule and a fixed prompt; the gateway submits each run in a new conversation,
+with nobody present, and records the routine as the request's initiator.
