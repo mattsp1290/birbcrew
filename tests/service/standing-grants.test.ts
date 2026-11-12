@@ -162,6 +162,8 @@ test("a standing answer creates a grant, reports its choice and approves the nex
   assert.deepEqual(await answered.json(), { approvalId: a1.approvalId, decision: "allow_conversation" });
   assert.deepEqual(await (await chat.decide(card, "allow_conversation")).json(), { approvalId: a1.approvalId, decision: "allow_conversation" });
   for (const other of ["approve", "allow_always", "deny"]) assert.equal((await chat.decide(card, other)).status, 409, other);
+  // A retried decision activity reaches the store again and reads the same choice back.
+  assert.equal(await approvals.decide(answer(a1, "allow_conversation")), "allow_conversation");
   const { active: [grant], inactive } = await f.grants(memberId);
   assert.deepEqual(inactive, []);
   assert.match(grant.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
@@ -488,16 +490,27 @@ test("a grant names a card answered with its scope: the database refuses any oth
     await assert.rejects(pool.query(`UPDATE birbcrew_ts.deferred_calls SET ${column} WHERE approval_id=$1`, [undecided.approvalId]),
       { code: "23514" }, column);
   }
+  // A card stored as answered allow_conversation, before its grant is inserted, as decideLocked leaves it.
   const answered = await card(conversationId);
-  await approvals.decide(answer(answered, "allow_conversation"));
   const insert = `INSERT INTO birbcrew_ts.tool_grants (owner_id,member_id,conversation_id,tool_name,policy_version,initiator_kind,approval_id)
     VALUES ($1,$2,$3,'record_work_item',1,'owner',$4)`;
-  for (const [owner, member, conversation, approvalId] of [[ownerId, sibling, conversationId, answered.approvalId],
-    [ownerId, memberId, elsewhere, answered.approvalId], ["owner-" + randomUUID(), memberId, conversationId, answered.approvalId],
-    [ownerId, memberId, null, answered.approvalId], [ownerId, memberId, elsewhere, undecided.approvalId]]) {
-    await assert.rejects(pool.query(insert, [owner, member, conversation, approvalId]),
-      { code: "23503", message: /not answered with this scope, or belongs to another owner, member or conversation/ },
-      JSON.stringify([owner === ownerId, member === memberId, conversation, approvalId === answered.approvalId]));
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    await db.query("UPDATE birbcrew_ts.deferred_calls SET decision='approve', grant_scope='conversation' WHERE approval_id=$1", [answered.approvalId]);
+    for (const [owner, member, conversation, approvalId] of [[ownerId, sibling, conversationId, answered.approvalId],
+      [ownerId, memberId, elsewhere, answered.approvalId], ["owner-" + randomUUID(), memberId, conversationId, answered.approvalId],
+      [ownerId, memberId, null, answered.approvalId], [ownerId, memberId, elsewhere, undecided.approvalId]]) {
+      await db.query("SAVEPOINT attempt");
+      await assert.rejects(db.query(insert, [owner, member, conversation, approvalId]),
+        { code: "23503", message: /not answered with this scope, or belongs to another owner, member or conversation/ },
+        JSON.stringify([owner === ownerId, member === memberId, conversation, approvalId === answered.approvalId]));
+      await db.query("ROLLBACK TO SAVEPOINT attempt");
+    }
+    await db.query(insert, [ownerId, memberId, conversationId, answered.approvalId]);
+  } finally {
+    await db.query("ROLLBACK");
+    db.release();
   }
 });
 

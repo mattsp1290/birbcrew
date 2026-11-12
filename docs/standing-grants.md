@@ -300,9 +300,9 @@ node tests/proof/progress-compatibility.mts
 
 The service tests need the PostgreSQL, Temporal and fixture workers that
 `scripts/verify-members` starts, and it runs them. Claude and Pi observers see a
-granted second request run with no card. The test fetches that
-workflow's history, finds the `standing-grants-v1` marker exactly once, and replays
-it. Codex runs a granted live call in another conversation of the member. The replay
+granted second request run with no card. The test reads that workflow's history:
+no `standing-grants-v1` marker after the carded first request, one after the granted
+second request, and the whole history replays. Codex runs a granted live call in another conversation of the member. The replay
 proofs show histories without a granted call replaying unchanged.
 
 Not claimed: a live provider account, or any way to tell a person from an automated

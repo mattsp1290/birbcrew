@@ -618,6 +618,13 @@ for (const engine of ["claude", "pi"]) {
     assert.deepEqual(await host.post(path + "/human", { memberId, requestId: first, invocationId, approvalId, version, choice: "allow_conversation" }),
       { approvalId, decision: "allow_conversation" });
     await idle();
+    // The workflow skips its wait behind a patch marker that only a granted call records.
+    const workflowId = `birbcrew-ts/member/${memberId}/conversation/${cid}`;
+    const patchMarkers = async () => ((await host.temporal.workflow.getHandle(workflowId).fetchHistory()).events ?? [])
+      .flatMap((e) => e.markerRecordedEventAttributes?.markerName === "core_patch"
+        ? (e.markerRecordedEventAttributes.details?.["patch-data"]?.payloads ?? []).map((payload) => Buffer.from(payload.data ?? []).toString()) : [])
+      .filter((patch) => patch.includes("standing-grants-v1"));
+    assert.deepEqual(await patchMarkers(), [], "a carded call records no marker");
     const second = randomUUID();
     await host.post(`/v1${path}/requests`, { requestId: second, text: "record " + second });
     const end = await until(async () => { const s = await (await host.api(path)).json();
@@ -635,12 +642,8 @@ for (const engine of ["claude", "pi"]) {
     assert.deepEqual(toolFrames(granted.approvalId), toolFrames(approvalId), "the same tool-call frames as the carded call");
     assert.equal(toolFrames(approvalId).at(-1), "TOOL_CALL_RESULT");
 
-    // The workflow skipped the wait behind the patch marker, which only the granted call recorded.
-    const workflowId = `birbcrew-ts/member/${memberId}/conversation/${cid}`;
+    assert.equal((await patchMarkers()).length, 1);
     const history = await host.temporal.workflow.getHandle(workflowId).fetchHistory();
-    const patches = (history.events ?? []).flatMap((e) => e.markerRecordedEventAttributes?.markerName === "core_patch"
-      ? (e.markerRecordedEventAttributes.details?.["patch-data"]?.payloads ?? []).map((payload) => Buffer.from(payload.data ?? []).toString()) : []);
-    assert.equal(patches.filter((patch) => patch.includes("standing-grants-v1")).length, 1, patches.join());
     await Worker.runReplayHistory({ workflowsPath: fileURLToPath(new URL("../../src/service/workflow.ts", import.meta.url)) }, history, workflowId);
   });
 }
