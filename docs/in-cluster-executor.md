@@ -32,7 +32,11 @@ These fields go into the existing installation file. Its other fields are unchan
   - Without `api_key_file`, the key comes from the `OPENCODE_GO_API_KEY` assignment in `$HOME/.profile`, as before.
   - Crew never writes the key to evidence or receipts. A test that enables debug logging for a review checks that the key does not appear in the log output.
 
-At startup, the worker reads the configured key and parses the attestation; if either fails, it exits with `opencode_go_key_unusable` or `subscription_evidence_unusable`, without echoing file contents. It does not check the attestation's age at startup. When `codex_socket` is set, the worker also waits up to 120 seconds for that socket to appear and exits with `codex_socket_unavailable` if it does not.
+At startup, the worker checks the installation before it connects to Temporal. None of its error messages contain file contents or configuration values.
+
+- **Installation file.** If it is invalid, the worker exits with `execution_config_invalid` followed by the field names and error messages.
+- **Key and attestation.** The worker reads the configured key and parses the attestation. If either fails, it exits with `opencode_go_key_unusable: <reason>` or `subscription_evidence_unusable: <reason>`. The reason is either the reader's fixed message or an exception type such as `FileNotFoundError`. The attestation's age is not checked at startup.
+- **Codex socket.** When `codex_socket` is set, the worker waits up to 120 seconds for something to accept a connection on it. A missing path, a regular file, or a stale socket that nothing is listening on all count as not ready yet. If the wait runs out, the worker exits with `codex_socket_unavailable`. Other errors, such as permission denied, stop the worker immediately.
 
 Each review sends the unchanged prompt to `https://opencode.ai/inference/go/openai/v1` as one Chat Completions request:
 - The request offers a single tool, `final_result`, built from the `Verdict` schema with `"strict": true`, and sets `tool_choice` to `required`.
@@ -121,7 +125,7 @@ Kubernetes Secret volumes usually expose keys as root-owned symbolic links, whic
 ## What was verified
 
 - **Tests.** `uv run --group dev pytest` covers:
-  - Settings: reviewer selection, the `claude` path rules, absolute paths, key-file permissions and contents, the existing `$HOME/.profile` reader, the startup checks (including that they do not echo file contents), and `--sock` reaching the proxy argv for authoring and interruption.
+  - Settings: reviewer selection, the `claude` path rules, absolute paths, key-file permissions and contents, the existing `$HOME/.profile` reader, the startup checks (including that they do not echo file contents or configuration values), the socket wait (missing, regular file, stale and listening), and `--sock` reaching the proxy argv for authoring and interruption.
   - Worker wiring with a stand-in Temporal worker: SIGTERM ends the wait, and the 660-second grace period is passed. The drain itself is Temporal's `graceful_shutdown_timeout`; this repository does not test it.
   - Reviews, using a local scripted model and a local HTTP stub: approved; changes requested; malformed, missing or conflicting verdicts; provider HTTP and connection failures; timeouts; expired, future, timezone-less or invalid attestations; a single request with no retry; closing the provider client; and heartbeats while a request is pending.
 - **Image runs.** The image was built for linux/arm64 and for linux/amd64 (emulated). Both were run with `--user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp`. Both reported `codex-cli 0.167.1`, git 2.47.3, gh 2.46.0 and OpenSSH 10.0p2, and imported `birbcrew.execution.worker`.
@@ -131,6 +135,7 @@ Kubernetes Secret volumes usually expose keys as root-owned symbolic links, whic
   - Without `CODEX_HOME`, it worked through `--sock` and failed through the default link.
   - `account/read` returned the signed-out state, and the server exited 0 on SIGTERM.
   - Three server starts with fresh volumes and the same `CODEX_HOME` path used the same socket name.
+  - The startup socket wait accepted a live server, and the `Daemon` client worked right after it. It rejected the socket file left behind when the server was SIGKILLed.
 - **SSH lookup.** With `HOME` pointed elsewhere, OpenSSH in the image still looked for identities under `/home/crew/.ssh`.
 - **Codex prototype.** A separate Codex 0.167.1 container prototype established three facts: what `daemon start` does, that the server rejects a volume mounted at `/tmp/codex-daemon-10001`, and where device sign-in stores its credential.
 

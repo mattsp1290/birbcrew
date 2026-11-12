@@ -1,12 +1,13 @@
 import asyncio
+import errno
 import json
-import os
-import stat
 from pathlib import Path
 
 from temporalio import activity
 from wsproto import ConnectionType, WSConnection
 from wsproto.events import AcceptConnection, CloseConnection, Ping, Request, TextMessage
+
+NOT_LISTENING = {errno.ENOENT, errno.ECONNREFUSED, errno.ENOTSOCK}
 
 
 class Daemon:
@@ -112,10 +113,14 @@ async def wait_for_socket(path: Path, timeout: float) -> None:
         async with asyncio.timeout(timeout):
             while True:
                 try:
-                    if stat.S_ISSOCK(os.stat(path).st_mode):
-                        return
-                except FileNotFoundError:
-                    pass
-                await asyncio.sleep(1)
+                    _, writer = await asyncio.open_unix_connection(path)
+                except OSError as error:
+                    if error.errno not in NOT_LISTENING:
+                        raise
+                    await asyncio.sleep(1)
+                    continue
+                writer.close()
+                await writer.wait_closed()
+                return
     except TimeoutError:
         raise ValueError("codex_socket_unavailable") from None

@@ -4,7 +4,7 @@ from functools import cache
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from birbcrew.execution.contract import Digest, ExecutionInput, Identity, Record, digest
 
@@ -126,6 +126,13 @@ class ExecutionSettings(Record):
 
 @cache
 def installation() -> ExecutionSettings:
-    return ExecutionSettings.model_validate(
-        json.loads(Path(os.environ["BIRBCREW_EXECUTION_CONFIG"]).read_text())
-    )
+    try:
+        return ExecutionSettings.model_validate(
+            json.loads(Path(os.environ["BIRBCREW_EXECUTION_CONFIG"]).read_text())
+        )
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(map(str, item['loc'])) or 'settings'}: {item['msg']}"
+            for item in error.errors(include_input=False, include_url=False)
+        )
+        raise ValueError(f"execution_config_invalid: {problems}") from None

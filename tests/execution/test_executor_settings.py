@@ -257,15 +257,46 @@ def test_worker_preflight_rejects_unusable_reviewer_configuration(setup, tmp_pat
     config, _, _ = setup
     preflight_reviewer(installed(config, claude="/opt/claude"))
     preflight_reviewer(opencode_settings(config, tmp_path))
-    with pytest.raises(ValueError, match="^opencode_go_key_unusable$"):
+    with pytest.raises(
+        ValueError,
+        match="^opencode_go_key_unusable: OpenCode Go key file must be private to this user$",
+    ):
         preflight_reviewer(opencode_settings(config, tmp_path, 0o644))
     broken = opencode_settings(config, tmp_path)
     broken.reviewer.subscription_evidence.write_text("{}")
-    with pytest.raises(ValueError, match="^subscription_evidence_unusable$"):
+    with pytest.raises(ValueError, match="^subscription_evidence_unusable: ValidationError$"):
         preflight_reviewer(broken)
     broken.reviewer.subscription_evidence.unlink()
-    with pytest.raises(ValueError, match="^subscription_evidence_unusable$"):
+    with pytest.raises(ValueError, match="^subscription_evidence_unusable: FileNotFoundError$"):
         preflight_reviewer(broken)
+    broken.reviewer.api_key_file.write_bytes(b"\xff" * 8)
+    with pytest.raises(ValueError, match="^opencode_go_key_unusable: OpenCode Go key file must"):
+        preflight_reviewer(broken)
+
+
+def test_invalid_installation_file_names_fields_without_values(setup, tmp_path, monkeypatch):
+    from birbcrew.execution import policy
+
+    config, _, _ = setup
+    raw = config.model_dump(mode="json", exclude={"reviewer", "claude"})
+    secret = "fixture-token-" + "B" * 20
+    raw["reviewer"] = {
+        "kind": "opencode-go",
+        "subscription_evidence": "/private/go-evidence.json",
+        "api_key": secret,
+    }
+    path = tmp_path / "execution.json"
+    path.write_text(json.dumps(raw))
+    monkeypatch.setenv("BIRBCREW_EXECUTION_CONFIG", str(path))
+    policy.installation.cache_clear()
+    try:
+        with pytest.raises(ValueError) as caught:
+            policy.installation()
+    finally:
+        policy.installation.cache_clear()
+    printed = "".join(traceback.format_exception(caught.value))
+    assert "execution_config_invalid: reviewer.opencode-go.api_key: Extra inputs" in printed
+    assert secret[:14] not in printed
 
 
 def test_worker_preflight_never_echoes_file_contents(setup, tmp_path):
@@ -281,7 +312,7 @@ def test_worker_preflight_never_echoes_file_contents(setup, tmp_path):
     assert "subscription_evidence_unusable" in printed and secret[:14] not in printed
 
 
-def test_configured_codex_socket_must_appear(tmp_path):
+def test_configured_codex_socket_must_accept_connections():
     import socket
     import tempfile
 
@@ -295,16 +326,26 @@ def test_configured_codex_socket_must_appear(tmp_path):
         with pytest.raises(ValueError, match="codex_socket_unavailable"):
             asyncio.run(wait_for_socket(path, 0.2))
         path.unlink()
+        with socket.socket(socket.AF_UNIX) as stale:
+            stale.bind(str(path))
+            with pytest.raises(ValueError, match="codex_socket_unavailable"):
+                asyncio.run(wait_for_socket(path, 1.5))
+        path.unlink()
 
-        async def appears_later():
+        async def listens_later():
             listener = socket.socket(socket.AF_UNIX)
-            asyncio.get_running_loop().call_later(0.3, listener.bind, str(path))
+
+            def serve():
+                listener.bind(str(path))
+                listener.listen()
+
+            asyncio.get_running_loop().call_later(0.3, serve)
             try:
                 await wait_for_socket(path, 5)
             finally:
                 listener.close()
 
-        asyncio.run(appears_later())
+        asyncio.run(listens_later())
 
 
 def test_worker_drains_activities_on_sigterm(setup, monkeypatch, tmp_path):
