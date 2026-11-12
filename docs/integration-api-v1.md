@@ -264,12 +264,13 @@ launches get them, framed as reference data, after any project notes. Entries cr
 later never reach it. Only the owner writes memory; the model cannot. A create is
 idempotent by `requestId`; a replay of a deleted entry fails `409 memory_deleted`,
 and a 33rd active entry `409 memory_limit`. `POST /v1/conversations` also fails
-`409 memory_limit` when the member's entries, with the conversation's project notes,
-would not fit what the member's engine can be given; nothing is opened. Deleting an
+`409 memory_limit` when the conversation's project notes fit what the member's engine
+can be given but notes and entries together do not; nothing is opened. Deleting an
 entry erases its text and keeps a tombstone. A deletion reaches every later launch on
-Pi, but Claude and Codex keep the context their native session recorded on a
-conversation's first turn, so on those engines it reaches only conversations that
-have not run a turn. `capabilities.memories.startedConversations` says which. See
+Pi with Crew's Pi models. Codex replays the context its rollout recorded on a
+conversation's first turn, and Claude's SDK may resend the prompt it recorded then, so
+on those engines a deletion may reach only conversations that have not run a turn.
+`capabilities.memories.startedConversations` says which. See
 [member memory](memories.md) for the trust boundary and what deletion does not erase.
 
 ## Validation

@@ -99,6 +99,11 @@ trigger keeps a firing's identity fixed.
 | `approval_required` | `failed` (or `waiting` until then): a `fail_closed` request reached a human decision | yes |
 | `turn_failed`, `turn_cancelled`, `turn_uncertain` | `failed`: the request's receipt ended `failed`, `cancelled` or `uncertain` | yes |
 
+An open refused with `409 memory_limit`, because the member's [memory](memories.md)
+with the project notes would not fit its engine, is such a refusal: the firing fails
+`rejected` and counts. It names no other reason, so check the member's entries when a
+Codex member's firings start failing `rejected`.
+
 A success resets the consecutive-failure count. A failure adds one, and the tenth in
 a row disables the routine with reason `consecutive_failures`, in the transaction
 that records it. Only an enabled routine counts. A firing claimed before the routine
