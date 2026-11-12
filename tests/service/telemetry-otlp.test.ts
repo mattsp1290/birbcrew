@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -114,10 +114,10 @@ test("exports validated spans to an OTLP/HTTP collector beside the JSONL file", 
 });
 
 test("plain http beyond 127.0.0.1 needs BIRBCREW_OTLP_TRACES_ALLOW_HTTP and carries the resource attributes", async (t) => {
-  // A non-loopback interface address stands in for an in-cluster agent's service address.
+  // A non-loopback interface address stands in for an in-cluster agent's service address. Without one, 127.0.0.2
+  // (reachable on Linux, the only supported platform) still needs the opt-in, which allows only 127.0.0.1 without it.
   const host = Object.values(networkInterfaces()).flat()
-    .find((address) => address && address.family === "IPv4" && !address.internal)?.address;
-  if (!host) return t.skip("no non-loopback IPv4 interface");
+    .find((address) => address && address.family === "IPv4" && !address.internal)?.address ?? "127.0.0.2";
   const { port, received } = await collector(t, host);
   const endpoint = `http://${host}:${port}/v1/traces`;
   const resource = {
@@ -152,11 +152,26 @@ test("plain http beyond 127.0.0.1 needs BIRBCREW_OTLP_TRACES_ALLOW_HTTP and carr
   }
   for (const span of spansOf(received)) assertCorrelationOnly(span, conversationId, requestId, workflowRunId);
 
-  // Any host name passes the check with the opt-in; this one cannot resolve, so the export fails and warns.
+  // Any host name passes the check with the opt-in; this one cannot resolve, so the export fails and warns. Three
+  // flushed rounds keep the process up past the export timeout, in case resolution hangs instead of failing.
   const named = await run({ BIRBCREW_OTLP_TRACES_ENDPOINT: "http://datadog-agent.default.svc.invalid:4318/v1/traces",
-    BIRBCREW_OTLP_TRACES_ALLOW_HTTP: "True" }, [...ids(), "private", "exit"]);
+    BIRBCREW_OTLP_TRACES_ALLOW_HTTP: "True" }, [...ids(), "private", "exit", "3"]);
   assert.equal(named.code, 0, named.stderr);
+  assert.match(named.stderr, /^birbcrew: OTLP trace export failed \([A-Za-z0-9_ ]+\) and its spans were dropped;[^\n]*\n$/);
   assert.ok(!named.stderr.includes("datadog-agent"));
+});
+
+test("a connection attempt that is never answered still warns once the export times out", async () => {
+  // 192.0.2.1 (TEST-NET-1) is never routed: the connection attempt is dropped, or refused at once where there is
+  // no route. node:http starts its request timeout only after connecting, so the first case needs Crew's own timer.
+  const result = await run({ BIRBCREW_OTLP_TRACES_ENDPOINT: "http://192.0.2.1:4318/v1/traces", BIRBCREW_OTLP_TRACES_ALLOW_HTTP: "true" },
+    [...ids(), "private", "exit", "3"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).value, true);
+  const lines = result.stderr.split("\n").filter(Boolean);
+  assert.equal(lines.length, 1, result.stderr);
+  assert.match(lines[0], /^birbcrew: OTLP trace export failed \((timeout|E[A-Z]+)\)/);
+  assert.ok(!result.stderr.includes("192.0.2.1"));
 });
 
 test("the plain-http opt-in refuses collector headers and keeps every other endpoint rule", async (t) => {
@@ -205,6 +220,12 @@ test("resource attributes follow OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES"
       { ...Object.fromEntries(Array.from({ length: 32 }, (_, i) => [`k${i}`, "v"])), "service.name": "birbcrew" }],
     [{ OTEL_RESOURCE_ATTRIBUTES: "long=" + "%41".repeat(255), OTEL_SERVICE_NAME: "s".repeat(255) },
       { long: "A".repeat(255), "service.name": "s".repeat(255) }],
+    // Lengths count code points: 255 birds are 510 UTF-16 units.
+    [{ OTEL_RESOURCE_ATTRIBUTES: "birds=" + "%F0%9F%90%A6".repeat(255), OTEL_SERVICE_NAME: "🐦".repeat(255) },
+      { birds: "🐦".repeat(255), "service.name": "🐦".repeat(255) }],
+    // Whitespace around the whole value, such as a YAML block's final newline, is ignored.
+    [{ OTEL_RESOURCE_ATTRIBUTES: "service.version=1.2.3\n", OTEL_SERVICE_NAME: " crew-worker\n" },
+      { "service.name": "crew-worker", "service.version": "1.2.3" }],
   ];
   for (const [env, expected] of cases) {
     received.length = 0;
@@ -223,6 +244,9 @@ test("malformed resource attributes stop startup without echoing them", async (t
     marker, `=${marker}`, `${marker}=`, `bad key=${marker}`, `k="${marker}"`, `k=${marker};x`, `k=${marker}\\x`,
     `k=${marker} x`, `k=${marker}é`, `k=${marker}%zz`, `k=${marker}%E0%A4`, `k=${marker}%0A`, `k=${marker}%E2%80%AE`,
     `service.version=${marker}`, "k=" + marker + "x".repeat(256 - marker.length), "k".repeat(256) + "=" + marker,
+    // Line and paragraph separators, blank values, and keys the SDK would drop because objects inherit them.
+    `k=${marker}%E2%80%A8`, `k=${marker}%E2%80%A9`, "k=%20%20", `service.name=%20`, `toString=${marker}`,
+    `constructor=${marker}`, `__proto__=${marker}`,
   ];
   const cases: [Record<string, string>, RegExp][] = [
     ...entries.map((value): [Record<string, string>, RegExp] =>
@@ -239,6 +263,10 @@ test("malformed resource attributes stop startup without echoing them", async (t
   results.forEach((result, index) => assertRefused(result, cases[index][1], marker));
   // The second entry is the malformed one.
   for (const result of results.slice(0, entries.length)) assert.match(result.stderr, /entry 2 is invalid/);
+  // Positions count every comma-separated part, empty ones included.
+  const skipped = await run({ BIRBCREW_OTLP_TRACES_ENDPOINT: `http://127.0.0.1:${port}/v1/traces`,
+    OTEL_RESOURCE_ATTRIBUTES: `a=1,,${marker}` }, [...ids(), "private"]);
+  assertRefused(skipped, /OTEL_RESOURCE_ATTRIBUTES entry 3 is invalid/, marker);
   assert.equal(received.length, 0);
 });
 
@@ -292,8 +320,27 @@ test("failed exports produce one warning line that names no address, status text
   for (const hidden of [planted, token, secret, "127.0.0.1", String(port)]) assert.ok(!result.stderr.includes(hidden), hidden);
 });
 
+test("a closed stderr cannot turn the export warning into a crash", async () => {
+  const refused = createServer().listen(0, "127.0.0.1");
+  await once(refused, "listening");
+  const port = (refused.address() as AddressInfo).port;
+  refused.close();
+  await once(refused, "close");
+  const runner = spawn(process.execPath, [child, ...ids(), "private", "exit", "2"], {
+    env: { PATH: process.env.PATH, BIRBCREW_OTLP_TRACES_ENDPOINT: `http://127.0.0.1:${port}/v1/traces` },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  // Closing the read end makes every later write to the child's stderr fail with EPIPE.
+  runner.stderr.destroy();
+  const stdout = text(runner.stdout);
+  const [code] = await once(runner, "exit");
+  assert.equal(code, 0);
+  assert.equal(JSON.parse(await stdout).value, true);
+});
+
 test("the export warning is rate limited and reduces each error to a status or code", async () => {
-  const { exportWarning } = await import("../../src/service/telemetry.ts");
+  // The warning module reads no configuration, so it can load in this process whatever its environment holds.
+  const { exportWarning } = await import("../../src/service/telemetry-warning.ts");
   let now = 0;
   const lines: string[] = [];
   const warn = exportWarning((line) => lines.push(line), () => now);
@@ -314,8 +361,10 @@ test("the export warning is rate limited and reduces each error to a status or c
   warn(Object.assign(new Error("planted"), { code: "not a code 10.0.0.7" }));
   now += 300_000;
   warn(undefined);
-  assert.deepEqual(lines.map((line) => line.match(/failed \((.*?)\)/)?.[1]),
-    ["HTTP 400", "ECONNREFUSED", "timeout", "HTTP 429, 502, 503 or 504", "unknown error", "unknown error"]);
+  now += 300_000;
+  warn(Object.assign(new Error("self-signed certificate planted.example"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }));
+  assert.deepEqual(lines.map((line) => line.match(/failed \((.*?)\)/)?.[1]), ["HTTP 400", "ECONNREFUSED", "timeout",
+    "HTTP 429, 502, 503 or 504", "unknown error", "unknown error", "DEPTH_ZERO_SELF_SIGNED_CERT"]);
   assert.match(lines[1], /; 2 more failed since the last warning;/);
   assert.ok(!lines[2].includes("more failed"));
   for (const line of lines) {

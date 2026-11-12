@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeSync } from "node:fs";
 import { ROOT_CONTEXT, SpanStatusCode, trace, type Context } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
@@ -53,56 +53,39 @@ function otlpEndpoint(env: NodeJS.ProcessEnv) {
 const ows = (text: string) => text.replace(/^[ \t]+|[ \t]+$/g, "");
 const baggageKey = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,255}$/;
 const baggageValue = /^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/;
-const unprintable = /[\p{Cc}\p{Cf}]/u;
+// Control, invisible formatting, and line or paragraph separator characters.
+const unprintable = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+// Lengths count Unicode code points, not UTF-16 units.
+const usable = (value: string) => value.trim() !== "" && [...value].length <= 255 && !unprintable.test(value);
 function otlpResource(env: NodeJS.ProcessEnv) {
   const text = env.OTEL_RESOURCE_ATTRIBUTES ?? "";
-  const entries = text.length > 4_096 ? [] : text.split(",").map(ows).filter((entry) => entry !== "");
-  if (text.length > 4_096 || entries.length > 32) {
+  // Whitespace around the whole value, such as a newline from a YAML block, is ignored. Positions in errors count
+  // every comma-separated part, empty ones included.
+  const parts = text.length > 4_096 ? [] : text.trim().split(",").map(ows);
+  if (text.length > 4_096 || parts.filter(Boolean).length > 32) {
     throw new Error("OTEL_RESOURCE_ATTRIBUTES must have at most 32 entries and 4096 characters");
   }
   const attributes = new Map<string, string>();
-  entries.forEach((entry, index) => {
+  parts.forEach((entry, index) => {
+    if (!entry) return;
     const split = entry.indexOf("="), key = ows(entry.slice(0, split)), encoded = ows(entry.slice(split + 1));
     let value: string | undefined;
     try { value = decodeURIComponent(encoded); } catch {}
-    if (split < 0 || !baggageKey.test(key) || attributes.has(key) || !baggageValue.test(encoded) ||
-        value === undefined || value.length > 255 || unprintable.test(value)) {
+    // The SDK builds the resource in a plain object and skips keys it inherits, such as toString or __proto__.
+    if (split < 0 || !baggageKey.test(key) || key in Object.prototype || attributes.has(key) ||
+        !baggageValue.test(encoded) || value === undefined || !usable(value)) {
       throw new Error(`OTEL_RESOURCE_ATTRIBUTES entry ${index + 1} is invalid: each entry must be key=value with a `
-        + "unique W3C Baggage key and a non-empty percent-encoded value of at most 255 characters once decoded, "
-        + "with no control characters");
+        + "unique W3C Baggage key and a percent-encoded value that, once decoded, is not blank, has at most 255 "
+        + "characters and has no control characters");
     }
     attributes.set(key, value);
   });
-  const service = ows(env.OTEL_SERVICE_NAME ?? "");
-  if (service.length > 255 || unprintable.test(service)) {
+  const service = (env.OTEL_SERVICE_NAME ?? "").trim();
+  if (service && !usable(service)) {
     throw new Error("OTEL_SERVICE_NAME must be at most 255 characters with no control characters");
   }
   attributes.set("service.name", service || attributes.get("service.name") || "birbcrew");
   return Object.fromEntries(attributes);
-}
-
-const warningIntervalMs = 5 * 60_000;
-// Export errors can carry the collector's address, its status text or its response body, so the warning names only
-// an HTTP status or a Node error code.
-function exportFailure(error: unknown) {
-  const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown };
-  if (typeof code === "number" && Number.isInteger(code) && code >= 100 && code <= 599) return `HTTP ${code}`;
-  if (typeof code === "string" && /^E[A-Z0-9_]{1,63}$/.test(code)) return code;
-  if (message === "Request Timeout") return "timeout";
-  if (message === "Export failed with retryable status") return "HTTP 429, 502, 503 or 504";
-  return "unknown error";
-}
-
-/** Exported for tests. Reports failed exports in at most one line per interval and counts the ones it held back. */
-export function exportWarning(write: (line: string) => void, now: () => number = Date.now) {
-  let quietUntil = -Infinity, held = 0;
-  return (error: unknown) => {
-    if (now() < quietUntil) { held++; return; }
-    quietUntil = now() + warningIntervalMs;
-    write(`birbcrew: OTLP trace export failed (${exportFailure(error)}) and its spans were dropped`
-      + (held ? `; ${held} more failed since the last warning` : "") + "; the next warning comes at least 5 minutes later\n");
-    held = 0;
-  };
 }
 
 const exporter: SpanExporter = {
@@ -127,17 +110,28 @@ const processors: SpanProcessor[] = [];
 if (output) processors.push(new SimpleSpanProcessor(exporter));
 if (endpoint) {
   // Loaded only when configured: every native turn forks a runner that imports this module.
-  const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-http");
+  const [{ OTLPTraceExporter }, { exportWarning }] = await Promise.all([
+    import("@opentelemetry/exporter-trace-otlp-http"), import("./telemetry-warning.ts")]);
   const otlp = new OTLPTraceExporter({ url: endpoint, timeoutMillis: exportTimeoutMs });
-  // A throw here would surface inside the exporter's promise chain as an unhandled rejection.
-  const warn = exportWarning((line) => { try { process.stderr.write(line); } catch {} });
+  // Synchronous, so a closed stderr fails here instead of emitting an unhandled EPIPE error event, and a throw
+  // cannot reach the exporter's promise chain as an unhandled rejection.
+  const warn = exportWarning((line) => { try { writeSync(2, line); } catch {} });
   // Ending a span only enqueues it. A full queue drops spans, and failed exports are discarded after a
   // rate-limited warning.
   processors.push(new BatchSpanProcessor({
-    export: (spans, done) => otlp.export(spans, (result) => {
-      if (result.code !== 0) warn(result.error);
-      done(result);
-    }),
+    export: (spans, done) => {
+      // node:http starts the request timeout only once connected, so a dropped connection attempt would report
+      // nothing until the operating system gives up, minutes later. The batch processor abandons the export at
+      // exportTimeoutMs; report it then. Unreferenced, so it never holds a process open.
+      let reported = false;
+      const report = (error: unknown) => { if (!reported) { reported = true; warn(error); } };
+      const timer = setTimeout(() => report(new Error("Request Timeout")), exportTimeoutMs).unref();
+      otlp.export(spans, (result) => {
+        clearTimeout(timer);
+        if (result.code !== 0) report(result.error);
+        done(result);
+      });
+    },
     shutdown: () => otlp.shutdown(),
     forceFlush: () => otlp.forceFlush(),
   }, {
