@@ -86,7 +86,7 @@ In Kubernetes pass the command as `args:`; setting `command:` replaces `tini`.
 | `BIRBCREW_TEMPORAL_TLS_SERVER_NAME` | both | unset | Name checked against the frontend certificate and sent as SNI. |
 | `BIRBCREW_STATE_DIR` | worker | `/var/lib/birbcrew/native` | Native state directory. Keep the image default. |
 | `HOME` | both | `/tmp` | Writable home for SDK caches. |
-| `BIRBCREW_WORKER_HEARTBEAT_FILE` | worker | unset | Absolute path the worker touches every 5 seconds while all its Temporal workers run. See [Health](#health). |
+| `BIRBCREW_WORKER_HEARTBEAT_FILE` | worker | unset | Absolute path the worker touches every 5 seconds from the start of its Temporal workers until shutdown begins. See [Health](#health). |
 | `BIRBCREW_PI_ATTESTATION`, `OPENCODE_GO_API_KEY` | worker | unset | Pi on OpenCode Go. See [Provider accounts](#provider-accounts). |
 | `BIRBCREW_CODEX_ATTESTATION`, `BIRBCREW_CODEX_AUTH_HOME` | worker | unset | Codex with a ChatGPT subscription. |
 
@@ -239,44 +239,102 @@ The gateway listens on loopback only, so kubelet `httpGet` and `tcpSocket`
 probes, which target the pod IP, cannot reach it. Use exec probes, which run
 inside the container's network namespace.
 
-- **Gateway:** `GET /healthz` is the only route that needs no bearer token. It
-  answers a loopback peer that requests exactly `/healthz` with a constant
-  `{"status":"ok"}` and reads no database or Temporal state. Any other method,
-  request target (including a query string) or peer goes through the normal
-  authentication, so it gets `401` without a valid token. Replace `8080` with
-  the configured port. Starting Node takes a few hundred milliseconds on a small
-  CPU limit, so raise the timeout:
+### Gateway
 
-  ```yaml
-  livenessProbe:
-    timeoutSeconds: 5
-    exec:
-      command: ["node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r => process.exit(r.status === 200 ? 0 : 1), () => process.exit(1))"]
-  ```
+The gateway has no unauthenticated route. A request without a valid bearer
+token gets `401` before the gateway parses the URL, reads the body or touches
+PostgreSQL or Temporal. That `401` is the liveness signal. The probe fetches
+`/v1/capabilities` with no token and passes only on `401`. Replace `8080` with
+the configured port:
 
-- **Worker:** set `BIRBCREW_WORKER_HEARTBEAT_FILE=/tmp/crew-worker.heartbeat`.
-  The worker refuses to start if that directory is not writable. The file's age
-  shows whether the event loop is running and every Temporal worker reports
-  `RUNNING`. It does not depend on PostgreSQL or Temporal reachability. Startup
-  runs migrations and bundles workflow code, so give it a startup probe:
+```yaml
+startupProbe:
+  periodSeconds: 10
+  failureThreshold: 30
+  timeoutSeconds: 5
+  exec:
+    command: ["node", "-e", "fetch('http://127.0.0.1:8080/v1/capabilities', { signal: AbortSignal.timeout(3000) }).then(r => process.exit(r.status === 401 ? 0 : 1), () => process.exit(1))"]
+livenessProbe:
+  periodSeconds: 10
+  failureThreshold: 3
+  timeoutSeconds: 5
+  exec:
+    command: ["node", "-e", "fetch('http://127.0.0.1:8080/v1/capabilities', { signal: AbortSignal.timeout(3000) }).then(r => process.exit(r.status === 401 ? 0 : 1), () => process.exit(1))"]
+```
 
-  ```yaml
-  startupProbe:
-    periodSeconds: 10
-    failureThreshold: 30
-    exec:
-      command: ["sh", "-c", "test $(( $(date +%s) - $(stat -c %Y /tmp/crew-worker.heartbeat) )) -lt 30"]
-  livenessProbe:
-    periodSeconds: 10
-    exec:
-      command: ["sh", "-c", "test $(( $(date +%s) - $(stat -c %Y /tmp/crew-worker.heartbeat) )) -lt 30"]
-  ```
+- A pass proves that the listener accepts connections and the event loop
+  answers. It says nothing about PostgreSQL or Temporal.
+- The same command is the startup probe. The gateway connects to Temporal and
+  applies migrations before it starts listening, so the probe fails until
+  startup has finished. A migration can wait 60 s for locks (see
+  [Upgrades](#upgrades)), so the startup budget is long.
+- The fetch gives up after 3 seconds, so a gateway that accepts the connection
+  but never answers fails. Starting Node takes a few hundred milliseconds on a
+  small CPU limit, so the kubelet timeout is longer than the fetch timeout.
+- A false restart is not free. It drops every open event stream and in-flight
+  request. With one gateway it also skips routine windows from the 5 minutes
+  before the new process starts (see
+  [scheduled routines](scheduled-routines.md#the-dispatcher)). Keep the failure
+  threshold conservative.
+- `GET /v1/health` is a readiness check for a consumer that holds a token. Do
+  not use it for liveness. A PostgreSQL or Temporal outage would fail it on
+  every gateway at once, restart them all and fix nothing.
 
-**Verified** in the hardened containers above: the gateway probe received
-`200 {"status":"ok"}`, while `/healthz?x=1`, `http://x/healthz`, `//` and
-unauthenticated `/v1` requests received `401`; the worker probe passed, failed
-while the worker process was stopped with `SIGSTOP` for 35 seconds, and passed
-again after `SIGCONT`; a heartbeat path in a missing directory stopped the
-worker with status 1.
+### Worker
+
+Set `BIRBCREW_WORKER_HEARTBEAT_FILE` to an absolute path, for example
+`/tmp/crew-worker.heartbeat`. The worker refuses to start if the path is
+relative or its directory is not writable. It touches the file when it starts
+its Temporal workers, then every 5 seconds until shutdown begins. A touch
+creates the file if needed and never truncates it. If a touch fails, the worker
+logs `Cannot update BIRBCREW_WORKER_HEARTBEAT_FILE` once and keeps running.
+
+A recent modification time proves that:
+
+- the worker's main event loop is running;
+- the worker started its Temporal workers;
+- shutdown has not begun.
+
+It does not prove that the workers can reach Temporal or are polling. The SDK
+marks a worker `RUNNING` as soon as `run()` is called, before its first poll.
+The file also does not detect an activity or the SDK supervisor child that
+hangs without blocking the event loop. A supervisor that exits does stop the
+worker.
+
+Startup runs migrations, connects to Temporal and bundles workflow code before
+the first touch, so give it a startup probe:
+
+```yaml
+startupProbe:
+  periodSeconds: 10
+  failureThreshold: 30
+  exec:
+    command: ["sh", "-c", "test $(( $(date +%s) - $(stat -c %Y /tmp/crew-worker.heartbeat) )) -lt 30"]
+livenessProbe:
+  periodSeconds: 10
+  exec:
+    command: ["sh", "-c", "test $(( $(date +%s) - $(stat -c %Y /tmp/crew-worker.heartbeat) )) -lt 30"]
+```
+
+The probe checks only the file's age. A file left on the same volume by a
+previous container passes it until that file is 30 seconds old.
+
+**Verified** in a `node:22.23.3-bookworm` container on linux/arm64 (Docker
+29.2.1, kernel 6.8.0) with PostgreSQL 17.11 and the Temporal CLI 1.10.0
+development server, not in the hardened image:
+
+- The gateway probe exited 1 before the gateway listened and 0 once it had
+  printed its URL. It exited 1 after 3 seconds while the gateway was stopped
+  with `SIGSTOP`, 0 after `SIGCONT`, and 1 once the gateway had exited.
+  `GET /healthz` without a token got `401`.
+- A heartbeat path in a missing directory, or a relative one, stopped the
+  worker with status 1.
+- The worker probe passed while the worker ran, failed after 35 seconds of
+  `SIGSTOP` and passed again 6 seconds after `SIGCONT`. Content already in the
+  file was kept.
+- With the Temporal server stopped for 60 seconds, the worker kept running and
+  its heartbeat stayed fresh, so the probe kept passing.
+- `npm run test:temporal:tls` runs the gateway probe command against a real
+  gateway and checks that the worker's heartbeat advances.
 
 **Unverified:** these probes have not been run under kubelet.

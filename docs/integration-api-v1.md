@@ -45,7 +45,12 @@ proof of the operator's provider access or configured profile availability.
 | `POST /v1/memories`, `GET /v1/memories` | Create (`requestId`, `memberId`, `text`) and list member memory entries |
 | `GET`/`DELETE /v1/memories/{memoryId}` | Read one entry, or erase its text and keep a tombstone |
 
-Authentication is required even for capabilities and health. Other owners get `404`, not a
+Authentication is required even for capabilities and health. There is no
+unauthenticated route. A request without a valid token gets `401` before the gateway
+parses the URL, reads the body or touches PostgreSQL or Temporal. That `401` is the
+supported liveness signal: it shows that the gateway is listening and answering, and
+nothing about its dependencies (see
+[Health](persistent-deployment.md#health)). Other owners get `404`, not a
 confirmation of a request's existence. Versioned request bodies are strict: unknown
 fields (including an attempted `ownerId` override or an `initiator`) fail `400`. Query parameters on the
 health and listing routes are strict too: unknown or repeated parameters fail `400`.
