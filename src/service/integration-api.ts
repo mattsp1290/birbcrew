@@ -140,7 +140,10 @@ export class IntegrationApi {
     return { apiVersion: "1" as const, members: items, next };
   }
 
-  /** Coarse snapshot phase only; never message text. Phase is null where the snapshot reports history_unavailable. */
+  /**
+   * Coarse snapshot phase only; never message text. Phase is null where the snapshot reports history_unavailable.
+   * conversations has no owner index yet, so this walks its primary key filtering owner_id until one is added.
+   */
   async listConversations(ownerId: string, query: unknown) {
     const { limit, after, memberId } = conversationListQuery.parse(query);
     const { rows } = await this.store.pool.query<{ conversationId: string; memberId: string; engine: Engine; profile: string; phase: string | null }>(

@@ -44,8 +44,9 @@ These routes exist only under `/v1`; `/health` and `GET /members` or
 `GET /v1/health` takes no parameters. It probes both dependencies concurrently, each
 bounded to 2 seconds: a PostgreSQL round trip that reads the highest applied schema
 version, and a Temporal frontend `GetSystemInfo` call on the gateway's connection. The
-probe never starts, signals or describes a workflow. It returns `200` when every
-dependency is ready and `503` with the same body otherwise:
+probe never starts, signals or describes a workflow, and a ready Temporal frontend does
+not show that workers are polling. It returns `200` when every dependency is ready and
+`503` with the same body shape otherwise:
 
 ```json
 {

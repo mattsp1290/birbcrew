@@ -385,7 +385,8 @@ async function serve(gatewayStore: MemberStore, members: MemberClient) {
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); assert.ok(address && typeof address !== "string");
   return {
-    get: (path: string, credential = token) => fetch(`http://127.0.0.1:${address.port}${path}`, { headers: { Authorization: "Bearer " + credential } }),
+    get: (path: string, credential = token) => fetch(`http://127.0.0.1:${address.port}${path}`,
+      { headers: { Authorization: "Bearer " + credential }, signal: AbortSignal.timeout(10_000) }),
     async stop() { const closed = once(server, "close"); server.close(); server.closeAllConnections(); await closed; },
   };
 }
@@ -431,6 +432,24 @@ test("v1 health answers 503 with the same shape, bounded and without dependency 
   }
 });
 
+test("v1 health gives back a blocked probe's pooled connection so other routes keep serving", { timeout: 20_000 }, async (t) => {
+  const single = new Pool({ connectionString: url, max: 1 });
+  const gateway = await serve(new MemberStore(single), { async temporalReachable() {} } as unknown as MemberClient);
+  t.after(async () => { await gateway.stop(); await single.end(); });
+  const lock = await pool.connect();
+  try {
+    await lock.query("BEGIN");
+    await lock.query("LOCK TABLE birbcrew_ts.schema_versions IN ACCESS EXCLUSIVE MODE");
+    const blocked = await gateway.get("/v1/health");
+    assert.equal(blocked.status, 503);
+    assert.equal((await blocked.json()).dependencies.database.status, "unavailable");
+    assert.equal((await gateway.get("/v1/members")).status, 200, "the only pooled connection was not stranded on the lock");
+  } finally {
+    await lock.query("ROLLBACK");
+    lock.release();
+  }
+});
+
 test("v1 listings page an owner's members and conversations without gaps, duplicates or text", async (t) => {
   const f = await fixture(); t.after(f.stop);
   const { memberId: first } = await store.getConversation({ ownerId: f.ownerId, conversationId: f.conversationId });
@@ -447,6 +466,11 @@ test("v1 listings page an owner's members and conversations without gaps, duplic
   const turn = await store.beginTurn({ ownerId: f.ownerId, conversationId: f.conversationId, requestId: randomUUID(), text },
     { workflowRunId: randomUUID(), activityId: "listing", attempt: 1 });
   assert.equal(turn.kind, "start");
+  // A conversation predating the public event ledger, as migration 004 marks them.
+  const legacy = randomUUID();
+  await store.openConversation({ ownerId: f.ownerId, conversationId: legacy, memberId: first }); owned.set(legacy, first);
+  await pool.query("INSERT INTO birbcrew_ts.public_snapshots (conversation_id,history_complete,state) VALUES ($1,false,'{}')", [legacy]);
+  assert.equal((await f.api(`/v1/conversations/${legacy}`)).status, 409);
 
   async function all(path: string, key: "members" | "conversations", credential?: string) {
     const rows: Record<string, unknown>[] = [], sizes: number[] = [];
@@ -471,12 +495,12 @@ test("v1 listings page an owner's members and conversations without gaps, duplic
   assert.deepEqual(members.rows, expectedMembers);
 
   const conversations = await all("/v1/conversations?limit=2", "conversations");
-  assert.deepEqual(conversations.sizes, [2, 2, 1]);
+  assert.deepEqual(conversations.sizes, [2, 2, 2]);
   assert.deepEqual(conversations.rows.map(row => row.conversationId), [...owned.keys()].sort(), "stable order, no gaps or duplicates");
   for (const row of conversations.rows) {
     const member = expectedMembers.find(m => m.memberId === owned.get(row.conversationId as string))!;
     assert.deepEqual(row, { conversationId: row.conversationId, memberId: member.memberId, engine: member.engine, profile: member.profile,
-      phase: row.conversationId === f.conversationId ? "running" : "idle" });
+      phase: row.conversationId === f.conversationId ? "running" : row.conversationId === legacy ? null : "idle" });
   }
 
   const filtered = await all(`/v1/conversations?limit=1&memberId=${first.toUpperCase()}`, "conversations");
@@ -492,6 +516,11 @@ test("v1 listings page an owner's members and conversations without gaps, duplic
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { apiVersion: "1", conversations: [], next: null });
   }
+  // A cursor naming another owner's row is only a position: it neither fails nor reveals that row.
+  const foreign = await f.api(`/v1/conversations?after=${Buffer.from("conversation:" + otherConversation).toString("base64url")}`);
+  assert.equal(foreign.status, 200);
+  assert.deepEqual((await foreign.json()).conversations.map((row: { conversationId: string }) => row.conversationId),
+    [...owned.keys()].sort().filter(id => id > otherConversation));
   assert.deepEqual((await all("/v1/members", "members", f.stranger)).rows, []);
   assert.deepEqual((await all(`/v1/conversations?memberId=${first}`, "conversations", f.stranger)).rows, []);
   assert.equal((await f.api("/v1/members", undefined, "invalid")).status, 401);
@@ -507,12 +536,21 @@ test("v1 listings reject unknown, repeated, out-of-range and forged query parame
   assert.ok(memberCursor && conversationCursor);
   assert.equal((await f.api("/v1/members?limit=100")).status, 200, "maximum limit is inclusive");
   const forged = (value: string) => Buffer.from(value).toString("base64url");
-  const id = Buffer.from(memberCursor, "base64url").toString().slice("member:".length);
-  const invalid = ["limit=0", "limit=101", "limit=abc", "limit=1.5", "limit=01", "limit=", "limit=1&limit=2", "after=", "after=not-a-cursor",
-    `after=${conversationCursor}`, `after=${forged("member:" + id.toUpperCase())}`, `after=${forged("member:" + id + ":x")}`,
-    `ownerId=${f.ownerId}`, "unknown=1", `memberId=${randomUUID()}`];
-  for (const query of invalid) assert.equal((await f.api("/v1/members?" + query)).status, 400, query);
-  for (const query of [...invalid.filter(q => !q.startsWith("after=") && !q.startsWith("memberId=")), `after=${memberCursor}`, "memberId=not-a-uuid"]) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  function cursors(kind: string, cursor: string, otherListing: string) {
+    const id = Buffer.from(cursor, "base64url").toString().slice(kind.length + 1);
+    // Flipping an unused trailing bit decodes to identical bytes; only the canonical encoding is accepted.
+    const altered = cursor.slice(0, -1) + alphabet[alphabet.indexOf(cursor.at(-1)!) ^ 1];
+    assert.ok(Buffer.from(altered, "base64url").equals(Buffer.from(cursor, "base64url")));
+    return ["", "not-a-cursor", otherListing, forged(kind + ":" + id.toUpperCase()), forged(kind + ":" + id + ":x"),
+      forged("x".repeat(kind.length) + ":" + id), cursor + "=", altered].map(value => "after=" + value);
+  }
+  const common = ["limit=0", "limit=101", "limit=abc", "limit=1.5", "limit=01", "limit=", "limit=1&limit=2", `ownerId=${f.ownerId}`, "unknown=1"];
+  for (const query of [...common, ...cursors("member", memberCursor, conversationCursor), `memberId=${memberId}`]) {
+    assert.equal((await f.api("/v1/members?" + query)).status, 400, query);
+  }
+  for (const query of [...common, ...cursors("conversation", conversationCursor, memberCursor), "memberId=not-a-uuid",
+    `memberId=${memberId}&memberId=${memberId}`]) {
     assert.equal((await f.api("/v1/conversations?" + query)).status, 400, query);
   }
   for (const path of ["/members", "/conversations"]) assert.equal((await f.api(path)).status, 404, "listings are versioned-only");

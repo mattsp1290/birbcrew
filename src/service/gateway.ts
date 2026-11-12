@@ -68,10 +68,11 @@ async function probe<T>(check: () => Promise<T>): Promise<T | undefined> {
   finally { timer.abort(); }
 }
 
+// probe() abandons a slow query; pg's own timeout then discards its client instead of stranding a pool slot.
+const schemaVersionQuery = { text: "SELECT max(version) AS version FROM birbcrew_ts.schema_versions", query_timeout: probeTimeout };
 async function health(store: MemberStore, members: MemberClient) {
   const [schemaVersion, temporal] = await Promise.all([
-    probe(async () => (await store.pool.query<{ version: number | null }>(
-      "SELECT max(version) AS version FROM birbcrew_ts.schema_versions")).rows[0].version),
+    probe(async () => (await store.pool.query<{ version: number | null }>(schemaVersionQuery)).rows[0].version),
     probe(async () => { await members.temporalReachable(Date.now() + probeTimeout); return true; }),
   ]);
   const database = typeof schemaVersion === "number" ? "ready" : "unavailable";
