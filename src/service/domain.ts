@@ -22,7 +22,11 @@ export const spawnSchema = z.strictObject({ ownerId, requestId: uuid, engine: en
 export const conversationKey = z.strictObject({ ownerId, conversationId: uuid });
 export const openSchema = conversationKey.extend({ memberId: uuid });
 export const turnKey = conversationKey.extend({ requestId: uuid });
-export const submitSchema = turnKey.extend({ text: boundedText(16_384) });
+/** How long a Claude or Pi card of the request may wait for a decision (docs/approval-expiry.md).
+ * 028-approval-expiry.sql repeats the bounds. Absent, a card waits until someone answers it. */
+export const approvalDeadline = { minimumSeconds: 60, maximumSeconds: 604_800 } as const;
+export const approvalDeadlineSeconds = z.int().min(approvalDeadline.minimumSeconds).max(approvalDeadline.maximumSeconds);
+export const submitSchema = turnKey.extend({ text: boundedText(16_384), approvalDeadlineSeconds: approvalDeadlineSeconds.optional() });
 export const executionSchema = z.strictObject({
   workflowRunId: boundedText(256),
   activityId: boundedText(256),
