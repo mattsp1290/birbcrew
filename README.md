@@ -1,6 +1,23 @@
-# Birbcrew
+# Crew
 
-BirbCrew runs durable Claude, Codex and Pi coding coworkers through their TypeScript SDKs. Temporal orders turns and human decisions. PostgreSQL stores the conversation and its AG-UI history. The original Python proof remains available.
+Crew runs durable Claude, Codex and Pi coding coworkers through their TypeScript SDKs. Temporal orders turns and human decisions. PostgreSQL stores the conversation and its AG-UI history. The original Python proof remains available.
+
+## Repository name and compatibility
+
+The canonical repository is [mattsp1290/crew](https://github.com/mattsp1290/crew),
+formerly `mattsp1290/birbcrew`. Use the new URL for clones and Git remotes:
+
+```sh
+git clone https://github.com/mattsp1290/crew.git
+git remote set-url origin https://github.com/mattsp1290/crew.git
+```
+
+This repository rename does not migrate existing installations or published
+contracts. Python imports/distribution (`birbcrew`), the `@birbcrew/pi-subagents`
+package, `BIRBCREW_*` configuration, persisted paths and identifiers, and native
+prompt/protocol labels retain their existing names. Keep using the documented
+commands and configuration. Historical milestone documents and captured evidence
+also retain the name used when they were recorded.
 
 Run `scripts/setup`, then `scripts/verify`. The verifier starts disposable local
 services, generates credentials, uses an isolated Beans fixture, drives two
@@ -78,7 +95,7 @@ process that opens conversations. It names an operator-managed JSON file
 mapping owner IDs to a source, for example
 `{"local":{"root":"/tmp/birbcrew-local","project":"release","actor":"coworker"}}`.
 Use a temporary installation containing a clean `hub` Git checkout on `main`
-with no remotes. BirbCrew captures up to two Beans memories when the conversation
+with no remotes. Crew captures up to two Beans memories when the conversation
 opens. The root member uses that private snapshot on later turns and tool resumes,
 even if the original hub is removed.
 

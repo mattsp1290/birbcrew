@@ -24,6 +24,6 @@ pnpm test
 pnpm pack
 ```
 
-The packed filename is `ag-ui-claude-agent-sdk-0.0.8.tgz`. BirbCrew vendors
+The packed filename is `ag-ui-claude-agent-sdk-0.0.8.tgz`. Crew vendors
 it as `claude-agent-sdk-0.0.8.tgz`. The localhost provider used in the
 consumer test has its own [source record and notice](../../tests/fixtures/engines/claude/PROVENANCE.md).
