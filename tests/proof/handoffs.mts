@@ -1,0 +1,117 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { services, until, type Engine } from "./member-services.mts";
+
+// Conversation handoff through the real gateway, Temporal worker and fixture providers, once for each
+// target engine. No live inference. Source prompts carry BIRBNOTE_ markers, which the fixture hook in
+// fixture-profiles.mts records from every provider request's system context and, separately, from its
+// other messages. The fixtures answer a handoff transcript by parsing it (tests/fixtures/engines/handoff.mts).
+assert.equal(process.version, "v22.23.3");
+const s = await services();
+const owner = { id: randomUUID(), token: randomUUID() };
+const config = join(s.directory, "gateway.json");
+await writeFile(config, JSON.stringify({ port: 0, tokenHashes: { [createHash("sha256").update(owner.token).digest("hex")]: owner.id } }), { mode: 0o600 });
+let endpoint = "";
+let stopGateway: (() => Promise<void>) | undefined;
+async function gateway() {
+  const child = spawn(process.execPath, ["src/service/gateway.ts", config], { env: s.env, stdio: ["ignore", "pipe", "inherit"] });
+  const exit = once(child, "exit");
+  const lines = createInterface({ input: child.stdout });
+  endpoint = await Promise.race([
+    once(lines, "line").then(([line]) => JSON.parse(line).url as string),
+    exit.then(() => { throw new Error("Gateway exited before listening"); }),
+  ]).finally(() => lines.close());
+  stopGateway = async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await exit;
+  };
+}
+async function api(path: string, { body, method = body === undefined ? "GET" : "POST", expected = method === "POST" ? 201 : 200 }:
+  { body?: unknown; method?: string; expected?: number } = {}) {
+  const response = await fetch(endpoint + path, { method, headers: { Authorization: "Bearer " + owner.token, "Content-Type": "application/json" },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const text = await response.text();
+  assert.equal(response.status, expected, `${method} ${path}: ${response.status} ${text}`);
+  return JSON.parse(text);
+}
+const marker = () => "BIRBNOTE_" + randomUUID().replaceAll("-", "").toUpperCase();
+let seen = 0;
+/** The provider requests made since the last call: each one's system-context and message markers. */
+async function requests() {
+  const rows = (await readFile(s.env.BIRBCREW_PROOF_NOTES!, "utf8").catch(() => "")).split("\n").filter(Boolean)
+    .map(line => JSON.parse(line) as { engine: Engine; system: string[]; messages: string[]; continuation: boolean });
+  const fresh = rows.slice(seen);
+  seen = rows.length;
+  return fresh;
+}
+async function open(memberId: string) {
+  const conversationId = randomUUID();
+  await api("/v1/conversations", { body: { conversationId, memberId } });
+  return conversationId;
+}
+const completed = (conversationId: string, requestId: string, label: string) => until(async () => {
+  const receipt = await api(`/v1/conversations/${conversationId}/requests/${requestId}`);
+  return receipt.status === "completed" ? receipt : undefined;
+}, label, 120_000);
+async function turn(conversationId: string, text: string) {
+  const receipt = await api(`/v1/conversations/${conversationId}/requests`, { body: { requestId: randomUUID(), text }, expected: 202 });
+  return completed(conversationId, receipt.requestId, text.slice(0, 40));
+}
+
+try {
+  const stopTemporal = await s.startTemporal();
+  const stopWorker = await s.worker();
+  try {
+    await until(async () => {
+      try { return await s.sql("SELECT count(*) FROM birbcrew_ts.profiles WHERE name='fixture.v1'") === "3" || undefined; }
+      catch { return undefined; }
+    }, "fixture worker registration");
+    await gateway();
+    assert.equal((await api("/v1/capabilities")).handoffs.transcriptBytes, 65_536);
+    const source = await api("/v1/members", { body: { requestId: randomUUID(), engine: "pi", profile: "fixture.v1" } });
+    for (const engine of ["pi", "claude", "codex"] as const) {
+      const target = await api("/v1/members", { body: { requestId: randomUUID(), engine, profile: "fixture.v1" } });
+      const conversation = await open(source.memberId);
+      // Two turns of about 15 KB each way: the transcript is near its 64 KiB budget, nearly four times
+      // the public prompt limit.
+      const [first, second] = [marker(), marker()];
+      const padding = " " + "pad ".repeat(3_700);
+      assert.equal((await turn(conversation, "remember " + first + padding)).result.text, "stored " + first + padding);
+      await turn(conversation, "remember " + second + padding);
+      await requests();
+
+      const handoff = await api(`/v1/conversations/${conversation}/handoffs`, { body: { requestId: randomUUID(), memberId: target.memberId } });
+      assert.deepEqual([handoff.target.engine, handoff.carriedTurns, handoff.omittedTurns, handoff.firstRequestAdmitted], [engine, 2, 0, true]);
+      assert.ok(handoff.transcriptBytes > 58_000 && handoff.transcriptBytes <= 65_536, String(handoff.transcriptBytes));
+      const targetId = handoff.target.conversationId;
+      const receipt = await completed(targetId, handoff.firstRequestId, `${engine} handoff turn`);
+      assert.deepEqual(receipt.initiator, { kind: "handoff", id: handoff.handoffId });
+      assert.equal(receipt.result.text, "acknowledged 2 turns from pi");
+      // The target model got the transcript once, as a user message: both turns' markers, none in its system context.
+      assert.deepEqual(await requests(), [{ engine, system: [], messages: [first, second].sort(), continuation: false }]);
+      const { messages } = await api(`/v1/conversations/${targetId}`);
+      assert.deepEqual(messages.map((message: { role: string }) => message.role), ["user", "assistant"]);
+      assert.equal(createHash("sha256").update(messages[0].content).digest("hex"), handoff.transcriptDigest);
+      console.log(`${engine}: the target's first turn carried ${handoff.transcriptBytes} transcript bytes as a user message and the model answered`);
+
+      // The owner continues in the target; the source is sealed and still readable.
+      assert.equal((await turn(targetId, "remember cedar")).result.text, "stored cedar");
+      assert.deepEqual(await api(`/v1/conversations/${conversation}/requests`, { body: { requestId: randomUUID(), text: "more" }, expected: 409 }),
+        { error: "handed_off" });
+      assert.equal((await api(`/v1/conversations/${conversation}`)).messages.length, 4);
+      assert.equal((await api(`/v1/conversations/${targetId}/handoff`)).incoming.handoffId, handoff.handoffId);
+      await requests();
+      console.log(`${engine}: the owner continued in the target; the source refused new requests`);
+    }
+    // The audit trail names every handoff by identifiers and digest; no marker reaches it.
+    const trail = JSON.stringify(await api("/v1/audit?limit=1000"));
+    assert.equal([...trail.matchAll(/"conversation\.handed_off"/g)].length, 3);
+    assert.deepEqual(trail.match(/BIRBNOTE_[A-Z0-9]+/g), null);
+  } finally { await stopGateway?.(); await stopWorker(); await stopTemporal(); }
+} finally { await s.close(); }
+console.log("Conversation handoff proof passed with actual service fixtures; no live inference.");
