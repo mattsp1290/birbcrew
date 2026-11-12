@@ -11,6 +11,7 @@ import { appendAudit } from "./audit.ts";
 import { firingConversation, firingInitiator } from "./routines.ts";
 import { snapshotMemories } from "./memories.ts";
 import { handoffAdmission } from "./handoffs.ts";
+import { ApplicationFailure } from "@temporalio/client";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Pool, PoolClient } from "pg";
@@ -72,9 +73,22 @@ export async function admittedInitiator(
  * acting as the owner, the gateway's routine dispatcher and its handoff route, so the caller
  * attests the owner. recordAcceptance records a routine instead only when a routine firing row
  * names the request, and a handoff only for the request a handoff row reserved. The initiator
- * is not a workflow or update argument, so recorded histories replay unchanged. */
+ * is not a workflow or update argument, so recorded histories replay unchanged.
+ * A seal never lifts, so retrying it only delays the failure the workflow reaches anyway; and a
+ * request that reached admission ahead of its target's reserved one must not slip in once that
+ * one is admitted. Either refusal fails at once. The workflow does not inspect why an activity
+ * failed, and a failure is history data, not a command, so replay is unaffected. */
 export function ownerAdmissionActivity(store: MemberStore) {
-  return (request: TurnRequest): Promise<void> => store.recordAcceptance(request, ownerInitiator);
+  return async (request: TurnRequest): Promise<void> => {
+    try {
+      await store.recordAcceptance(request, ownerInitiator);
+    } catch (error) {
+      if (error instanceof MemberStoreError && (error.code === "handed_off" || error.code === "handoff_pending")) {
+        throw ApplicationFailure.nonRetryable(error.code);
+      }
+      throw error;
+    }
+  };
 }
 
 export class MemberStore {

@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { readdir, readFile } from "node:fs/promises";
 import { after, before, test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { ApplicationFailure, WorkflowNotFoundError, WorkflowUpdateFailedError } from "@temporalio/client";
 import { Pool } from "pg";
 import { z } from "zod";
 import { ApprovalStore } from "../../src/service/approvals.ts";
@@ -14,7 +15,7 @@ import { createGateway } from "../../src/service/gateway.ts";
 import { HandoffApi, handoffLimits } from "../../src/service/handoffs.ts";
 import { MemoryApi } from "../../src/service/memories.ts";
 import { withNativeAdmission } from "../../src/service/native-admission.ts";
-import { MemberStore } from "../../src/service/store.ts";
+import { MemberStore, ownerAdmissionActivity } from "../../src/service/store.ts";
 import { TrustedContextStore } from "../../src/service/trusted-context.ts";
 
 const url = process.env.BIRBCREW_TEST_DATABASE_URL;
@@ -44,19 +45,32 @@ type View = { handoffId: string; requestId: string; firstRequestId: string; firs
   source: { conversationId: string; memberId: string; engine: Engine }; target: { conversationId: string; memberId: string; engine: Engine };
   carriedTurns: number; omittedTurns: number; uncertainTurns: number; transcriptBytes: number; transcriptDigest: string; createdAt: string };
 
-/** An in-process gateway whose member client goes straight to the store, as MemberClient and the
- * workflow's admission activity do: checkAdmission before any update, then recordAcceptance. */
+/** An in-process gateway whose open and accept are the real MemberClient's, before a stand-in for
+ * Temporal whose acceptTurn update runs only the workflow's admission activity. `lose` drops an
+ * update before Temporal; `close` answers one as a closed workflow would. `accepted` lists every
+ * request the gateway sent through accept. */
 async function fixture(t: TestContext) {
   const token = randomUUID(), stranger = randomUUID();
   const ownerId = "owner-" + randomUUID(), strangerId = "owner-" + randomUUID();
-  const control = { lose: 0 };
-  const members = {
-    async open(input: Parameters<MemberStore["openConversation"]>[0]) { return store.openConversation(input); },
-    async accept(input: TurnRequest) {
+  const control = { lose: 0, close: 0, accepted: [] as string[] };
+  const handle = {
+    async executeUpdate(name: string, { args: [request] }: { args: [TurnRequest] }) {
+      assert.equal(name, "acceptTurn");
       if (control.lose > 0) { control.lose--; throw new Error("submission lost before Temporal"); }
-      await store.checkAdmission(input);
-      await store.recordAcceptance(input, ownerInitiator);
-      return { requestId: input.requestId };
+      if (control.close > 0) { control.close--; throw new WorkflowNotFoundError("closed", "fixture", undefined); }
+      await store.recordAcceptance(request, ownerInitiator);
+      return request.requestId;
+    },
+    async describe() { return { status: { name: "RUNNING" } }; },
+  };
+  const temporal = { workflow: { getHandle: () => handle, async start() {} },
+    connection: { withDeadline: (_deadline: number, action: () => unknown) => action() } };
+  const client = new RealMemberClient(store, temporal as never);
+  const members = {
+    async open(input: Parameters<MemberClient["open"]>[0]) { return client.open(input); },
+    async accept(input: TurnRequest) {
+      control.accepted.push(input.requestId);
+      return client.accept(input);
     },
     async requestStatus(input: Parameters<MemberStore["requestStatus"]>[0]) { return store.requestStatus(input); },
     async decide(input: Parameters<ApprovalStore["decide"]>[0]) { return await approvals.previousDecision(input) ?? approvals.decide(input); },
@@ -329,6 +343,45 @@ test("a retried requestId returns the same handoff, drives its reserved request 
   const both = await Promise.all([f.handoff(left, target, contended), f.handoff(right, target, contended)]);
   assert.deepEqual(both.map(answer => answer.status).sort(), [201, 409]);
   assert.deepEqual(both.find(answer => answer.status === 409)?.body, { error: "conflict" });
+});
+
+test("a retry after the reserved request was admitted returns the same handoff and sends nothing, however that request ended", async (t) => {
+  const f = await fixture(t);
+  const member = await f.spawn(), target = await f.spawn("claude");
+  for (const end of ["uncertain", "failed"] as const) {
+    const source = await f.open(member);
+    await f.turn(source, "remember " + end, "stored " + end);
+    const requestId = randomUUID();
+    const view = await f.created(source, target, requestId);
+    const reserved = { ownerId: f.ownerId, conversationId: view.target.conversationId, requestId: view.firstRequestId };
+    if (end === "uncertain") {
+      // Its outcome is unknown, as when the target's model fails on the transcript.
+      const started = await f.begin({ ...reserved, text: await transcriptOf(view.handoffId) });
+      await store.markUncertain({ ...reserved, token: started.token });
+    } else {
+      // Its admission is rejected, as when the target's workflow closed before running it.
+      await store.rejectUnstartedAdmission(reserved);
+    }
+    assert.equal((await f.status(reserved.conversationId, reserved.requestId)).status, end);
+    const sent = f.control.accepted.length;
+    assert.deepEqual(await f.handoff(source, target, requestId), { status: 201, body: view }, end);
+    assert.equal(f.control.accepted.length, sent, "a retry sends nothing to the target once its request is admitted");
+  }
+});
+
+test("a refusal after the commit returns the committed handoff unadmitted, and a retry with its requestId admits it", async (t) => {
+  const f = await fixture(t);
+  const member = await f.spawn(), target = await f.spawn("pi");
+  const source = await f.open(member);
+  await f.turn(source, "remember larch", "stored larch");
+  const requestId = randomUUID();
+  // The first submission finds the target's workflow closed, which MemberClient refuses as a conflict.
+  f.control.close = 1;
+  const committed = await f.handoff(source, target, requestId);
+  assert.deepEqual([committed.status, committed.body.firstRequestAdmitted], [201, false]);
+  assert.deepEqual(await f.api(`/v1/conversations/${source}/requests`, { requestId: randomUUID(), text: "more" }),
+    { status: 409, body: { error: "handed_off" } }, "the source is sealed");
+  assert.deepEqual(await f.created(source, target, requestId), { ...committed.body, firstRequestAdmitted: true });
 });
 
 test("a sealed source refuses new requests and a second handoff, and stays readable", async (t) => {
@@ -693,6 +746,41 @@ test("MemberClient refuses a pending target, a sealed source and an oversized ow
     await assert.rejects(client[method]({ ownerId: f.ownerId, conversationId: await f.open(member), requestId: randomUUID(), text: "o".repeat(16_385) }), z.ZodError);
   }
   assert.deepEqual(touched, []);
+});
+
+test("MemberClient checks admission again before each rollover retry, and admission refuses a seal without retrying", async (t) => {
+  const f = await fixture(t);
+  const member = await f.spawn(), target = await f.spawn("claude");
+  const isCode = (code: string) => (error: unknown) => error instanceof MemberStoreError && error.code === code;
+  for (const method of ["accept", "submit"] as const) {
+    const source = await f.open(member);
+    await f.turn(source, "remember elder", "stored elder");
+    // The source's workflow is rolling over, and the owner hands it off before MemberClient tries again.
+    const updates: string[] = [];
+    const handle = { async executeUpdate(name: string) {
+      updates.push(name);
+      if (updates.length > 1) return "sent to a sealed source";
+      await f.created(source, target);
+      throw new WorkflowUpdateFailedError("rejected", ApplicationFailure.nonRetryable("rolling", "RolloverInProgress"));
+    } };
+    const client = new RealMemberClient(store, { workflow: { getHandle: () => handle } } as never);
+    await assert.rejects(client[method]({ ownerId: f.ownerId, conversationId: source, requestId: randomUUID(), text: "late" }), isCode("handed_off"));
+    assert.deepEqual(updates, [method === "accept" ? "acceptTurn" : "submitTurn"]);
+  }
+
+  // A request that passed that check just before the seal reaches admission inside the workflow, which
+  // fails it at once; so does one sent to a target ahead of its reserved request. Other refusals still retry.
+  const sealed = await f.open(member);
+  await f.turn(sealed, "remember rowan", "stored rowan");
+  f.control.lose = 1;
+  assert.equal((await f.handoff(sealed, target)).status, 503);
+  const view = (await f.api(`/v1/conversations/${sealed}/handoff`)).body.outgoing as View;
+  const admit = ownerAdmissionActivity(store);
+  const failsAtOnce = (code: string) => (error: unknown) => error instanceof ApplicationFailure && error.nonRetryable && error.message === code;
+  await assert.rejects(admit({ ownerId: f.ownerId, conversationId: sealed, requestId: randomUUID(), text: "late" }), failsAtOnce("handed_off"));
+  const reserved = { ownerId: f.ownerId, conversationId: view.target.conversationId, requestId: view.firstRequestId };
+  await assert.rejects(admit({ ...reserved, requestId: randomUUID(), text: "early" }), failsAtOnce("handoff_pending"));
+  await assert.rejects(admit({ ...reserved, text: "not the transcript" }), isCode("conflict"));
 });
 
 /** A database migrated only up to version 26, as the previous release left it; dropped after the test. */

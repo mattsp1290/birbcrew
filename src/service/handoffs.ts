@@ -150,8 +150,9 @@ export class HandoffApi {
   private readonly members: Pick<MemberClient, "open" | "accept">;
   constructor(store: MemberStore, members: Pick<MemberClient, "open" | "accept">) { this.store = store; this.members = members; }
 
-  /** Idempotent by requestId: a retry returns the same handoff and drives its reserved request again,
-   * so a crash between the commit and the submission heals on retry. */
+  /** Idempotent by requestId: a retry returns the same handoff and drives its reserved request again
+   * while that request is unadmitted, so a crash or refusal between the commit and the admission
+   * heals on retry. */
   async create(ownerId: string, sourceId: string, input: unknown) {
     const body = createSchema.parse(input);
     const sourceConversationId = lowerUuid.parse(sourceId);
@@ -204,11 +205,22 @@ export class HandoffApi {
       return inserted;
     });
     // The normal request path: MemberClient opens the target's workflow and admits the reserved
-    // request, whose admission records the handoff as its initiator.
-    const target = { ownerId, conversationId: row.target_conversation_id };
-    await this.members.open({ ...target, memberId: row.target_member_id });
-    await this.members.accept({ ...target, requestId: row.first_request_id, text: row.transcript });
-    return { apiVersion: "1" as const, ...handoffView(await this.viewRow(ownerId, row.handoff_id)) };
+    // request, whose admission records the handoff as its initiator. Once it has an admission row
+    // the target's workflow owns it, and its receipt reports how it ended: a retry sends nothing.
+    let view = await this.viewRow(ownerId, row.handoff_id);
+    if (!view.admitted) {
+      const target = { ownerId, conversationId: row.target_conversation_id };
+      try {
+        await this.members.open({ ...target, memberId: row.target_member_id });
+        await this.members.accept({ ...target, requestId: row.first_request_id, text: row.transcript });
+      } catch (error) {
+        // The handoff is committed, so a refusal here is not one that wrote nothing: answer with the
+        // record, whose firstRequestAdmitted tells the client to retry with the same requestId.
+        if (!(error instanceof MemberStoreError)) throw error;
+      }
+      view = await this.viewRow(ownerId, row.handoff_id);
+    }
+    return { apiVersion: "1" as const, ...handoffView(view) };
   }
 
   /** The handoff that created this conversation (incoming) and the one that sealed it (outgoing). */
