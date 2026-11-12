@@ -32,12 +32,21 @@ Each row in `birbcrew_ts.audit_events` records one fact:
 - `actor_kind`/`actor_id`: who performed the action. Today this is `owner` (with
   the owner ID) or `system` (with no ID) for work Crew carries out itself.
 - `initiator_kind`/`initiator_id`: what started the request the action belongs to.
-  Today this is always recorded as the owner. A named CHECK constraint
-  (`audit_events_initiator_check`) allows only that. Scheduled routines, member
-  handoff or standing approvals must widen it in their own migration. No operator
-  or application kind exists yet. Operator CLI commands (`npm run members`) act as
-  the owner they name, and trusted-context effects are attributed to the owning
-  tenant.
+  Migration 23 records it on the request's durable admission
+  (`request_admissions.initiator_kind`/`initiator_id`) once, when the request is
+  admitted, and it never changes afterwards. For an event tied to a request, the
+  audit insert itself copies that initiator, inside the same transaction, so no
+  caller chooses it. An owner admission stores no `initiator_id`; the audit row
+  names the owner ID. A request with no admission row is recorded as
+  owner-initiated, as before migration 23: requests admitted by workflow histories
+  older than `bounded-conversations-v1`, and trusted-context effects, whose lane
+  records no admission. `member.spawned` and `conversation.opened` belong to no
+  request and name the acting owner. The owner is the only kind today. A named
+  CHECK constraint (`audit_events_initiator_check`) allows only it, as
+  `request_admissions_initiator_kind_check` does for admissions. Scheduled
+  routines, member handoff or standing approvals must widen both in their own
+  migration. No operator or application kind exists yet. Operator CLI commands
+  (`npm run members`) act as the owner they name.
 - `event_type`, `member_id`, `conversation_id`, `request_id` and a small
   `payload` object.
 
@@ -223,7 +232,30 @@ that queues behind the migration, so every wait ends. Spawns and opens are short
 except that an open with project-note capture configured runs its `git` and `bn`
 commands, each limited to 10 s, before it commits.
 
-The table carries the `recovery_write_barrier` trigger, so held installations
+Migration 23 adds the initiator to `request_admissions` and records every existing
+admission as owner-initiated. It locks only that table, in `ACCESS EXCLUSIVE` mode,
+until the migration commits. Its constant default fills existing rows from the
+catalog, without a rewrite or scan, and its CHECK constraints are added `NOT VALID`,
+so the lock is held briefly. It waits for transactions already using the table:
+admissions, rejections, cancellation intents, turn starts, reconciliation, status
+reads and request-tied audit appends, none of which waits for application work
+while holding it. A running native turn's admission transaction holds `ROW SHARE`
+on `turns` (or `native_launches` for Codex) and `ACCESS SHARE` on a few other
+tables, never on `request_admissions`, so a live upgrade does not wait for native
+turns. Like migration 21 it sets no `lock_timeout`: a session outside Crew that
+holds a lock on the table, such as an open `psql` transaction or a running
+`pg_dump`, delays it, and statements on the table queue behind it meanwhile.
+
+The migration then drops the default, so every admission must name its initiator.
+Processes of an earlier release fail rather than record one without it. Their
+admission activity fails with a not-null violation and Temporal retries it; if no
+upgraded worker takes a retry within the activity's 60 s schedule, the
+conversation's workflow fails, as after any failed admission. Their v1 cancel
+backfills admissions the same way and fails for every request that has a turn,
+even one already admitted. Stop every process of the previous release before the
+first upgraded one starts, as for migration 21.
+
+The audit table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest
 inventory counts its rows. `pg_dump`/`pg_restore` keep the rows and the identity
 position. Restore creates the append-only trigger after it loads the data, so the
@@ -367,8 +399,10 @@ the dump's highest ID.
 - Operator CLI actions are indistinguishable from the same owner's gateway
   actions.
 - Requests admitted by workflow histories older than `bounded-conversations-v1` have
-  no durable admission and so no `request.accepted`. The v1 cancel backfill does not
-  invent one.
+  no durable admission and so no `request.accepted` and no recorded initiator. Their
+  rows name the owner, the only possible initiator then. The v1 cancel backfill
+  records an owner-initiated admission for such a request but does not invent a
+  `request.accepted`.
 - If a workflow is terminated externally before `reconcileTurn` runs, its started
   turn has no `request.finished` row.
 - Reads are not audited: status, snapshots, observation and audit reads.
@@ -431,7 +465,20 @@ By direct SQL it checks:
   it takes on existing tables, that it completes while a native turn holds its
   admission and that turn still writes to its conversation, and that the identity's
   cache is 1;
-- that the TypeScript and SQL registries match.
+- migration 23 on a version-21 database with admissions: that it locks only
+  `request_admissions` and neither rewrites nor scans it, that a running native
+  turn holds no lock on that table, that the migration completes while the turn
+  holds its admission, that existing admissions become owner-initiated with no
+  `initiator_id`, that an admission naming no initiator (including the previous
+  release's cancel backfill), an unknown kind, or an owner with an ID is refused,
+  and that a recorded initiator cannot be updated;
+- that a request's audit rows copy the initiator its admission recorded (shown
+  with a second kind admitted only inside a rolled-back transaction that widens
+  both CHECKs), that a request without an admission row is still recorded as
+  owner-initiated, and that an admission given a bare string or no initiator is
+  refused before anything is written;
+- that the TypeScript and SQL registries match, for event types and for
+  initiator kinds.
 
 Run the suites one after another, as above. Gateway-starting suites
 (`audit.test.ts`, `integration-api.test.ts`) each run the background cancellation

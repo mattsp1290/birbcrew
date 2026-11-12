@@ -13,9 +13,9 @@ import { readFile } from "node:fs/promises";
 import type { Pool, PoolClient } from "pg";
 import type { z } from "zod";
 import {
-  checkpointSchema, claimSchema, commitSchema, conversationKey, executionSchema, MemberStoreError,
-  openSchema, spawnSchema, submitSchema,
-  type BeginTurn, type Conversation, type Member, type TurnRequest,
+  checkpointSchema, claimSchema, commitSchema, conversationKey, executionSchema, initiatorColumns, initiatorFromColumns,
+  MemberStoreError, openSchema, ownerInitiator, requestInitiator, spawnSchema, submitSchema,
+  type BeginTurn, type Conversation, type Member, type RequestInitiator, type TurnRequest,
 } from "./domain.ts";
 
 type ConversationKey = z.input<typeof conversationKey>;
@@ -48,6 +48,30 @@ async function conversationFor(
   return result.rows[0];
 }
 
+/** The initiator a request's admission recorded, read inside the caller's open transaction,
+ * which has already checked that the conversation is its owner's (as proposeLocked's lockTurn
+ * does). The trigger in 023-request-initiator.sql keeps it from changing, so no row lock is needed.
+ * Null when the request has no admission row: one admitted by a workflow history older than
+ * bounded-conversations-v1, before admissions were durable, or one Crew never admitted.
+ * Null is not the owner: policy must decide it explicitly. Audit rows for such a request
+ * record the owner, as before admissions recorded an initiator. */
+export async function admittedInitiator(
+  db: Pick<PoolClient, "query">, key: { conversationId: string; requestId: string },
+): Promise<RequestInitiator | null> {
+  const { rows: [row] } = await db.query<{ initiator_kind: string; initiator_id: string | null }>(
+    "SELECT initiator_kind,initiator_id FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",
+    [key.conversationId, key.requestId]);
+  return row ? initiatorFromColumns(row.initiator_kind, row.initiator_id) : null;
+}
+
+/** The member workflow's recordAcceptance activity. Only MemberClient issues that workflow's
+ * acceptTurn and submitTurn updates, for the owner-authenticated gateway and the operator CLI
+ * acting as the owner, so it admits owner-initiated requests. The initiator is not a workflow
+ * or update argument, so recorded histories replay unchanged. */
+export function ownerAdmissionActivity(store: MemberStore) {
+  return (request: TurnRequest): Promise<void> => store.recordAcceptance(request, ownerInitiator);
+}
+
 export class MemberStore {
   readonly pool: Pool;
   constructor(pool: Pool) {
@@ -75,7 +99,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"]] as const;
+      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [23, "023-request-initiator.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -142,8 +166,10 @@ export class MemberStore {
     return {phase:row.phase,reason:row.reason};
   }
 
-  async recordAcceptance(input: z.input<typeof submitSchema>): Promise<void> {
+  /** A replay of an admitted request keeps the initiator its first admission recorded. */
+  async recordAcceptance(input: z.input<typeof submitSchema>, initiator: RequestInitiator): Promise<void> {
     const key=submitSchema.parse(input);
+    const [initiatorKind,initiatorId]=initiatorColumns(requestInitiator.parse(initiator));
     const digest=createHash("sha256").update(key.text).digest();
     return this.transaction(async db=>{
       const conversation=await conversationFor(db,key,true);
@@ -165,8 +191,8 @@ export class MemberStore {
           FROM birbcrew_ts.conversations WHERE conversation_id=$1`,[key.conversationId]);
         if(budget.used>=budget.limit)throw new MemberStoreError("input_limit");
       }
-      await db.query("INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest) VALUES($1,$2,$3)",
-        [key.conversationId,key.requestId,digest]);
+      await db.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest,initiator_kind,initiator_id)
+        VALUES($1,$2,$3,$4,$5)`,[key.conversationId,key.requestId,digest,initiatorKind,initiatorId]);
       await appendAudit(db,{type:"request.accepted",ownerId:key.ownerId,memberId:conversation.memberId,
         conversationId:key.conversationId,requestId:key.requestId,payload:{promptDigest:digest.toString("hex")}});
     });

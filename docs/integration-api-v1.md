@@ -10,8 +10,9 @@ trusted scopes, tool registries, or engine configuration in a turn request.
 
 `GET /v1/capabilities` returns `apiVersion: "1"`, request and cancellation contract
 identifiers, proxy protocol versions, conversation/generation limits, trusted-context
-transport availability, observation limits, receipt retention semantics, and the
-audit contract (event types, page limits, formats). Additive
+transport availability, observation limits, receipt retention semantics, the
+request initiator kinds (`initiatorKinds`, today `["owner"]`), and the audit
+contract (event types, page limits, formats). Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
@@ -31,7 +32,7 @@ proof of the operator's provider access or configured profile availability.
 
 Authentication is required even for capabilities. Other owners get `404`, not a
 confirmation of a request's existence. Versioned request bodies are strict: unknown
-fields (including an attempted `ownerId` override) fail `400`.
+fields (including an attempted `ownerId` override or an `initiator`) fail `400`.
 
 ### Identity and equivalence
 
@@ -58,9 +59,17 @@ A successful submit returns `202` with a receipt:
   "conversationId": "UUID",
   "requestId": "UUID",
   "acceptance": { "boundary": "sql_admission_and_temporal_queue" },
-  "status": "accepted"
+  "status": "accepted",
+  "initiator": { "kind": "owner" }
 }
 ```
+
+`initiator` is read-only: what started the request, recorded once when Crew
+admitted it. Requests submitted through this API are always started by the
+authenticated owner, so the owner kind carries no ID. No request body can set it.
+A later release that adds a kind lists it in `initiatorKinds`. The field is absent
+for a request admitted before admissions were durable (a workflow history older
+than bounded conversations) until a cancellation intent records its admission.
 
 The successful boundary means the admission identity/payload digest is committed in
 Crew PostgreSQL and the Temporal workflow owns the queued work. It does **not**

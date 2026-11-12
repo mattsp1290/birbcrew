@@ -2,7 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { nextStep, toolNameSchema } from "./deferral.ts";
-import { engineSchema } from "./domain.ts";
+import { engineSchema, type RequestInitiator } from "./domain.ts";
 
 const uuid = z.uuid();
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
@@ -45,6 +45,16 @@ export interface AuditFact<T extends AuditEventType> {
   payload: z.input<(typeof auditEvents)[T]["payload"]>;
 }
 
+// No caller chooses the initiator. A request's row copies the one its admission recorded,
+// read by the insert itself inside the caller's transaction. A request with no admission row
+// (workflow histories older than durable admission, and the trusted-context lane, which
+// records none) is attributed to the owner, as before admissions recorded an initiator.
+// An owner admission stores no initiator_id; the audit row names the owner. The type CHECK
+// gives every request-tied type a request_id and the others, spawn and open, none.
+const initiatorFromAdmission = `SELECT $1,$2,$3,coalesce(a.initiator_kind,'owner'),coalesce(a.initiator_id,$1),$4,$5,$6,$7,$8
+    FROM (VALUES (1)) fact LEFT JOIN birbcrew_ts.request_admissions a ON a.conversation_id=$6 AND a.request_id=$7`;
+const actingOwner = "VALUES ($1,$2,$3,'owner',$1,$4,$5,$6,$7,$8)";
+
 /** Call inside the transaction that commits the recorded fact, after that transaction has
  * inserted or locked the conversation row it names: the audit row's foreign keys take FOR
  * KEY SHARE on its member and conversation, and locking the conversation first avoids
@@ -56,7 +66,7 @@ export async function appendAudit<T extends AuditEventType>(db: Pick<PoolClient,
   const payload = definition.payload.parse(fact.payload);
   await db.query(`INSERT INTO birbcrew_ts.audit_events (owner_id,actor_kind,actor_id,initiator_kind,initiator_id,
       event_type,member_id,conversation_id,request_id,payload)
-    VALUES ($1,$2,$3,'owner',$1,$4,$5,$6,$7,$8) ON CONFLICT ${definition.key} DO NOTHING`,
+    ${fact.requestId === undefined ? actingOwner : initiatorFromAdmission} ON CONFLICT ${definition.key} DO NOTHING`,
     [fact.ownerId, definition.actor, definition.actor === "owner" ? fact.ownerId : null, fact.type, fact.memberId,
       fact.conversationId ?? null, fact.requestId ?? null, JSON.stringify(payload)]);
 }
@@ -83,7 +93,7 @@ export type AuditQuery = z.output<typeof auditQuerySchema>;
 export interface AuditEvent {
   eventId: string; occurredAt: string; type: AuditEventType;
   actor: { kind: "owner" | "system"; id: string | null };
-  initiator: { kind: "owner"; id: string };
+  initiator: { kind: RequestInitiator["kind"]; id: string };
   memberId: string; conversationId: string | null; requestId: string | null;
   payload: Record<string, unknown>;
 }
