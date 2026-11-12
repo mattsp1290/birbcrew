@@ -184,7 +184,11 @@ test("a standing answer creates a grant, reports its choice and approves the nex
   assert.deepEqual(state.grantedCalls, [{ requestId: second.requestId, approvalId: a2.approvalId, grantId: grant.grantId, scope: "conversation" }]);
   assert.deepEqual(await approvals.pending({ ownerId: chat.ownerId, memberId, conversationId: chat.conversationId }), []);
   assert.equal(await chat.status(second.requestId), "running");
-  assert.equal((await chat.decide({ ...a2, version: 1 }, "deny")).status, 409, "the grant's approval is fixed");
+  // The grant's approval is fixed: approve repeats it, any other answer conflicts, and nothing is recorded.
+  const auditedBefore = (await f.audit("?conversationId=" + chat.conversationId)).length;
+  assert.deepEqual(await (await chat.decide({ ...a2, version: 1 }, "approve")).json(), { approvalId: a2.approvalId, decision: "approve" });
+  for (const other of ["deny", "allow_always", "allow_conversation"]) assert.equal((await chat.decide({ ...a2, version: 1 }, other)).status, 409, other);
+  assert.equal((await f.audit("?conversationId=" + chat.conversationId)).length, auditedBefore);
   assert.equal((await chat.settle(a2)).kind, "recorded");
 
   // The observer saw the same tool-call frames, a state with no card naming the grant, then the result.
@@ -464,24 +468,76 @@ test("revoking ends a grant for later calls only, repeats harmlessly and belongs
   await assert.rejects(pool.query("UPDATE birbcrew_ts.tool_grants SET conversation_id=NULL WHERE grant_id=$1", [closed.grantId]), { code: "23514" });
 });
 
-test("a grant names its owner's card: the database refuses another owner's, member's or conversation's", async () => {
+test("a grant names a card answered with its scope: the database refuses any other card, owner, member or conversation", async () => {
   const ownerId = "owner-" + randomUUID();
   const { memberId } = await store.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
   const { memberId: sibling } = await store.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
   const [conversationId, elsewhere] = [randomUUID(), randomUUID()];
   for (const id of [conversationId, elsewhere]) await store.openConversation({ ownerId, memberId, conversationId: id });
-  const requestId = randomUUID(), text = "record";
-  await store.recordAcceptance({ ownerId, conversationId, requestId, text }, ownerInitiator);
-  const start = await store.beginTurn({ ownerId, conversationId, requestId, text });
-  assert.equal(start.kind, "start"); if (start.kind !== "start") return;
-  const card = await approvals.propose({ ownerId, memberId, conversationId, requestId, token: start.token, invocationId: requestId,
-    nativeCallId: "call", toolName: "record_work_item", arguments: { operation_id: requestId } });
+  async function card(conversation: string) {
+    const requestId = randomUUID(), text = "record";
+    await store.recordAcceptance({ ownerId, conversationId: conversation, requestId, text }, ownerInitiator);
+    const start = await store.beginTurn({ ownerId, conversationId: conversation, requestId, text });
+    assert.equal(start.kind, "start"); if (start.kind !== "start") throw new Error("unreachable");
+    return approvals.propose({ ownerId, memberId, conversationId: conversation, requestId, token: start.token, invocationId: requestId,
+      nativeCallId: "call", toolName: "record_work_item", arguments: { operation_id: requestId } });
+  }
+  const undecided = await card(elsewhere);
+  // An undecided call can carry neither a standing scope nor a grant.
+  for (const column of ["grant_scope='conversation'", "grant_id=gen_random_uuid()"]) {
+    await assert.rejects(pool.query(`UPDATE birbcrew_ts.deferred_calls SET ${column} WHERE approval_id=$1`, [undecided.approvalId]),
+      { code: "23514" }, column);
+  }
+  const answered = await card(conversationId);
+  await approvals.decide(answer(answered, "allow_conversation"));
   const insert = `INSERT INTO birbcrew_ts.tool_grants (owner_id,member_id,conversation_id,tool_name,policy_version,initiator_kind,approval_id)
     VALUES ($1,$2,$3,'record_work_item',1,'owner',$4)`;
-  for (const [owner, member, conversation] of [[ownerId, sibling, null], [ownerId, memberId, elsewhere], ["owner-" + randomUUID(), memberId, null]]) {
-    await assert.rejects(pool.query(insert, [owner, member, conversation, card.approvalId]),
-      { code: "23503", message: /another owner, member or conversation/ });
+  for (const [owner, member, conversation, approvalId] of [[ownerId, sibling, conversationId, answered.approvalId],
+    [ownerId, memberId, elsewhere, answered.approvalId], ["owner-" + randomUUID(), memberId, conversationId, answered.approvalId],
+    [ownerId, memberId, null, answered.approvalId], [ownerId, memberId, elsewhere, undecided.approvalId]]) {
+    await assert.rejects(pool.query(insert, [owner, member, conversation, approvalId]),
+      { code: "23503", message: /not answered with this scope, or belongs to another owner, member or conversation/ },
+      JSON.stringify([owner === ownerId, member === memberId, conversation, approvalId === answered.approvalId]));
   }
+});
+
+test("a conversation grant ends when its conversation stops accepting requests", async (t) => {
+  const f = await fixture(t);
+  const memberId = await f.spawn();
+  async function granted() {
+    const chat = await f.open(memberId);
+    await chat.request();
+    const card = await chat.propose();
+    await chat.decide(card, "allow_conversation");
+    await chat.settle(card);
+    await chat.commit();
+    return chat;
+  }
+  const status = async (conversationId: string) => {
+    const { active, inactive } = await f.grants(memberId);
+    return [...active, ...inactive].find(g => g.conversationId === conversationId)!.status;
+  };
+  // An uncertain turn.
+  const uncertain = await granted();
+  const turn = await uncertain.request();
+  assert.equal(await status(uncertain.conversationId), "active");
+  await store.markUncertain({ ownerId: uncertain.ownerId, conversationId: uncertain.conversationId, requestId: turn.requestId, token: turn.token });
+  assert.equal(await status(uncertain.conversationId), "conversation_closed");
+  // A rejected admission.
+  const rejected = await granted();
+  const queued = { ownerId: rejected.ownerId, conversationId: rejected.conversationId, requestId: randomUUID(), text: "queued" };
+  await store.recordAcceptance(queued, ownerInitiator);
+  await store.rejectAccepted(queued, "predecessor_failed");
+  assert.equal(await status(rejected.conversationId), "conversation_closed");
+  // The turn limit, once its last turn commits.
+  const full = await granted();
+  await pool.query("UPDATE birbcrew_ts.conversations SET turn_limit=4 WHERE conversation_id=$1", [full.conversationId]);
+  for (let turn = 2; turn <= 4; turn++) {
+    await full.request();
+    assert.equal(await status(full.conversationId), "active");
+    await full.commit();
+  }
+  assert.equal(await status(full.conversationId), "conversation_closed");
 });
 
 /** Waits until another session waits for a row the holder's open transaction has locked. */

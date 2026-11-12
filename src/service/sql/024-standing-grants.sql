@@ -19,10 +19,12 @@ ALTER TABLE birbcrew_ts.deferred_calls
     ADD COLUMN grant_scope text,
     -- The grant that approved this call when it was proposed. Such a call has no card.
     ADD COLUMN grant_id uuid,
-    -- Only a top-level record_work_item call can carry either, and never both.
+    -- Only an approved top-level record_work_item call can carry either, and never both. IS NOT
+    -- DISTINCT FROM: an undecided call's NULL decision would otherwise pass the CHECK.
     ADD CONSTRAINT deferred_calls_grant_scope_check CHECK (grant_scope IS NULL OR (grant_scope IN ('conversation', 'member')
-        AND decision = 'approve' AND grant_id IS NULL AND tool_name = 'record_work_item' AND invocation_id = request_id)) NOT VALID,
-    ADD CONSTRAINT deferred_calls_grant_id_check CHECK (grant_id IS NULL OR (decision = 'approve'
+        AND decision IS NOT DISTINCT FROM 'approve' AND grant_id IS NULL AND tool_name = 'record_work_item'
+        AND invocation_id = request_id)) NOT VALID,
+    ADD CONSTRAINT deferred_calls_grant_id_check CHECK (grant_id IS NULL OR (decision IS NOT DISTINCT FROM 'approve'
         AND tool_name = 'record_work_item' AND invocation_id = request_id)) NOT VALID;
 
 CREATE TABLE birbcrew_ts.tool_grants (
@@ -56,8 +58,10 @@ CREATE INDEX tool_grants_member ON birbcrew_ts.tool_grants (owner_id, member_id)
 ALTER TABLE birbcrew_ts.deferred_calls
     ADD CONSTRAINT deferred_calls_grant_id_fkey FOREIGN KEY (grant_id) REFERENCES birbcrew_ts.tool_grants NOT VALID;
 
--- The card must be visible to this lookup and belong to the grant's owner and member, and a
--- conversation grant must name the card's conversation. As in bind_audit_conversation
+-- The card must be visible to this lookup, belong to the grant's owner and member, and have
+-- been answered with this grant's scope (deferred_calls_grant_scope_check limits that to an
+-- approved top-level work item), and a conversation grant must name the card's conversation.
+-- As in bind_audit_conversation
 -- (021-audit.sql), a card or conversation the lookup cannot see is refused here rather than
 -- left to the foreign keys, whose later check could accept one another owner committed in
 -- between. A grant changes only when it is revoked, once, so the binding columns never
@@ -72,11 +76,13 @@ BEGIN
         END IF;
         RETURN NEW;
     END IF;
-    SELECT c.owner_id, c.member_id, c.conversation_id INTO card FROM birbcrew_ts.deferred_calls p
+    SELECT c.owner_id, c.member_id, c.conversation_id, p.grant_scope INTO card FROM birbcrew_ts.deferred_calls p
       JOIN birbcrew_ts.conversations c USING (conversation_id) WHERE p.approval_id = NEW.approval_id;
     IF NOT FOUND OR (card.owner_id, card.member_id) IS DISTINCT FROM (NEW.owner_id, NEW.member_id)
+       OR card.grant_scope IS DISTINCT FROM (CASE WHEN NEW.conversation_id IS NULL THEN 'member' ELSE 'conversation' END)
        OR (NEW.conversation_id IS NOT NULL AND NEW.conversation_id <> card.conversation_id) THEN
-        RAISE EXCEPTION 'Grant card is missing or belongs to another owner, member or conversation' USING ERRCODE = '23503';
+        RAISE EXCEPTION 'Grant card is missing, was not answered with this scope, or belongs to another owner, member or conversation'
+            USING ERRCODE = '23503';
     END IF;
     RETURN NEW;
 END;
