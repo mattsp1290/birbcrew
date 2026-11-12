@@ -16,8 +16,9 @@ contract (event types, page limits, formats) and the scheduled-routine limits an
 policies (`routines`), `standingGrants` (the standing
 choices, the card and state fields, the grantable tool, policy version and
 initiator kinds, the grants route and the inactive-list limit), `memories` (the
-member memory route, limits, injection and deletion semantics per engine), health
-dependencies and listing limits. Additive
+member memory route, limits, injection and deletion semantics per engine),
+`approvalExpiry` (the deadline field, its bounds and the fields that report an
+expiry), health dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
@@ -27,7 +28,7 @@ proof of the operator's provider access or configured profile availability.
 | --- | --- |
 | `POST /v1/members` | Existing member creation contract (`requestId`, `engine`, `profile`) |
 | `POST /v1/conversations` | Open an owned conversation (`conversationId`, `memberId`) |
-| `POST /v1/conversations/{conversationId}/requests` | Submit `{ "requestId": "UUID", "text": "exact input" }` |
+| `POST /v1/conversations/{conversationId}/requests` | Submit `{ "requestId": "UUID", "text": "exact input" }`, optionally with `approvalDeadlineSeconds` |
 | `GET /v1/conversations/{conversationId}/requests/{requestId}` | Reconcile status and original committed result; never invokes inference |
 | `POST /v1/conversations/{conversationId}/requests/{requestId}/cancel` | Persist cancellation intent, body `{}` |
 | `GET /v1/conversations/{conversationId}` | Current public snapshot |
@@ -172,7 +173,9 @@ The identity is **(authenticated owner, conversation UUID, request UUID)**.
 UUIDs are normalized to lowercase. Payload equivalence is exact UTF-8 text equality:
 whitespace and Unicode normalization are not changed. The 16 KiB text limit and valid
 Unicode rules of the existing input contract apply. Reusing an identity with changed
-text returns `409 conflict`; it never creates a second turn.
+text returns `409 conflict`; it never creates a second turn. The optional
+`approvalDeadlineSeconds` is part of the payload too: a reuse must repeat it exactly, or
+omit it if the first submission did.
 
 A consumer with owner-scoped event identities must durably record their mapping to
 **both** conversation and request UUID before sending. Use a deterministic UUID
@@ -325,6 +328,18 @@ reads `running`, not `waiting`, and the conversation state's `grantedCalls` name
 the grant. No route creates a grant. Revocation affects later calls only. Crew has
 one token per owner, so it cannot tell a person from an automated client holding
 it, and a grant covers both. See [standing grants](standing-grants.md).
+
+## Approval expiry
+
+A request may carry `approvalDeadlineSeconds`, an integer from 60 to 604800; a
+routine may too, for each firing. It is part of the request's identity: a retry with
+another value, or without one, fails `409 conflict`, and the receipt reports it. A
+Claude or Pi card of such a request shows `expiresAt`. From then on a decision fails
+`409 conflict`, and Crew cancels the request as a cancel would. The receipt then
+carries `expiredApproval: { approvalId, expiresAt, expiredAt }`, the conversation
+state's `expiredCalls` lists the card, and the audit trail has `approval.expired`; the
+receipt `status` values are unchanged. A Codex card keeps the earlier of its live
+deadline and the request's. See [approval expiry](approval-expiry.md).
 
 ## Audit trail
 

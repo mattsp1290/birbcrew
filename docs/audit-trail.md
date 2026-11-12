@@ -91,7 +91,7 @@ audit version may switch to a keyed per-owner digest.
 
 The registry is the `auditEvents` object in `src/service/audit.ts`.
 `audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
-`024-standing-grants.sql`, `025-routines.sql` and then `026-memories.sql`, lists the same types.
+`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql` and then `028-approval-expiry.sql`, lists the same types.
 Each widening replaces the whole constraint, so the latest migration lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
@@ -104,12 +104,13 @@ A test checks that the two lists match. `GET /v1/capabilities` lists them under
 | `approval.decided` | owner | `decideLocked` stores a choice: Claude/Pi cards, Pi child cards and Codex live calls. `choice` may be a standing choice | `approvalId` | `approvalId`, `invocationId`, `toolName`, `argumentDigest`, `choice` |
 | `grant.created` | owner | A standing choice creates a grant; on the card's conversation and request | `grantId` | `grantId`, `approvalId`, `scope` |
 | `approval.auto_approved` | system | `proposeLocked` inserts a call a standing grant approved, with no card | `approvalId` | `approvalId`, `invocationId`, `toolName`, `argumentDigest`, `grantId` |
+| `approval.expired` | system | `expireTurn` cancels a request whose Claude/Pi card was undecided at its [deadline](approval-expiry.md) | `approvalId` | `approvalId`, `invocationId`, `toolName`, `expiresAt` |
 | `grant.revoked` | owner, or system for `recovery_restore` | The owner revokes a grant, or a restored installation resumes; on its conversation for a conversation grant | `grantId` | `grantId`, `reason` |
 | `work_item.committed` | system | `settleLocked` inserts the work-item receipt, including Codex live dispatch | `receiptId` | `receiptId`, `approvalId` |
 | `request.cancellation_requested` | owner | First durable cancellation fact: the v1 intent, or the cancellation marker written by the legacy cancel route | conversation + request | `receiptId` when the v1 intent came first; `policy: "fail_closed"` when a routine's policy requested it |
 | `request.finished` | system | `commitTurn` (`completed`), `rejectAccepted` (`cancelled`/`failed`), `rejectUnstartedAdmission` (`failed`), final `reconcileTurn` or delegation quarantine (`uncertain`) | conversation + request | `status`, optional `reason` |
 | `trusted_effect.completed` | system | The trusted-context lane records that an `effect` tool completed | `operationId` | `operationId`, `toolName` |
-| `routine.created` | owner | a routine is created | routine + revision | `routineId`, `revision`, `schedule`, `approvalPolicy`, `promptDigest` |
+| `routine.created` | owner | a routine is created | routine + revision | `routineId`, `revision`, `schedule`, `approvalPolicy`, `promptDigest`, optional `approvalDeadlineSeconds` |
 | `routine.enabled` | owner | a routine is enabled | routine + revision | `routineId`, `revision` |
 | `routine.disabled` | owner, or system after ten consecutive failures | a routine is disabled | routine + revision | `routineId`, `revision`, `reason` |
 | `routine.deleted` | owner | a routine is deleted | routine + revision | `routineId`, `revision` |
@@ -297,6 +298,12 @@ Migration 26 replaces `audit_events_type_check` the same way, with every earlier
 type and the three memory types, and adds one partial unique index for them. It takes
 `audit_events` together with `members` and `conversations` without queueing, so it
 never waits for a native turn; [member memory](memories.md#upgrade) lists its locks.
+
+Migration 28 replaces `audit_events_type_check` the same way, adding
+`approval.expired`, and adds one partial unique index for it. It takes `audit_events`
+together with the four other tables it alters without queueing;
+[approval expiry](approval-expiry.md#upgrade-in-flight-workflows-and-recovery) lists its
+locks.
 
 The audit table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest
