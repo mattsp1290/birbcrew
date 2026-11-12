@@ -8,7 +8,7 @@ import { engineSchema } from "./domain.ts";
 import type { MemberProfile } from "./profiles.ts";
 import { memberActivities } from "./activities.ts";
 import { memberTaskQueue, activityQueue } from "./queues.ts";
-import type { MemberStore } from "./store.ts";
+import { ownerAdmissionActivity, type MemberStore } from "./store.ts";
 import { temporalConnectionOptions, type TemporalSettings } from "./temporal-config.ts";
 
 export async function runMemberWorker(store: MemberStore, temporal: TemporalSettings, profiles: ReadonlyMap<string, MemberProfile>,
@@ -21,7 +21,7 @@ export async function runMemberWorker(store: MemberStore, temporal: TemporalSett
     const children = new ChildStore(store.pool);
     workers.push(await Worker.create({
       connection, namespace, taskQueue: memberTaskQueue,
-      activities: { rejectUnstartedAdmission:store.rejectUnstartedAdmission.bind(store), recordAcceptance:store.recordAcceptance.bind(store), rejectAccepted:store.rejectAccepted.bind(store), conversationProgress:progressActivity(store), cancelGenerating:store.cancelGenerating.bind(store), decideLive:answerLive.bind(null,store.pool), cancelLive:cancelLive.bind(null,store.pool),
+      activities: { rejectUnstartedAdmission:store.rejectUnstartedAdmission.bind(store), recordAcceptance:ownerAdmissionActivity(store), rejectAccepted:store.rejectAccepted.bind(store), conversationProgress:progressActivity(store), cancelGenerating:store.cancelGenerating.bind(store), decideLive:answerLive.bind(null,store.pool), cancelLive:cancelLive.bind(null,store.pool),
         reconcileTurn: store.reconcileTurn.bind(store), reconcileChild:children.reconcile.bind(children),
         closeExitedChild: children.closeExitedChild.bind(children), quarantineDelegation: children.quarantineDelegation.bind(children) },
       workflowsPath: fileURLToPath(new URL("./workflow.ts", import.meta.url)),

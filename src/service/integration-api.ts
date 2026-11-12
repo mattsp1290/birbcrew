@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { appendAudit, auditEventTypes, auditLimits } from "./audit.ts";
 import type { MemberClient } from "./client.ts";
-import { MemberStoreError, submitSchema, turnKey } from "./domain.ts";
+import { initiatorColumns, MemberStoreError, ownerInitiator, submitSchema, turnKey } from "./domain.ts";
 import { conversationTurnLimit, workflowGenerationTurnLimit } from "./limits.ts";
 import type { MemberStore } from "./store.ts";
 
@@ -95,12 +95,13 @@ export class IntegrationApi {
   async cancel(input: unknown): Promise<RequestReceipt> {
     const key = keySchema.parse(input);
     // Backfill active legacy turns created after migration17, without inventing an
-    // admission for an unknown UUID or accepting a new payload.
-    await this.store.pool.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest)
-      SELECT t.conversation_id,t.request_id,t.prompt_digest FROM birbcrew_ts.turns t
+    // admission for an unknown UUID or accepting a new payload. Such turns come from
+    // workflow histories older than durable admission, which only the owner could start.
+    await this.store.pool.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest,initiator_kind,initiator_id)
+      SELECT t.conversation_id,t.request_id,t.prompt_digest,$4,$5 FROM birbcrew_ts.turns t
       JOIN birbcrew_ts.conversations c USING(conversation_id)
       WHERE c.owner_id=$1 AND t.conversation_id=$2 AND t.request_id=$3
-      ON CONFLICT(conversation_id,request_id) DO NOTHING`, [key.ownerId,key.conversationId,key.requestId]);
+      ON CONFLICT(conversation_id,request_id) DO NOTHING`, [key.ownerId,key.conversationId,key.requestId,...initiatorColumns(ownerInitiator)]);
     // Atomic ownership check and FK admission requirement. Repeated intent has one receipt.
     await this.store.transaction(async db => {
       // Lock the conversation first, like every workflow-side canceller; inserting the

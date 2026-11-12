@@ -38,6 +38,30 @@ export const checkpointSchema = z.strictObject({
 }).refine((value) => new TextEncoder().encode(JSON.stringify(value)).length <= 4 * 1024 * 1024, "Checkpoint exceeds 4 MiB");
 
 export const commitSchema = claimSchema.extend({ reply: boundedText(65_536), checkpoint: checkpointSchema });
+
+/** What started a request, recorded once with its durable admission. The closed set of kinds:
+ * a later kind is a new member here, a case in initiatorColumns, and a migration widening
+ * request_admissions_initiator_kind_check and audit_events_initiator_check. The owner carries
+ * no id because the conversation's owner_id already names them. */
+export const requestInitiator = z.discriminatedUnion("kind", [z.strictObject({ kind: z.literal("owner") })]);
+export type RequestInitiator = z.infer<typeof requestInitiator>;
+export const initiatorKinds = requestInitiator.options.map(option => option.shape.kind.value);
+export const ownerInitiator: RequestInitiator = Object.freeze({ kind: "owner" });
+
+/** The (initiator_kind, initiator_id) pair stored in request_admissions. */
+export function initiatorColumns(initiator: RequestInitiator): [kind: RequestInitiator["kind"], id: string | null] {
+  switch (initiator.kind) {
+    case "owner": return ["owner", null];
+  }
+}
+
+/** A stored kind this release does not know (after a rollback) is a server fault, never invalid input. */
+export function initiatorFromColumns(kind: string, id: string | null): RequestInitiator {
+  const initiator = requestInitiator.safeParse(id === null ? { kind } : { kind, id });
+  if (!initiator.success) throw new Error("Unknown request initiator");
+  return initiator.data;
+}
+
 export type Member = Pick<z.infer<typeof spawnSchema>, "ownerId" | "engine" | "profile"> & { memberId: string };
 export type Conversation = Member & { conversationId: string };
 export type Checkpoint = z.infer<typeof checkpointSchema>;

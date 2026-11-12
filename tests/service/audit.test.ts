@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { readdir, readFile } from "node:fs/promises";
-import { after, before, test } from "node:test";
+import { after, before, test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { Pool } from "pg";
 import { z } from "zod";
@@ -11,11 +11,11 @@ import { appendAudit, auditCsv, auditEventTypes, auditQuerySchema, auditSettleWi
   type AuditEvent, type AuditEventType, type AuditFact } from "../../src/service/audit.ts";
 import { ChildStore } from "../../src/service/children.ts";
 import type { MemberClient } from "../../src/service/client.ts";
-import type { TurnRequest } from "../../src/service/domain.ts";
+import { initiatorKinds, ownerInitiator, type TurnRequest } from "../../src/service/domain.ts";
 import { createGateway } from "../../src/service/gateway.ts";
 import { IntegrationApi } from "../../src/service/integration-api.ts";
 import { withNativeAdmission } from "../../src/service/native-admission.ts";
-import { MemberStore } from "../../src/service/store.ts";
+import { admittedInitiator, MemberStore } from "../../src/service/store.ts";
 
 const url = process.env.BIRBCREW_TEST_DATABASE_URL;
 if (!url) throw new Error("Set BIRBCREW_TEST_DATABASE_URL to a disposable PostgreSQL database.");
@@ -40,7 +40,7 @@ async function fixture() {
   let cancels = 0;
   const members = {
     async open(input: unknown) { return store.openConversation(input as Parameters<MemberStore["openConversation"]>[0]); },
-    async accept(input: TurnRequest) { await store.recordAcceptance(input); return { requestId: input.requestId }; },
+    async accept(input: TurnRequest) { await store.recordAcceptance(input, ownerInitiator); return { requestId: input.requestId }; },
     async requestStatus(input: Parameters<MemberStore["requestStatus"]>[0]) { return store.requestStatus(input); },
     async decide(input: Parameters<ApprovalStore["decide"]>[0]) { return approvals.decide(input); },
     async cancelPending() { cancels++; },
@@ -175,8 +175,8 @@ test("retries, replays and repeated deliveries never duplicate a fact", async ()
   await Promise.all([store.openConversation(open), store.openConversation(open)]);
   const key = { ownerId, conversationId: open.conversationId };
   const input = { ...key, requestId: randomUUID(), text: "retry me" };
-  await Promise.all([store.recordAcceptance(input), store.recordAcceptance(input)]);
-  await store.recordAcceptance(input);
+  await Promise.all([store.recordAcceptance(input, ownerInitiator), store.recordAcceptance(input, ownerInitiator)]);
+  await store.recordAcceptance(input, ownerInitiator);
   const turn = await store.beginTurn(input);
   assert.equal(turn.kind, "start"); if (turn.kind !== "start") return;
   const scope = { ...open, requestId: input.requestId };
@@ -192,7 +192,7 @@ test("retries, replays and repeated deliveries never duplicate a fact", async ()
 
   // A queued successor: durable intent, repeated intent, then rejection retried by Temporal.
   const queued = { ...key, requestId: randomUUID(), text: "queued" };
-  await store.recordAcceptance(queued);
+  await store.recordAcceptance(queued, ownerInitiator);
   const members = { accept: async () => ({ requestId: queued.requestId }), requestStatus: (k: Parameters<MemberStore["requestStatus"]>[0]) => store.requestStatus(k), cancelPending: async () => {} };
   const api = new IntegrationApi(store, members as unknown as MemberClient);
   const receipt = await api.cancel({ ...key, requestId: queued.requestId });
@@ -202,7 +202,7 @@ test("retries, replays and repeated deliveries never duplicate a fact", async ()
 
   // A started turn cancelled by the workflow, then reconciled twice as uncertain.
   const running = { ...key, requestId: randomUUID(), text: "running" };
-  await store.recordAcceptance(running);
+  await store.recordAcceptance(running, ownerInitiator);
   const execution = { workflowRunId: randomUUID(), activityId: "retry", attempt: 1 };
   assert.equal((await store.beginTurn(running, execution)).kind, "start");
   assert.equal(await store.cancelGenerating(running), true);
@@ -213,7 +213,7 @@ test("retries, replays and repeated deliveries never duplicate a fact", async ()
   // A failed Pi delegation is quarantined, retried by Temporal, and never reconciled.
   const delegated = { ownerId, conversationId: randomUUID(), requestId: randomUUID(), text: "delegate" };
   await store.openConversation({ ownerId, memberId: member.memberId, conversationId: delegated.conversationId });
-  await store.recordAcceptance(delegated);
+  await store.recordAcceptance(delegated, ownerInitiator);
   assert.equal((await store.beginTurn(delegated, execution)).kind, "start");
   const conversation = await store.getConversation({ ownerId, conversationId: delegated.conversationId });
   await new ChildStore(pool).quarantineDelegation(conversation, delegated, execution.workflowRunId);
@@ -499,7 +499,7 @@ test("a Claude turn recovered to a pending decision is finished once, by its com
   const conversationId = randomUUID();
   await store.openConversation({ ownerId, memberId: member.memberId, conversationId });
   const request = { ownerId, conversationId, requestId: randomUUID(), text: "recover me" };
-  await store.recordAcceptance(request);
+  await store.recordAcceptance(request, ownerInitiator);
   const run = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
   const start = await store.beginTurn(request, run);
   assert.equal(start.kind, "start"); if (start.kind !== "start") return;
@@ -532,7 +532,9 @@ test("a Claude turn recovered to a pending decision is finished once, by its com
     "request.accepted": 1, "request.finished": 1, "work_item.committed": 1 });
 });
 
-test("migration 21 upgrades a v20 database with rows while a native turn holds its admission", async (t) => {
+const sql = new URL("../../src/service/sql/", import.meta.url);
+/** A separate database migrated only up to `version`, as that release left it; dropped after the test. */
+async function databaseAt(t: TestContext, version: number) {
   const source = new URL(url!);
   const admin = new Pool({ connectionString: source.href });
   const database = "audit_upgrade_" + randomUUID().replaceAll("-", "");
@@ -548,15 +550,19 @@ test("migration 21 upgrades a v20 database with rows while a native turn holds i
       await admin.query(`DROP DATABASE ${database}`);
     } finally { await admin.end(); }
   });
-  const sql = new URL("../../src/service/sql/", import.meta.url);
   await upgraded.query("CREATE SCHEMA birbcrew_ts");
   await upgraded.query("CREATE TABLE birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
   for (const file of (await readdir(sql)).sort()) {
-    const version = Number(file.split("-")[0]);
-    if (version > 20) continue;
+    const applied = Number(file.split("-")[0]);
+    if (applied > version) continue;
     await upgraded.query(await readFile(new URL(file, sql), "utf8"));
-    await upgraded.query("INSERT INTO birbcrew_ts.schema_versions VALUES ($1)", [version]);
+    await upgraded.query("INSERT INTO birbcrew_ts.schema_versions VALUES ($1)", [applied]);
   }
+  return upgraded;
+}
+
+test("migration 21 upgrades a v20 database with rows while a native turn holds its admission", async (t) => {
+  const upgraded = await databaseAt(t, 20);
   // Rows as the v20 service wrote them.
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
   const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
@@ -596,7 +602,7 @@ test("migration 21 upgrades a v20 database with rows while a native turn holds i
   });
 
   // Pre-existing conversations bind audit rows like new ones.
-  await current.recordAcceptance({ ownerId, conversationId, requestId: randomUUID(), text: "after upgrade" });
+  await current.recordAcceptance({ ownerId, conversationId, requestId: randomUUID(), text: "after upgrade" }, ownerInitiator);
   const sibling = await current.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
   const client = await upgraded.connect();
   try {
@@ -609,4 +615,108 @@ test("migration 21 upgrades a v20 database with rows while a native turn holds i
   const { rows: [identity] } = await upgraded.query(`SELECT seqcache::integer AS cache FROM pg_sequence
     WHERE seqrelid=pg_get_serial_sequence('birbcrew_ts.audit_events','event_id')::regclass`);
   assert.equal(identity.cache, 1);
+});
+
+test("migration 23 records a v21 database's admissions as owner-initiated without waiting for a native turn", async (t) => {
+  const upgraded = await databaseAt(t, 21);
+  // Rows as the v21 service wrote them: a started turn and two queued requests, all admitted.
+  const ownerId = "owner-" + randomUUID(), conversationId = randomUUID();
+  const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
+    (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi',$3) RETURNING member_id`, [ownerId, randomUUID(), profile]);
+  await upgraded.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)",
+    [ownerId, memberId, conversationId]);
+  const [running, queued, rejected] = ["running at upgrade", "queued at upgrade", "rejected after upgrade"]
+    .map(text => ({ ownerId, conversationId, requestId: randomUUID(), text }));
+  for (const request of [running, queued, rejected]) {
+    await upgraded.query("INSERT INTO birbcrew_ts.request_admissions (conversation_id,request_id,prompt_digest) VALUES ($1,$2,$3)",
+      [conversationId, request.requestId, createHash("sha256").update(request.text).digest()]);
+  }
+
+  // Only request_admissions is locked. Neither a rewrite nor a scan runs under that lock.
+  const db = await upgraded.connect();
+  try {
+    await db.query("BEGIN");
+    const table = `SELECT pg_relation_filenode('birbcrew_ts.request_admissions') AS file,
+      pg_stat_get_xact_numscans('birbcrew_ts.request_admissions'::regclass)::integer AS scans`;
+    const { rows: [before] } = await db.query(table);
+    await db.query(await readFile(new URL("023-request-initiator.sql", sql), "utf8"));
+    assert.deepEqual((await db.query(table)).rows[0], before);
+    const { rows } = await db.query(`SELECT c.relname AS relation, l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
+      WHERE l.pid=pg_backend_pid() AND c.relkind='r' AND c.relnamespace='birbcrew_ts'::regnamespace ORDER BY 1,2`);
+    assert.deepEqual(rows, [{ relation: "request_admissions", mode: "AccessExclusiveLock" },
+      { relation: "request_admissions", mode: "ShareRowExclusiveLock" }]);
+  } finally {
+    await db.query("ROLLBACK");
+    db.release();
+  }
+
+  const current = new MemberStore(upgraded);
+  const execution = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
+  const start = await current.beginTurn(running, execution);
+  assert.equal(start.kind, "start"); if (start.kind !== "start") return;
+  await upgraded.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+    VALUES ($1,$2,$3,$4,$5,1)`, [conversationId, running.requestId, start.token, execution.workflowRunId, execution.activityId]);
+  await withNativeAdmission(upgraded, { ...running, token: start.token, execution }, AbortSignal.timeout(30_000), async () => {
+    // The admission transaction is the one left idle in transaction; its stop polling commits each statement.
+    const { rows } = await upgraded.query(`SELECT DISTINCT c.relname AS relation, l.mode FROM pg_locks l
+      JOIN pg_class c ON c.oid=l.relation JOIN pg_stat_activity a ON a.pid=l.pid
+      WHERE a.datname=current_database() AND a.state='idle in transaction'
+        AND c.relkind='r' AND c.relnamespace='birbcrew_ts'::regnamespace ORDER BY 1,2`);
+    assert.deepEqual(rows, [
+      { relation: "conversations", mode: "AccessShareLock" }, { relation: "members", mode: "AccessShareLock" },
+      { relation: "native_launches", mode: "AccessShareLock" }, { relation: "native_stop_requests", mode: "AccessShareLock" },
+      { relation: "recovery_control", mode: "AccessShareLock" }, { relation: "turns", mode: "RowShareLock" },
+    ]);
+    const migrated = await Promise.race([current.migrate().then(() => true), delay(5_000, false)]);
+    assert.equal(migrated, true, "migration 23 must not wait for a running native turn");
+    await current.appendText({ ownerId, conversationId, requestId: running.requestId, token: start.token },
+      running.requestId + "/assistant", 0, "still running");
+  });
+
+  const { rows: admissions } = await upgraded.query(`SELECT initiator_kind AS kind, initiator_id AS id, count(*)::integer AS n
+    FROM birbcrew_ts.request_admissions GROUP BY 1,2`);
+  assert.deepEqual(admissions, [{ kind: "owner", id: null, n: 3 }]);
+  assert.deepEqual(await admittedInitiator(upgraded, queued), ownerInitiator);
+  // NOT VALID is what spares the scan under the exclusive lock; the scan counter alone needs track_counts.
+  const { rows: constraints } = await upgraded.query(`SELECT conname AS name, convalidated AS validated FROM pg_constraint
+    WHERE conrelid='birbcrew_ts.request_admissions'::regclass AND conname LIKE 'request_admissions_initiator%' ORDER BY 1`);
+  assert.deepEqual(constraints, [{ name: "request_admissions_initiator_id_check", validated: false },
+    { name: "request_admissions_initiator_kind_check", validated: false }]);
+  // No default survives: a writer that does not name an initiator fails instead of recording the owner.
+  const { rows: [column] } = await upgraded.query(`SELECT column_default FROM information_schema.columns
+    WHERE table_schema='birbcrew_ts' AND table_name='request_admissions' AND column_name='initiator_kind'`);
+  assert.equal(column.column_default, null);
+  const insert = "INSERT INTO birbcrew_ts.request_admissions (conversation_id,request_id,prompt_digest%s) VALUES ($1,$2,$3%s)";
+  const digest = createHash("sha256").update("direct").digest();
+  await assert.rejects(upgraded.query(insert.replace(/%s/g, ""), [conversationId, randomUUID(), digest]),
+    { code: "23502", column: "initiator_kind" });
+  // The previous release's v1 cancel backfill fails too, even for a request already admitted: NOT NULL
+  // is checked before the conflict.
+  await assert.rejects(upgraded.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest)
+    SELECT t.conversation_id,t.request_id,t.prompt_digest FROM birbcrew_ts.turns t WHERE t.conversation_id=$1 AND t.request_id=$2
+    ON CONFLICT(conversation_id,request_id) DO NOTHING`, [conversationId, running.requestId]), { code: "23502" });
+  for (const [kind, id, constraint] of [["routine", "routine-1", "request_admissions_initiator_kind_check"],
+    ["owner", ownerId, "request_admissions_initiator_id_check"]]) {
+    await assert.rejects(upgraded.query(insert.replace("%s", ",initiator_kind,initiator_id").replace("%s", ",$4,$5"),
+      [conversationId, randomUUID(), digest, kind, id]), { code: "23514", constraint });
+  }
+  // The initiator is fixed at admission; the rest of the row still changes.
+  await assert.rejects(upgraded.query("UPDATE birbcrew_ts.request_admissions SET initiator_id=$3 WHERE conversation_id=$1 AND request_id=$2",
+    [conversationId, queued.requestId, ownerId]), { code: "23514", message: /immutable/ });
+  await current.rejectAccepted(rejected, "predecessor_cancelled");
+  await current.commitTurn({ ownerId, conversationId, requestId: running.requestId, token: start.token, reply: "still running",
+    checkpoint: { version: 1, engine: "pi", state: {} } });
+  const { rows: events } = await upgraded.query(`SELECT request_id AS "requestId", initiator_kind AS kind, initiator_id AS id
+    FROM birbcrew_ts.audit_events WHERE event_type='request.finished' ORDER BY event_id`);
+  assert.deepEqual(events, [rejected, running].map(({ requestId }) => ({ requestId, kind: "owner", id: ownerId })));
+});
+
+test("the initiator CHECKs and the TypeScript initiator type name the same kinds", async () => {
+  const { rows } = await pool.query<{ definition: string }>(`SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
+    WHERE (conrelid,conname) IN (('birbcrew_ts.request_admissions'::regclass,'request_admissions_initiator_kind_check'),
+      ('birbcrew_ts.audit_events'::regclass,'audit_events_initiator_check'))`);
+  assert.equal(rows.length, 2);
+  for (const { definition } of rows) {
+    assert.deepEqual([...new Set([...definition.matchAll(/'([a-z_]+)'/g)].map(match => match[1]))].sort(), [...initiatorKinds].sort(), definition);
+  }
 });

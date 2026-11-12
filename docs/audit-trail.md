@@ -219,7 +219,30 @@ that queues behind the migration, so every wait ends. Spawns and opens are short
 except that an open with project-note capture configured runs its `git` and `bn`
 commands, each limited to 10 s, before it commits.
 
-The table carries the `recovery_write_barrier` trigger, so held installations
+Migration 23 adds the initiator to `request_admissions` and records every existing
+admission as owner-initiated. It locks only that table, in `ACCESS EXCLUSIVE` mode,
+until the migration commits. Its constant default fills existing rows from the
+catalog, without a rewrite or scan, and its CHECK constraints are added `NOT VALID`,
+so the lock is held briefly. It waits for transactions already using the table:
+admissions, rejections, cancellation intents, turn starts, reconciliation, status
+reads and request-tied audit appends, none of which waits for application work
+while holding it. A running native turn's admission transaction holds `ROW SHARE`
+on `turns` (or `native_launches` for Codex) and `ACCESS SHARE` on a few other
+tables, never on `request_admissions`, so a live upgrade does not wait for native
+turns. Like migration 21 it sets no `lock_timeout`: a session outside Crew that
+holds a lock on the table, such as an open `psql` transaction or a running
+`pg_dump`, delays it, and statements on the table queue behind it meanwhile.
+
+The migration then drops the default, so every admission must name its initiator.
+Processes of an earlier release fail rather than record one without it. Their
+admission activity fails with a not-null violation and Temporal retries it; if no
+upgraded worker takes a retry within the activity's 60 s schedule, the
+conversation's workflow fails, as after any failed admission. Their v1 cancel
+backfills admissions the same way and fails for every request that has a turn,
+even one already admitted. Stop every process of the previous release before the
+first upgraded one starts, as for migration 21.
+
+The audit table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest
 inventory counts its rows. `pg_dump`/`pg_restore` keep the rows and the identity
 position. Restore creates the append-only trigger after it loads the data, so the
@@ -364,7 +387,15 @@ By direct SQL it checks:
   it takes on existing tables, that it completes while a native turn holds its
   admission and that turn still writes to its conversation, and that the identity's
   cache is 1;
-- that the TypeScript and SQL registries match.
+- migration 23 on a version-21 database with admissions: that it locks only
+  `request_admissions` and neither rewrites nor scans it, that a running native
+  turn holds no lock on that table, that the migration completes while the turn
+  holds its admission, that existing admissions become owner-initiated with no
+  `initiator_id`, that an admission naming no initiator (including the previous
+  release's cancel backfill), an unknown kind, or an owner with an ID is refused,
+  and that a recorded initiator cannot be updated;
+- that the TypeScript and SQL registries match, for event types and for
+  initiator kinds.
 
 Run the suites one after another, as above. Gateway-starting suites
 (`audit.test.ts`, `integration-api.test.ts`) each run the background cancellation
