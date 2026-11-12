@@ -10,12 +10,22 @@ import { createGateway } from "../../src/service/gateway.ts";
 import type { MemberStore } from "../../src/service/store.ts";
 
 // No database or Temporal: authentication must reject before either is touched. The gateway's background loops
-// (cancellation outbox, routine dispatcher) query the store on their own timers, so only calls made inside a
-// request's async context are recorded. The empty result answers those loops: nothing to flush, recovery not active.
+// (cancellation outbox, routine dispatcher) read the store on their own timers. Those two reads are the only calls
+// allowed, and only outside a request's async context; the empty result means nothing to flush and recovery not
+// active, so the loops stop there. Anything else is recorded, with the request that caused it when one is known
+// (request and socket event listeners run outside that context).
+const background = ["FROM birbcrew_ts.integration_cancellations x JOIN", "FROM birbcrew_ts.recovery_control WHERE singleton"];
 const cause = new AsyncLocalStorage<string>();
 const reached: string[] = [];
-const record = (target: string) => { const request = cause.getStore(); if (request) reached.push(`${request} -> ${target}`); };
-const store = { pool: { async query() { record("store"); return { rows: [], rowCount: 0 }; } } } as unknown as MemberStore;
+const record = (target: string, sql = "") => {
+  const request = cause.getStore();
+  if (request || !background.some((read) => sql.includes(read))) reached.push(`${request ?? "no request"} -> ${target}`);
+};
+const store = { pool: {
+  async query(sql: string) { record("store", sql); return { rows: [], rowCount: 0 }; },
+  // The /v1/health database probe opens its own connection from these options and swallows the failure.
+  get options() { record("store.pool.options"); return { host: "127.0.0.1", port: 1 }; },
+} } as unknown as MemberStore;
 const members = new Proxy({}, { get: (_, name) => () => { record("members." + String(name)); throw new Error("unreachable"); } }) as MemberClient;
 
 const token = randomUUID();
@@ -71,8 +81,9 @@ test("every route rejects requests without a valid bearer token before reaching 
   const port = await listen(t), base = `http://127.0.0.1:${port}`;
   for (const [method, path] of routes) {
     for (const authorization of [undefined, "", "Bearer ", "Bearer " + randomUUID(), "Basic " + token, "bearer " + token]) {
+      // Invalid JSON, so a body read before authentication would answer 400.
       const response = await fetch(base + path, { method, headers: authorization === undefined ? {} : { Authorization: authorization },
-        ...(method === "POST" || method === "PUT" ? { body: "{}" } : {}) });
+        ...(method === "POST" || method === "PUT" ? { body: "{" } : {}) });
       assert.equal(response.status, 401, `${method} ${path} with ${authorization === undefined ? "no" : JSON.stringify(authorization.split(" ")[0])} credential`);
       assert.deepEqual(await response.json(), { error: "authentication_required" });
     }
@@ -87,7 +98,9 @@ test("every route rejects requests without a valid bearer token before reaching 
   assert.deepEqual(reached, [], "no unauthenticated request reached the store or Temporal client");
 
   assert.equal((await fetch(base + "/v1/capabilities", { headers: { Authorization: "Bearer " + token } })).status, 200);
-  // Positive control: a request that does reach the store is recorded, so the empty list above means something.
+  // Positive controls: requests that do reach the store or the Temporal client are recorded, so the empty list above
+  // means something.
   assert.equal((await fetch(base + "/v1/members", { headers: { Authorization: "Bearer " + token } })).status, 200);
-  assert.deepEqual(reached, ["GET /v1/members -> store"]);
+  assert.equal((await fetch(base + "/v1/health", { headers: { Authorization: "Bearer " + token } })).status, 503);
+  assert.deepEqual(reached, ["GET /v1/members -> store", "GET /v1/health -> store.pool.options", "GET /v1/health -> members.temporalReachable"]);
 });
