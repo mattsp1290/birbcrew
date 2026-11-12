@@ -226,6 +226,8 @@ def test_executor_image_pins_the_locked_codex_packages():
             dockerfile,
         )
     assert f"/codex-{version}-$platform.tgz" in dockerfile
+    for argument in ("PYTHON_IMAGE", "UV_IMAGE"):
+        assert f'case "${argument}" in *@sha256:*) ;;' in dockerfile
 
 
 def test_interrupt_uses_configured_codex_socket(setup, daemon, monkeypatch):

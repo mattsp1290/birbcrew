@@ -56,7 +56,7 @@ Forge reads receipts through Crew's contract module, and its web client keeps it
 
 ## Build the image
 
-`packaging/executor.Dockerfile` uses the same build arguments as the root Dockerfile: `PYTHON_IMAGE` (Python 3.13 Debian slim) and `UV_IMAGE`. Pin both by digest. For builds that target more than one architecture, use the multi-platform index digest.
+`packaging/executor.Dockerfile` uses the same build arguments as the root Dockerfile: `PYTHON_IMAGE` (Python 3.13 Debian slim) and `UV_IMAGE`. Pin both by digest; the build fails if either lacks an `@sha256:` digest. For builds that target more than one architecture, use the multi-platform index digest.
 
 What the image contains:
 - The locked Python dependencies, installed under `/venv`.

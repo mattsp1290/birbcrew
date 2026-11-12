@@ -3,7 +3,12 @@ ARG UV_IMAGE
 FROM ${UV_IMAGE} AS uv
 
 FROM ${PYTHON_IMAGE} AS codex
+ARG PYTHON_IMAGE
+ARG UV_IMAGE
 ARG TARGETARCH
+# The final stage copies from this stage, so every build checks that both bases are pinned.
+RUN case "$PYTHON_IMAGE" in *@sha256:*) ;; *) echo "Pin PYTHON_IMAGE by digest" >&2; exit 1 ;; esac \
+    && case "$UV_IMAGE" in *@sha256:*) ;; *) echo "Pin UV_IMAGE by digest" >&2; exit 1 ;; esac
 # The platform packages and their integrity values must match package-lock.json.
 RUN set -eu; \
     case "$TARGETARCH" in \
