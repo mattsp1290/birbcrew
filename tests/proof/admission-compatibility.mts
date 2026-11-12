@@ -8,7 +8,8 @@ import { Client, Connection } from "@temporalio/client";
 import { historyFromJSON, historyToJSON } from "@temporalio/common/proto-utils";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { Pool } from "pg";
-import { MemberStore } from "../../src/service/store.ts";
+import { MemberStore, ownerAdmissionActivity } from "../../src/service/store.ts";
+import type { TurnRequest } from "../../src/service/domain.ts";
 import { MemberClient } from "../../src/service/client.ts";
 import { progressActivity } from "../../src/service/progress-activity.ts";
 import { memberTaskQueue, activityQueue } from "../../src/service/queues.ts";
@@ -50,8 +51,8 @@ if(process.argv[2]==="offline-replay"){
     for(const reconciliationOutage of [false,true]){
       let committedAdmissions=0,reconciliationAttempts=0;
       const worker=start(await Worker.create({connection:native,taskQueue:memberTaskQueue,workflowsPath,activities:{
-        recordAcceptance:async(...args:Parameters<MemberStore["recordAcceptance"]>)=>{
-          await store.recordAcceptance(...args);committedAdmissions++;
+        recordAcceptance:async(request:TurnRequest)=>{
+          await ownerAdmissionActivity(store)(request);committedAdmissions++;
           // The write is real and durable. Only the activity acknowledgement is lost.
           // Retrying must not turn the durable accepted row into executable work.
           throw new Error("Injected loss after committed admission");

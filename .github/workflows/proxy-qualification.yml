@@ -29,6 +29,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:proxy
+      - run: npm run test:telemetry
       - run: npm test
   proxy-service-restart:
     runs-on: ubuntu-24.04

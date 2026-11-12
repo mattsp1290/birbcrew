@@ -9,14 +9,19 @@ import { EventType as E, type Event } from "@ag-ui/core";
 import { RunAgentInputSchema } from "@ag-ui/core/schemas";
 import { EventEncoder } from "@ag-ui/encoder";
 import { Client, Connection, WorkflowUpdateFailedError } from "@temporalio/client";
-import { Pool } from "pg";
+import { Client as PgClient, Pool, type PoolOptions } from "pg";
 import { z } from "zod";
 import { decisionSchema } from "./approvals.ts";
+import { AuditUnsettledError, auditCsv, auditParameterNames, auditQuerySchema, readAudit } from "./audit.ts";
 import { MemberClient } from "./client.ts";
+import { listGrants, revokeGrant } from "./grants.ts";
+import { MemoryApi, memoryListParameterNames } from "./memories.ts";
 import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from "./domain.ts";
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
 import { MemberStore } from "./store.ts";
 import { IntegrationApi, integrationCapabilities } from "./integration-api.ts";
+import { firingParameterNames, RoutineApi, RoutineDispatcher, routineListParameterNames, type Clock } from "./routines.ts";
+import { TemporalSettingsError, temporalConnectionOptions, temporalSettings } from "./temporal-config.ts";
 
 const credentials = z.record(z.string().regex(/^[0-9a-f]{64}$/), z.string().min(1));
 const encoder = new EventEncoder();
@@ -28,7 +33,11 @@ class HttpError extends Error {
   constructor(status: number, reason: string) { super(reason); this.status = status; }
 }
 
-async function body(request: IncomingMessage): Promise<unknown> {
+// Refuses malformed UTF-8 instead of replacing it with U+FFFD, and keeps a BOM for JSON.parse to refuse.
+const exactUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/** `exact` refuses a body that is not well-formed UTF-8; otherwise malformed bytes become U+FFFD. */
+async function body(request: IncomingMessage, exact = false): Promise<unknown> {
   const chunks: Buffer[] = [];
   let bytes = 0;
   for await (const chunk of request.iterator({ destroyOnReturn: false })) {
@@ -39,17 +48,67 @@ async function body(request: IncomingMessage): Promise<unknown> {
     }
     chunks.push(chunk);
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+  const raw = Buffer.concat(chunks);
+  try { return JSON.parse(exact ? exactUtf8.decode(raw) : raw.toString("utf8")); }
   catch { throw new HttpError(400, "invalid_json"); }
 }
 
-function json(response: ServerResponse, status: number, data: unknown) {
-  response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+function json(response: ServerResponse, status: number, data: unknown, headers: Record<string, string> = {}) {
+  response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
   response.end(JSON.stringify(data));
 }
 
 function isEmpty(value: unknown) {
   return value == null || (typeof value === "object" && !Array.isArray(value) && !Object.keys(value).length);
+}
+
+// Strict schemas see every parameter; a repeated one is ambiguous, not last-wins.
+function searchParams(url: URL): Record<string, string> {
+  const entries = [...url.searchParams];
+  if (new Set(entries.map(([key]) => key)).size !== entries.length) throw new HttpError(400, "invalid_input");
+  return Object.fromEntries(entries);
+}
+
+export const probeTimeout = 2_000;
+// A slow or failing dependency becomes undefined, so no driver text or address is reported.
+async function probe<T>(check: () => Promise<T>): Promise<T | undefined> {
+  const timer = new AbortController();
+  try { return await Promise.race([check(), delay(probeTimeout, undefined, { signal: timer.signal })]); }
+  catch { return undefined; }
+  finally { timer.abort(); }
+}
+
+// probe() only ends the HTTP wait. The read itself uses its own connection, never the pool: pool.connect() has
+// no bound (real routes keep an unbounded wait), so a connect stalled on a silent or unreachable host would pin
+// the shared probe and a pool slot until the OS gave up, or forever. Settings are the ones pg-pool hands its own
+// clients, plus password, which pg-pool makes non-enumerable so a spread drops it. connectionTimeoutMillis covers
+// TCP, TLS and authentication; statement_timeout makes the server cancel a lock-blocked read; query_timeout
+// covers a silent socket; end() gets the same bound before the socket is destroyed. So this settles within
+// 3 * probeTimeout whatever the server does.
+async function readSchemaVersion(options: PoolOptions): Promise<number | null> {
+  const client = new PgClient({ ...options, password: options.password,
+    connectionTimeoutMillis: probeTimeout, statement_timeout: probeTimeout, query_timeout: probeTimeout });
+  client.on("error", () => {}); // a socket error after the probe gave up must not crash the gateway
+  try {
+    await client.connect();
+    const { rows: [row] } = await client.query<{ version: number | null }>("SELECT max(version) AS version FROM birbcrew_ts.schema_versions");
+    return row.version;
+  } finally {
+    const ended = await Promise.race([client.end().then(() => true), delay(probeTimeout, false, { ref: false })]);
+    if (!ended) client.connection.stream.destroy();
+  }
+}
+
+async function health(schemaVersion: () => Promise<number | null>, members: MemberClient) {
+  const [version, temporal] = await Promise.all([
+    probe(schemaVersion),
+    probe(async () => { await members.temporalReachable(Date.now() + probeTimeout); return true; }),
+  ]);
+  const database = typeof version === "number" ? "ready" : "unavailable";
+  return {
+    apiVersion: "1", status: database === "ready" && temporal ? "ready" : "not_ready",
+    dependencies: { database: { status: database, schemaVersion: version ?? null }, temporal: { status: temporal ? "ready" : "unavailable" } },
+  } as const;
 }
 
 async function observe(
@@ -118,9 +177,24 @@ async function observe(
   }
 }
 
-export function createGateway(store: MemberStore, members: MemberClient, owners: Record<string, string>) {
+function queryOf(url: URL, names: readonly string[]) {
+  const given = [...url.searchParams.keys()];
+  if (new Set(given).size !== given.length || !given.every(name => names.includes(name))) throw new HttpError(400, "invalid_input");
+  return Object.fromEntries(url.searchParams);
+}
+
+/** `clock` drives routine schedules; tests inject one. */
+export function createGateway(store: MemberStore, members: MemberClient, owners: Record<string, string>,
+  { clock = () => new Date() }: { clock?: Clock } = {}) {
   const integration = new IntegrationApi(store, members);
   const accounts = Object.entries(credentials.parse(owners)).map(([hash, actor]) => ({ digest: Buffer.from(hash, "hex"), actor }));
+  // One database probe at a time, shared by concurrent health calls, so polling holds at most one probe connection.
+  // A stalled probe pins this slot only until readSchemaVersion's own bounds end it.
+  let databaseProbe: Promise<number | null> | undefined;
+  const schemaVersion = () => databaseProbe ??= readSchemaVersion(store.pool.options).finally(() => { databaseProbe = undefined; });
+  const routines = new RoutineApi(store, clock);
+  const memories = new MemoryApi(store);
+  const dispatcher = new RoutineDispatcher({ store, members, integration, owners: accounts.map(({ actor }) => actor), clock });
   async function route(request: IncomingMessage, response: ServerResponse) {
     const auth = request.headers.authorization;
     if (!auth?.startsWith("Bearer ") || auth.length === 7) throw new HttpError(401, "authentication_required");
@@ -131,6 +205,72 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
     const versioned = url.pathname.startsWith("/v1/");
     const path = versioned ? url.pathname.slice(3) : url.pathname;
     if (versioned && path === "/capabilities" && request.method === "GET") return json(response, 200, integrationCapabilities);
+    if (versioned && path === "/health" && request.method === "GET") {
+      z.strictObject({}).parse(searchParams(url));
+      const report = await health(schemaVersion, members);
+      return json(response, report.status === "ready" ? 200 : 503, report);
+    }
+    if (versioned && path === "/members" && request.method === "GET") return json(response, 200, await integration.listMembers(ownerId, searchParams(url)));
+    if (versioned && path === "/conversations" && request.method === "GET") {
+      return json(response, 200, await integration.listConversations(ownerId, searchParams(url)));
+    }
+    if (versioned && path === "/audit") {
+      if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
+      const query = auditQuerySchema.parse(queryOf(url, auditParameterNames));
+      const page = await readAudit(store.pool, ownerId, query);
+      if (query.format === "json") return json(response, 200, { apiVersion: "1", ...page });
+      response.writeHead(200, { "Content-Type": "text/csv; charset=utf-8", "Cache-Control": "no-store",
+        "Content-Disposition": 'attachment; filename="audit.csv"', "Audit-Next-After": page.nextAfter, "Audit-Has-More": String(page.hasMore) });
+      return response.end(auditCsv(page.events));
+    }
+    const routineRoute = versioned && /^\/routines(?:\/([^/]+)(?:\/(enable|disable|firings))?)?$/.exec(path);
+    if (routineRoute) {
+      const [, id, action] = routineRoute;
+      if (id === undefined) {
+        if (request.method === "POST") return json(response, 201, await routines.create(ownerId, await body(request)));
+        if (request.method === "GET") return json(response, 200, await routines.list(ownerId, queryOf(url, routineListParameterNames)));
+        throw new HttpError(405, "method_not_allowed");
+      }
+      const routineId = z.uuid().parse(id);
+      if (action === "firings" && request.method === "GET") {
+        return json(response, 200, await routines.firings(ownerId, routineId, queryOf(url, firingParameterNames)));
+      }
+      if ((action === "enable" || action === "disable") && request.method === "POST") {
+        z.strictObject({}).parse(await body(request));
+        return json(response, 200, await routines.change(ownerId, routineId, action));
+      }
+      if (action === undefined && request.method === "GET") return json(response, 200, await routines.get(ownerId, routineId));
+      if (action === undefined && request.method === "DELETE") return json(response, 200, await routines.change(ownerId, routineId, "delete"));
+      throw new HttpError(405, "method_not_allowed");
+    }
+    const memoryRoute = versioned && /^\/memories(?:\/([^/]+))?$/.exec(path);
+    if (memoryRoute) {
+      const [, id] = memoryRoute;
+      if (id === undefined) {
+        if (request.method === "POST") {
+          if (url.search) throw new HttpError(400, "invalid_input");
+          return json(response, 201, await memories.create(ownerId, await body(request, true)));
+        }
+        if (request.method === "GET") return json(response, 200, await memories.list(ownerId, queryOf(url, memoryListParameterNames)));
+        throw new HttpError(405, "method_not_allowed");
+      }
+      const memoryId = z.uuid().parse(id);
+      if (url.search) throw new HttpError(400, "invalid_input");
+      if (request.method === "GET") return json(response, 200, await memories.get(ownerId, memoryId));
+      if (request.method === "DELETE") return json(response, 200, await memories.delete(ownerId, memoryId));
+      throw new HttpError(405, "method_not_allowed");
+    }
+    const grantRoute = versioned && /^\/members\/([^/]+)\/grants(?:\/([^/]+)\/(revoke))?$/.exec(path);
+    if (grantRoute) {
+      if (url.search) throw new HttpError(400, "invalid_input");
+      const memberId = z.uuid().parse(grantRoute[1]);
+      if (!grantRoute[2] && request.method === "GET") return json(response, 200, await listGrants(store.pool, { ownerId, memberId }));
+      if (grantRoute[2] && request.method === "POST") {
+        z.strictObject({}).parse(await body(request));
+        return json(response, 200, await revokeGrant(store.pool, { ownerId, memberId, grantId: z.uuid().parse(grantRoute[2]) }));
+      }
+      throw new HttpError(405, "method_not_allowed");
+    }
     const requestRoute = versioned && /^\/conversations\/([^/]+)\/requests(?:\/([^/]+)(\/cancel)?)?$/.exec(path);
     if (requestRoute) {
       const conversationId = z.uuid().parse(requestRoute[1]);
@@ -209,18 +349,30 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       if (error instanceof z.ZodError) return json(response, 400, { error: "invalid_input" });
       if (error instanceof MemberStoreError) return json(response, error.code === "not_found" ? 404 : 409, { error: error.code });
       if (error instanceof WorkflowUpdateFailedError) return json(response, 409, { error: "update_rejected" });
+      if (error instanceof AuditUnsettledError) return json(response, 503, { error: "audit_unsettled" }, { "Retry-After": "1" });
       return json(response, 503, { error: "retry_same_request" });
     });
   });
-  let timer: ReturnType<typeof setInterval> | undefined;
+  // Background loops: the cancellation outbox and the routine dispatcher. Neither keeps the
+  // process alive; each skips a beat while its previous pass still runs.
+  const timers: ReturnType<typeof setInterval>[] = [];
   server.once("listening", () => {
     const flush = () => { void integration.flushCancellations().catch(() => {}); };
-    timer = setInterval(flush, 1000);
-    timer.unref();
-    flush();
+    const dispatch = () => { void dispatcher.tick().catch(() => {}); };
+    for (const loop of [flush, dispatch]) {
+      const timer = setInterval(loop, 1000);
+      timer.unref();
+      timers.push(timer);
+      loop();
+    }
   });
-  server.once("close", () => { if (timer) clearInterval(timer); });
-  return server;
+  let stopping = Promise.resolve();
+  server.once("close", () => {
+    for (const timer of timers) clearInterval(timer);
+    stopping = dispatcher.stop();
+  });
+  // Settles once the close has ended the dispatcher's pass; await it before closing the pool.
+  return Object.assign(server, { stopped: () => stopping });
 }
 
 const configSchema = z.strictObject({ tokenHashes: credentials, port: z.number().int().min(0).max(65535) });
@@ -228,12 +380,13 @@ async function main() {
   const file = process.argv[2], database = process.env.BIRBCREW_DATABASE_URL;
   if (!file || !database) throw new Error("Set BIRBCREW_DATABASE_URL and supply the gateway configuration file");
   const config = configSchema.parse(JSON.parse(await readFile(file, "utf8")));
+  const temporal = temporalSettings(process.env);
   const pool = new Pool({ connectionString: database });
-  const connection = await Connection.connect({ address: process.env.BIRBCREW_TEMPORAL_ADDRESS ?? "127.0.0.1:7233" });
+  const connection = await Connection.connect(await temporalConnectionOptions(temporal));
   try {
     const store = new MemberStore(pool);
     await store.migrate();
-    const server = createGateway(store, new MemberClient(store, new Client({ connection })), config.tokenHashes);
+    const server = createGateway(store, new MemberClient(store, new Client({ connection, namespace: temporal.namespace })), config.tokenHashes);
     server.listen(config.port, "127.0.0.1");
     await once(server, "listening");
     const address = server.address();
@@ -241,7 +394,7 @@ async function main() {
     const stop = () => { server.close(); server.closeAllConnections(); };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
-    try { await once(server, "close"); }
+    try { await once(server, "close"); await server.stopped(); }
     finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
   } finally {
     await connection.close();
@@ -250,5 +403,8 @@ async function main() {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  main().catch(() => { console.error("Gateway could not start"); process.exitCode = 1; });
+  main().catch((error: unknown) => {
+    console.error(error instanceof TemporalSettingsError ? error.message : "Gateway could not start");
+    process.exitCode = 1;
+  });
 }
