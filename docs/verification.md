@@ -106,3 +106,22 @@ Temporal run IDs. A Pi child also carries its child ID. Completed spans from
 the same conversation and request share a trace ID across processes and worker
 replacements. The exporter only records correlation IDs, span relationships,
 timing and status.
+
+Set `BIRBCREW_OTLP_TRACES_ENDPOINT` to also send the same spans over OTLP/HTTP
+JSON to a collector. Give the full traces URL, such as
+`http://127.0.0.1:4318/v1/traces`; it is used as given. Either sink, both or
+neither may be set. Spans come from the member worker and its native turn
+runners, but the gateway also loads the setting, so any of them fails at
+startup when the value is not an `http` or `https` URL, has no path, or embeds
+a user name or password. The error does not repeat the
+value. Each span carries only its name, trace and span IDs, parent, timing,
+status and the same correlation IDs as the file. The resource carries only
+`service.name=birbcrew`. Prompts, replies, tool arguments and credentials are
+never span data. Spans are batched in a bounded queue and dropped when the
+queue is full or the collector fails, without failing or slowing a turn. A
+worker or runner waits at most one second to flush on exit. The exporter
+also honours the standard `OTEL_EXPORTER_OTLP_HEADERS`,
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS`, certificate and compression variables, so
+set collector headers only for this endpoint. Crew registers no OpenTelemetry
+diagnostic logger and discards export errors, so header values are not
+logged.
