@@ -42,7 +42,10 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   `payload` object.
 
 The audit row is written in the **same transaction** as the change it records, so
-a rolled-back change leaves no row and a committed change cannot lack one. Every
+a rolled-back change leaves no row, and a change committed by a release that
+includes migration 21 cannot lack one. Processes of an earlier release still
+running against the migrated database commit changes without rows; see
+[Retention, upgrade and recovery](#retention-upgrade-and-recovery). Every
 event type has a natural key: a partial unique index, which the insert names as
 its `ON CONFLICT` target. Temporal activity retries, replayed idempotent requests,
 concurrent duplicates and repeated cancellation deliveries append nothing new. Any
@@ -189,9 +192,20 @@ would end it.
 Rows are retained with the database. There is no TTL and no deletion API.
 Trusted-context erasure removes content but leaves audit rows, which hold none.
 Migration 21 does not backfill history: members, admissions and decisions made
-before it have no audit rows. Code without migration 21 writes none either, so run
-the migration before any upgraded instance serves traffic, as the gateway and
-workers already do.
+before it have no audit rows. The gateway and every `npm run members` command,
+including the worker, apply pending migrations before they serve, so the first
+upgraded one to start applies migration 21.
+
+Code without migration 21 writes no audit rows, and nothing stops it. A gateway,
+worker, supervisor host or operator CLI of an earlier release skips the migration,
+keeps committing spawns, admissions, decisions, cancellations and results against
+the migrated database, and leaves no row or other mark of the gap. So stop every
+process of the previous release before the first upgraded process starts, rather
+than rolling the upgrade through running instances. Rolling back to an earlier
+release breaks completeness for as long as it runs. An earlier release also does
+not move the audit identity when it accepts a restore, so once a later release
+writes to that timeline again, its new IDs can repeat ones consumers hold; accept
+restores only with a release that includes migration 21.
 
 Migration 21 creates the table and only references existing ones. Its foreign keys
 take `SHARE ROW EXCLUSIVE` and `ACCESS SHARE` on `members` and `conversations` until

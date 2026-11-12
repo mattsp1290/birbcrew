@@ -177,7 +177,11 @@ when. It covers member spawn, conversation open, request admission, approval and
 question decisions, committed work-item and trusted effects, cancellation requests
 and terminal request status. Unlike the AG-UI tail, it is not truncated. Each fact
 is written in the same transaction as the change it records, appears once despite
-retries, and cannot be updated or deleted.
+retries, and cannot be updated or deleted. Only releases that include the audit
+migration write facts: while a process of an earlier release still runs, during an
+upgrade or after a rollback, its changes leave silent gaps. See
+[the audit trail](audit-trail.md#retention-upgrade-and-recovery) for how to
+upgrade without them.
 
 | Parameter | Meaning |
 | --- | --- |
