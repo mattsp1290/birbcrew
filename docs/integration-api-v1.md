@@ -10,7 +10,8 @@ trusted scopes, tool registries, or engine configuration in a turn request.
 
 `GET /v1/capabilities` returns `apiVersion: "1"`, request and cancellation contract
 identifiers, proxy protocol versions, conversation/generation limits, trusted-context
-transport availability, observation limits, and receipt retention semantics. Additive
+transport availability, observation limits, receipt retention semantics, and the
+audit contract (event types, page limits, formats). Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
@@ -26,6 +27,7 @@ proof of the operator's provider access or configured profile availability.
 | `GET /v1/conversations/{conversationId}` | Current public snapshot |
 | `POST /v1/conversations/{conversationId}/events` | Independent, read-only AG-UI observation |
 | `POST /v1/conversations/{conversationId}/human` | Existing explicit human-decision contract |
+| `GET /v1/audit` | Owner-scoped, append-only audit events; keyset pages as JSON or CSV export |
 
 Authentication is required even for capabilities. Other owners get `404`, not a
 confirmation of a request's existence. Versioned request bodies are strict: unknown
@@ -167,6 +169,34 @@ returns `410 CURSOR_EXPIRED`. A gap during streaming emits `CURSOR_EXPIRED`; rec
 without the old cursor for a fresh snapshot. Do not promise arbitrary historic token
 replay, including across rollover. Committed per-request results use the separate
 request lookup above, not the event cursor.
+
+## Audit trail
+
+`GET /v1/audit` returns the authenticated owner's durable record of who acted and
+when. It covers member spawn, conversation open, request admission, approval and
+question decisions, committed work-item and trusted effects, cancellation requests
+and terminal request status. Unlike the AG-UI tail, it is not truncated. Each fact
+is written in the same transaction as the change it records, appears once despite
+retries, and cannot be updated or deleted.
+
+| Parameter | Meaning |
+| --- | --- |
+| `after` | Decimal event ID; return later events only. Default `0`. |
+| `limit` | Default 100 in both formats. At most 1000 for JSON and 10000 for CSV (the hard row cap). |
+| `conversationId` | Restrict to one conversation. Another owner's ID yields an empty page. |
+| `format` | `json` (default) or `csv`. |
+
+Unknown, repeated or malformed parameters fail `400`, as strict bodies do. JSON
+responses are `{ apiVersion, events, nextAfter, hasMore }`. CSV responses carry the
+same rows, with `Audit-Next-After` and `Audit-Has-More` headers. Pass `nextAfter`
+as the next `after`. Event IDs are global across owners and not contiguous. Pages
+never skip an event that commits late. A read waits for in-flight writes without
+delaying them. If writes overlap continuously for 5 s, it returns
+`503 retry_same_request`. A restore rewinds the trail to its recovery point, so
+consumers must re-read from at or below the restored maximum.
+Payloads hold identifiers, digests, choices and statuses only, never prompt or
+reply text, tool arguments or credentials. See [the audit trail](audit-trail.md)
+for the event registry, field semantics and limits.
 
 ## Validation
 
