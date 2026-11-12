@@ -273,9 +273,11 @@ livenessProbe:
 - The fetch gives up after 3 seconds, so a gateway that accepts the connection
   but never answers fails. Starting Node takes a few hundred milliseconds on a
   small CPU limit, so the kubelet timeout is longer than the fetch timeout.
+- Each probe run starts a Node process. Its peak memory was about 55 MiB in a
+  test, and it counts against the container's memory limit.
 - A false restart is not free. It drops every open event stream and in-flight
-  request. With one gateway it also skips routine windows from the 5 minutes
-  before the new process starts (see
+  request. With one gateway, every routine window that falls due from the old
+  process stopping until the new one is listening is skipped, not run late (see
   [scheduled routines](scheduled-routines.md#the-dispatcher)). Keep the failure
   threshold conservative.
 - `GET /v1/health` is a readiness check for a consumer that holds a token. Do
@@ -319,7 +321,11 @@ livenessProbe:
 ```
 
 The probe checks only the file's age. A file left on the same volume by a
-previous container passes it until that file is 30 seconds old.
+previous container passes it until that file is 30 seconds old. In Kubernetes,
+an `emptyDir` such as `/tmp` keeps the file when the container restarts. After
+a quick crash the startup probe can pass on the old file. If startup then takes
+longer than the liveness probe allows, the worker is restarted again
+(**unverified** on a cluster).
 
 **Verified** in a `node:22.23.3-bookworm` container on linux/arm64 (Docker
 29.2.1, kernel 6.8.0) with PostgreSQL 17.11 and the Temporal CLI 1.10.0
