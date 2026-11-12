@@ -32,7 +32,7 @@ These fields go into the existing installation file. Its other fields are unchan
   - Without `api_key_file`, the key comes from the `OPENCODE_GO_API_KEY` assignment in `$HOME/.profile`, as before.
   - Crew never writes the key to evidence or receipts. A test that enables debug logging for a review checks that the key does not appear in the log output.
 
-At startup, the worker checks the installation before it connects to Temporal. None of its error messages contain file contents or configuration values.
+At startup, the worker checks the installation before it connects to Temporal. Its error messages never contain file contents. Configuration errors list field paths and validation messages. Those can name an unrecognized field or `kind` value, but never another input value.
 
 - **Installation file.** If it is invalid, the worker exits with `execution_config_invalid` followed by the field names and error messages.
 - **Key and attestation.** The worker reads the configured key and parses the attestation. If either fails, it exits with `opencode_go_key_unusable: <reason>` or `subscription_evidence_unusable: <reason>`. The reason is either the reader's fixed message or an exception type such as `FileNotFoundError`. The attestation's age is not checked at startup.
