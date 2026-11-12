@@ -206,3 +206,97 @@ def test_executor_image_pins_the_locked_codex_packages():
             dockerfile,
         )
     assert f"/codex-{version}-$platform.tgz" in dockerfile
+
+
+def test_interrupt_uses_configured_codex_socket(setup, daemon, monkeypatch):
+    config, _, _ = setup
+    socket = Path("/shared/codex/app-server-control.sock")
+    config = installed(config, claude="/opt/claude", codex_socket=str(socket))
+    clients = []
+
+    class Recording(daemon):
+        def __init__(self, *args):
+            clients.append(args)
+
+    monkeypatch.setattr(author, "Daemon", Recording)
+    daemon.turns = [{"id": "owned-turn", "status": "interrupted"}]
+    state = {"thread_id": "owned-thread", "turn_id": "owned-turn"}
+    assert asyncio.run(author.interrupt(config, state))["status"] == "uncertain"
+    assert clients == [(config.codex, socket)]
+
+
+def opencode_settings(config, tmp_path, key_mode=0o600):
+    key = write_key(tmp_path / "go.key", "token-1\n", key_mode)
+    evidence = tmp_path / "go-evidence.json"
+    evidence.write_text(
+        json.dumps(
+            {
+                "provider": "opencode-go",
+                "account_path": "fixture account",
+                "extra_usage_disabled": True,
+                "eligible_coding_use": True,
+                "checked_at": "2020-01-01T00:00:00Z",
+                "evidence": "stale but well formed",
+            }
+        )
+    )
+    return installed(
+        config,
+        reviewer={
+            "kind": "opencode-go",
+            "subscription_evidence": str(evidence),
+            "api_key_file": str(key),
+        },
+    )
+
+
+def test_worker_preflight_rejects_unusable_reviewer_configuration(setup, tmp_path):
+    from birbcrew.execution.review import preflight_reviewer
+
+    config, _, _ = setup
+    preflight_reviewer(installed(config, claude="/opt/claude"))
+    preflight_reviewer(opencode_settings(config, tmp_path))
+    with pytest.raises(ValueError, match="private to this user"):
+        preflight_reviewer(opencode_settings(config, tmp_path, 0o644))
+    broken = opencode_settings(config, tmp_path)
+    broken.reviewer.subscription_evidence.write_text("{}")
+    with pytest.raises(ValidationError):
+        preflight_reviewer(broken)
+    broken.reviewer.subscription_evidence.unlink()
+    with pytest.raises(FileNotFoundError):
+        preflight_reviewer(broken)
+
+
+def test_worker_drains_activities_on_sigterm(setup, monkeypatch, tmp_path):
+    import signal
+
+    from birbcrew.execution import worker
+
+    config, _, _ = setup
+    started = []
+
+    class FakeWorker:
+        def __init__(self, client, **options):
+            started.append(options)
+
+        async def __aenter__(self):
+            asyncio.get_running_loop().call_soon(os.kill, os.getpid(), signal.SIGTERM)
+            return self
+
+        async def __aexit__(self, *exc):
+            started.append("drained")
+
+    async def client():
+        return object()
+
+    monkeypatch.setattr(worker, "installation", lambda: config)
+    monkeypatch.setattr(worker, "temporal_client", client)
+    monkeypatch.setattr(worker, "Worker", FakeWorker)
+    asyncio.run(asyncio.wait_for(worker.main(), 5))
+    assert started[0]["graceful_shutdown_timeout"].total_seconds() == 660
+    assert started[1] == "drained"
+    unusable = opencode_settings(config, tmp_path, 0o640)
+    monkeypatch.setattr(worker, "installation", lambda: unusable)
+    with pytest.raises(ValueError, match="private to this user"):
+        asyncio.run(worker.main())
+    assert len(started) == 2

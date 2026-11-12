@@ -6,13 +6,13 @@ from typing import Annotated, Literal
 
 from pydantic import Field, StrictStr, model_validator
 from pydantic_ai import Agent, ToolOutput, UsageLimits
-from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
 from temporalio import activity
 
 from birbcrew import provider
 from birbcrew.execution import journal
 from birbcrew.execution.contract import Record, ReviewInput, ReviewReceipt, ReviewRecoveryInput
-from birbcrew.execution.policy import OpenCodeGoReviewer, installation
+from birbcrew.execution.policy import ExecutionSettings, OpenCodeGoReviewer, installation
 from birbcrew.execution.process import CommandFailure, command, git, usage_unavailable
 from birbcrew.execution.review_recovery import inspect_legacy_recovery
 
@@ -118,6 +118,20 @@ async def with_heartbeats(awaitable, timeout: float):
     return task.result()
 
 
+def reviewer_key(reviewer: OpenCodeGoReviewer) -> str:
+    if reviewer.api_key_file:
+        return provider.read_key_file(reviewer.api_key_file)
+    return provider.read_go_key()
+
+
+def preflight_reviewer(config: ExecutionSettings) -> None:
+    if isinstance(config.reviewer, OpenCodeGoReviewer):
+        reviewer_key(config.reviewer)
+        provider.SubscriptionEvidence.model_validate_json(
+            config.reviewer.subscription_evidence.read_text()
+        )
+
+
 async def opencode_review(
     reviewer: OpenCodeGoReviewer, prompt: str, session: str, diagnostics: list
 ) -> tuple[Verdict, str]:
@@ -126,40 +140,48 @@ async def opencode_review(
     except (OSError, ValueError):
         raise ReviewerFailure("subscription_evidence_rejected") from None
     try:
-        key = (
-            provider.read_key_file(reviewer.api_key_file)
-            if reviewer.api_key_file
-            else provider.read_go_key()
-        )
+        key = reviewer_key(reviewer)
     except (OSError, ValueError):
         raise ReviewerFailure("provider_credential_unavailable") from None
-    agent = Agent(provider.chat_model(key), output_type=ToolOutput(Verdict), retries=0)
-    try:
-        result = await with_heartbeats(
-            agent.run(
-                prompt,
-                model_settings=provider.review_model_settings(session),
-                usage_limits=UsageLimits(request_limit=1),
-            ),
-            REVIEW_TIMEOUT_SECONDS,
-        )
-    except UnexpectedModelBehavior:
-        outcome = "review_output_invalid"
-    except (ModelAPIError, TimeoutError):
-        outcome = "provider_request_failed"
-    else:
-        reported = result.response.model_name
-        reported_models = [reported] if reported and PROVIDER_MODEL_NAME.fullmatch(reported) else []
-        diagnostics.append(
-            {"model": provider.MODEL, "outcome": "verdict", "reported_models": reported_models}
-        )
-        return result.output, (
-            "OpenCode Go reported model: " + reported_models[0] + ". "
-            if reported_models
-            else f"OpenCode Go model selection: {provider.MODEL}. "
-        )
-    diagnostics.append({"model": provider.MODEL, "outcome": outcome})
-    raise ReviewerFailure(outcome)
+    failure = {"model": provider.MODEL, "outcome": "provider_request_failed"}
+    async with provider.go_client(key) as client:
+        agent = Agent(provider.chat_model(client), output_type=ToolOutput(Verdict), retries=0)
+        try:
+            result = await with_heartbeats(
+                agent.run(
+                    prompt,
+                    model_settings=provider.review_model_settings(session),
+                    usage_limits=UsageLimits(request_limit=1),
+                ),
+                REVIEW_TIMEOUT_SECONDS,
+            )
+        except UnexpectedModelBehavior:
+            failure["outcome"] = "review_output_invalid"
+        except ModelHTTPError as error:
+            failure["http_status"] = error.status_code
+        except (ModelAPIError, TimeoutError):
+            pass
+        else:
+            if len(result.response.tool_calls) == 1:
+                reported = result.response.model_name
+                reported_models = (
+                    [reported] if reported and PROVIDER_MODEL_NAME.fullmatch(reported) else []
+                )
+                diagnostics.append(
+                    {
+                        "model": provider.MODEL,
+                        "outcome": "verdict",
+                        "reported_models": reported_models,
+                    }
+                )
+                return result.output, (
+                    "OpenCode Go reported model: " + reported_models[0] + ". "
+                    if reported_models
+                    else f"OpenCode Go model selection: {provider.MODEL}. "
+                )
+            failure["outcome"] = "review_output_invalid"
+    diagnostics.append(failure)
+    raise ReviewerFailure(failure["outcome"])
 
 
 @activity.defn(name="birbcrew.review_candidate.v1")

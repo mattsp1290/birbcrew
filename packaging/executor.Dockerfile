@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 ARG PYTHON_IMAGE
 ARG UV_IMAGE
 FROM ${UV_IMAGE} AS uv

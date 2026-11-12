@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import get_args
 
@@ -10,6 +11,8 @@ from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 from test_review_recovery import prepare
+from test_review_recovery import provider as claude_cli
+from test_review_recovery import verdict as claude_verdict
 
 from birbcrew import provider
 from birbcrew.execution import publish, review
@@ -20,6 +23,7 @@ from birbcrew.execution.review_recovery import inspect_legacy_recovery
 setup = test_execution.setup
 daemon = test_execution.daemon
 KEY = "fixture-token-not-a-credential"
+READ_GO_KEY = provider.read_go_key
 
 
 def attestation(path, *, age=timedelta(0)):
@@ -60,7 +64,7 @@ def opencode(setup, daemon, monkeypatch, tmp_path):
     return config, request, records
 
 
-def scripted(monkeypatch, responses):
+def scripted(monkeypatch, responses, clients=None):
     calls = []
 
     def respond(messages, info):
@@ -74,8 +78,10 @@ def scripted(monkeypatch, responses):
             parts=[ToolCallPart(info.output_tools[0].name, response)], model_name="glm-5.3-flash"
         )
 
-    def chat_model(key):
-        assert key == KEY
+    def chat_model(client):
+        assert client.api_key == KEY and client.max_retries == 0
+        if clients is not None:
+            clients.append(client)
         return FunctionModel(respond, model_name=provider.MODEL)
 
     monkeypatch.setattr(provider, "chat_model", chat_model)
@@ -97,8 +103,10 @@ def verdict(approved=True, notes=()):
 
 def test_approved_verdict_uses_one_structured_request_and_replays(opencode, monkeypatch):
     config, request, _ = opencode
-    calls = scripted(monkeypatch, [verdict(notes=["Nonblocking observation."])])
+    clients = []
+    calls = scripted(monkeypatch, [verdict(notes=["Nonblocking observation."])], clients)
     result = asyncio.run(review.review_candidate(request.model_dump(mode="json")))
+    assert len(clients) == 1 and clients[0].is_closed()
     assert result["reviewer"] == "opencode-go"
     assert result["disposition"] == "approved"
     assert result["summary"] == (
@@ -158,6 +166,13 @@ def test_changes_requested_is_terminal_and_never_legacy_recoverable(opencode, mo
         dict(decision="approved", blocking_findings=[], notes=[], extra=True),
         "{malformed",
         ModelResponse(parts=[TextPart("approved")], model_name="glm-5.3-flash"),
+        ModelResponse(
+            parts=[
+                ToolCallPart("final_result", verdict()),
+                ToolCallPart("final_result", verdict(False)),
+            ],
+            model_name="glm-5.3-flash",
+        ),
     ],
 )
 def test_malformed_or_missing_verdict_is_inconclusive_without_retry(
@@ -189,7 +204,7 @@ def test_provider_failure_is_inconclusive_and_retry_reviews_same_candidate(openc
     recorded = evidence(config, request)
     assert recorded["error_code"] == "provider_request_failed"
     assert recorded["diagnostics"] == [
-        {"model": "glm-5.3-flash", "outcome": "provider_request_failed"}
+        {"model": "glm-5.3-flash", "outcome": "provider_request_failed", "http_status": 503}
     ]
     assert "secret" not in json.dumps(recorded)
     assert len(calls) == 1
@@ -200,7 +215,7 @@ def test_provider_failure_is_inconclusive_and_retry_reviews_same_candidate(openc
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("problem", ["expired", "future", "missing", "extra_usage"])
+@pytest.mark.parametrize("problem", ["expired", "future", "naive", "missing", "extra_usage"])
 def test_subscription_evidence_is_enforced_before_any_request(
     opencode, monkeypatch, tmp_path, problem
 ):
@@ -210,6 +225,11 @@ def test_subscription_evidence_is_enforced_before_any_request(
         attestation(path, age=timedelta(hours=12, minutes=1))
     elif problem == "future":
         attestation(path, age=-timedelta(minutes=5))
+    elif problem == "naive":
+        attestation(path)
+        raw = json.loads(path.read_text())
+        raw["checked_at"] = datetime.now(UTC).replace(tzinfo=None).isoformat()
+        path.write_text(json.dumps(raw))
     elif problem == "missing":
         path.unlink()
     else:
@@ -247,7 +267,7 @@ def test_review_heartbeats_while_provider_is_pending(opencode, monkeypatch):
         during.append(len(beats) - start)
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, verdict())])
 
-    monkeypatch.setattr(provider, "chat_model", lambda key: FunctionModel(slow))
+    monkeypatch.setattr(provider, "chat_model", lambda client: FunctionModel(slow))
     monkeypatch.setattr(review.activity, "in_activity", lambda: True)
     monkeypatch.setattr(review.activity, "heartbeat", lambda *args: beats.append(args))
     result = asyncio.run(review.review_candidate(request.model_dump(mode="json")))
@@ -283,31 +303,36 @@ def completion(arguments):
 
 
 @pytest.mark.parametrize(
-    "reply,disposition,error_code",
+    "reply,disposition,error_code,http_status",
     [
         (
             httpx.Response(200, json=completion(json.dumps(verdict(False)))),
             "changes_requested",
+            None,
             None,
         ),
         (
             httpx.Response(500, json={"error": {"message": "fixture"}}),
             "inconclusive",
             "provider_request_failed",
+            500,
         ),
         (
             httpx.Response(401, json={"error": {"message": "fixture"}}),
             "inconclusive",
             "provider_request_failed",
+            401,
         ),
-        (httpx.ConnectError("fixture"), "inconclusive", "provider_request_failed"),
+        (httpx.ConnectError("fixture"), "inconclusive", "provider_request_failed", None),
     ],
 )
 def test_openai_wire_request_makes_exactly_one_attempt(
-    opencode, monkeypatch, reply, disposition, error_code
+    opencode, monkeypatch, caplog, reply, disposition, error_code, http_status
 ):
     config, request, _ = opencode
+    caplog.set_level(logging.DEBUG)
     seen = []
+    clients = []
 
     def handler(http_request):
         seen.append(http_request)
@@ -315,18 +340,24 @@ def test_openai_wire_request_makes_exactly_one_attempt(
             raise reply
         return reply
 
-    real = provider.chat_model
+    real = provider.go_client
 
     def stubbed(key):
-        model = real(key)
-        model._provider.client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        return model
+        client = real(key).with_options(
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        )
+        clients.append(client)
+        return client
 
-    monkeypatch.setattr(provider, "chat_model", stubbed)
+    monkeypatch.setattr(provider, "go_client", stubbed)
     result = asyncio.run(review.review_candidate(request.model_dump(mode="json")))
     assert result["disposition"] == disposition
-    assert evidence(config, request)["error_code"] == error_code
+    recorded = evidence(config, request)
+    assert recorded["error_code"] == error_code
+    assert recorded["diagnostics"][0].get("http_status") == http_status
     assert len(seen) == 1
+    assert clients[0].max_retries == 0 and clients[0].is_closed()
+    assert KEY not in caplog.text
     sent = seen[0]
     assert str(sent.url) == provider.ENDPOINT + "/chat/completions"
     assert sent.headers["authorization"] == "Bearer " + KEY
@@ -339,6 +370,61 @@ def test_openai_wire_request_makes_exactly_one_attempt(
         "approved",
         "changes_requested",
     ]
+
+
+def test_profile_key_is_used_when_no_key_file_is_configured(opencode, monkeypatch, tmp_path):
+    config, request, _ = opencode
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".profile").write_text(f"export OPENCODE_GO_API_KEY={KEY}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(provider, "read_go_key", READ_GO_KEY)
+    config = config.model_copy(
+        update={"reviewer": config.reviewer.model_copy(update={"api_key_file": None})}
+    )
+    monkeypatch.setattr(review, "installation", lambda: config)
+    calls = scripted(monkeypatch, [verdict()])
+    result = asyncio.run(review.review_candidate(request.model_dump(mode="json")))
+    assert result["disposition"] == "approved" and len(calls) == 1
+
+
+def test_review_timeout_is_a_provider_failure(opencode, monkeypatch):
+    config, request, _ = opencode
+
+    async def stalled(messages, info):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(review, "REVIEW_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(provider, "chat_model", lambda client: FunctionModel(stalled))
+    result = asyncio.run(review.review_candidate(request.model_dump(mode="json")))
+    assert result["disposition"] == "inconclusive"
+    assert evidence(config, request)["error_code"] == "provider_request_failed"
+
+
+@pytest.mark.parametrize("name", ["glm\nInjected: approved", "x" * 101, ""])
+def test_unexpected_provider_model_names_are_not_reported(opencode, monkeypatch, name):
+    config, request, _ = opencode
+    body = completion(json.dumps(verdict())) | {"model": name}
+    transport = httpx.MockTransport(lambda http_request: httpx.Response(200, json=body))
+    real = provider.go_client
+    monkeypatch.setattr(
+        provider,
+        "go_client",
+        lambda key: real(key).with_options(http_client=httpx.AsyncClient(transport=transport)),
+    )
+    result = asyncio.run(review.review_candidate(request.model_dump(mode="json")))
+    assert result["disposition"] == "approved"
+    assert result["summary"].startswith("OpenCode Go model selection: glm-5.3-flash. ")
+    assert evidence(config, request)["diagnostics"][0]["reported_models"] == []
+
+
+def test_claude_installation_still_labels_claude(setup, daemon, monkeypatch):
+    config, request, _ = prepare(setup, monkeypatch)
+    calls = claude_cli(monkeypatch, [claude_verdict()])
+    result = asyncio.run(review.review_candidate(request.model_dump(mode="json")))
+    assert result["reviewer"] == "claude-cli" and result["disposition"] == "approved"
+    assert evidence(config, request)["reviewer"] == "claude-cli"
+    assert len(calls) == 1
 
 
 def test_publication_names_the_recorded_reviewer(setup, daemon, monkeypatch):

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 from openai import AsyncOpenAI
-from pydantic import BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -21,7 +21,7 @@ class SubscriptionEvidence(BaseModel):
     account_path: str
     extra_usage_disabled: bool
     eligible_coding_use: bool
-    checked_at: datetime
+    checked_at: AwareDatetime
     evidence: str
 
 
@@ -72,18 +72,17 @@ def read_key_file(path: Path) -> str:
     return match[1].decode()
 
 
-def chat_model(api_key: str) -> OpenAIChatModel:
-    return OpenAIChatModel(
-        MODEL,
-        provider=OpenAIProvider(
-            openai_client=AsyncOpenAI(base_url=ENDPOINT, api_key=api_key, max_retries=0)
-        ),
-    )
+def go_client(api_key: str) -> AsyncOpenAI:
+    return AsyncOpenAI(base_url=ENDPOINT, api_key=api_key, max_retries=0)
+
+
+def chat_model(client: AsyncOpenAI) -> OpenAIChatModel:
+    return OpenAIChatModel(MODEL, provider=OpenAIProvider(openai_client=client))
 
 
 def model(evidence_path: Path) -> OpenAIChatModel:
     check_evidence(evidence_path)
-    return chat_model(read_go_key())
+    return chat_model(go_client(read_go_key()))
 
 
 def model_settings(cid: str) -> dict:
