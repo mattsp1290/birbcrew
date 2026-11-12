@@ -1,5 +1,6 @@
 import { acceptsChoice, emptyToolArguments, nextStep, recordWorkItemArguments, toolNameSchema, type DeferredTool, type ToolOutcome } from "./deferral.ts";
 import { publishObservation } from "./observation.ts";
+import { appendAudit } from "./audit.ts";
 import { createHash } from "node:crypto";
 import { MemberStore } from "./store.ts";
 import type { Pool, PoolClient } from "pg";
@@ -273,6 +274,9 @@ export class ApprovalStore {
         AND l.phase='waiting' AND l.expires_at>clock_timestamp()))`, [key.approvalId,key.choice,live]);
     if (!accepted.rowCount) throw new MemberStoreError("stale");
     await publishObservation(db, key.conversationId, { kind: "answered", approvalId: key.approvalId });
+    await appendAudit(db, { type: "approval.decided", ownerId: key.ownerId, memberId: key.memberId,
+      conversationId: key.conversationId, requestId: key.requestId, payload: { approvalId: key.approvalId,
+        invocationId: key.invocationId, toolName: call.toolName, argumentDigest: call.argumentDigest, choice: key.choice } });
     return key.choice;
   }
 
@@ -314,6 +318,8 @@ export class ApprovalStore {
         await this.settleLocked(db,{...key,invocationId:call.invocationId,nativeCallId:call.nativeCallId,
           approvalId:call.approvalId,token:turn.token});
       }
+      await appendAudit(db, { type: "request.cancellation_requested", ownerId: key.ownerId, memberId: key.memberId,
+        conversationId: key.conversationId, requestId: key.requestId, payload: {} });
     });
   }
 
@@ -380,6 +386,10 @@ export class ApprovalStore {
       [key.approvalId,live],
     );
     if (!inserted.rowCount) throw new MemberStoreError("stale");
-    return finish({ nativeCallId, kind: "recorded", receipt: { receiptId: inserted.rows[0].receipt_id, operationId: key.requestId } });
+    const receiptId = inserted.rows[0].receipt_id;
+    const outcome = await finish({ nativeCallId, kind: "recorded", receipt: { receiptId, operationId: key.requestId } });
+    await appendAudit(db, { type: "work_item.committed", ownerId: key.ownerId, memberId: key.memberId,
+      conversationId: key.conversationId, requestId: key.requestId, payload: { receiptId, approvalId: key.approvalId } });
+    return outcome;
   }
 }

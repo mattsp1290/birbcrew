@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { ApprovalStore, confirmedApproval, decisionSchema, type Approval, type Decision } from "./approvals.ts";
+import { appendAudit } from "./audit.ts";
 import { toolNameSchema, type DeferredTool, type ToolOutcome } from "./deferral.ts";
 import { MemberStoreError, openSchema, turnKey } from "./domain.ts";
 import { publishObservation } from "./observation.ts";
@@ -211,5 +212,7 @@ export async function cancelLive(pool: Pool, input: Scope & {memberId: string}) 
       VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [...args,turn.token]);
     await interruptLiveLocked(db,key,turn.token);
     await publishObservation(db,key.conversationId,{kind:"cancelled",requestId:key.requestId});
+    await appendAudit(db,{type:"request.cancellation_requested",ownerId:key.ownerId,memberId:key.memberId,
+      conversationId:key.conversationId,requestId:key.requestId,payload:{}});
   });
 }

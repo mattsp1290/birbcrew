@@ -30,7 +30,10 @@ test("migration 011 preserves existing members, admits native Codex volumes, and
     const store = new MemberStore(pool);
     const ownerId = randomUUID(), requestId = randomUUID();
     const old = { ownerId, requestId, engine: "claude" as const, profile: "legacy" };
-    const member = await store.spawn(old);
+    // Seed as the v10 service wrote it; current spawn also appends an audit row this schema lacks.
+    const { rows: [member] } = await pool.query(`INSERT INTO birbcrew_ts.members (owner_id,spawn_request_id,engine,profile)
+      VALUES ($1,$2,$3,$4) RETURNING owner_id AS "ownerId",member_id AS "memberId",engine,profile`,
+      [ownerId, requestId, old.engine, old.profile]);
     const insert = (engine: string, volume: string | null, delegate = false) =>
       pool.query("INSERT INTO birbcrew_ts.profiles (name,engine,account_digest,volume,delegate_task) VALUES ('legacy',$1,'fixture',$2,$3)",
         [engine, volume, delegate]);

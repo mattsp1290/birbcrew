@@ -1,5 +1,6 @@
 import {acquireRecoveryNativeLease,requireRecoveryActive} from "./recovery-admission.ts";
 /** Trusted backend-only API. Never construct authority from an observer request. */
+import { appendAudit } from "./audit.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { Client, type Pool, type PoolClient } from "pg";
 import { z } from "zod";
@@ -274,12 +275,19 @@ export class TrustedContextStore {
           if (Buffer.byteLength(canonical(value)) > tool.maxResultBytes) throw new TrustedContextError("limit");
           // Record an outcome even after revocation; it is NOT released to the SDK.
           await this.transaction(async db => {
+            // Lock the conversation before the session, as open() does: the audit row's
+            // foreign key needs the conversation, and the opposite order can deadlock.
+            const {rows:[owner]} = await db.query<{owner_id:string;member_id:string}>(
+              "SELECT owner_id,member_id FROM birbcrew_ts.conversations WHERE conversation_id=$1 FOR KEY SHARE",[claim.conversationId]);
             // Even a callback surviving a dropped DB lease cannot resurrect erased data.
             const {rows:[session]} = await db.query<{phase:string}>("SELECT phase FROM birbcrew_ts.trusted_sessions WHERE conversation_id=$1 FOR UPDATE",[claim.conversationId]);
             if (session?.phase === "deleted") throw new TrustedContextError("stale");
-            await db.query(`UPDATE birbcrew_ts.trusted_tool_calls SET outcome='completed',result=$4
+            const completed = await db.query(`UPDATE birbcrew_ts.trusted_tool_calls SET outcome='completed',result=$4
               WHERE conversation_id=$1 AND request_id=$2 AND native_call_id=$3 AND outcome IN ('admitted','uncertain')`,
               [claim.conversationId,claim.requestId,nativeCallId,JSON.stringify(value)]);
+            if (owner && completed.rowCount && tool.kind === "effect") await appendAudit(db, {type:"trusted_effect.completed",
+              ownerId:owner.owner_id,memberId:owner.member_id,conversationId:claim.conversationId,requestId:claim.requestId,
+              payload:{operationId:admission.operationId,toolName}});
           });
           return value;
         });
