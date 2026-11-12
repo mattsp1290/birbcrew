@@ -223,7 +223,9 @@ export async function memberConversation(conversation: Conversation): Promise<vo
     }
     pending = first.approval;
     answered = false;
-    await condition(() => answered);
+    // A standing grant approved the call when it was proposed, so no answer will come. Testing
+    // the field first keeps the patch marker out of every history without such a call.
+    if (!first.approval.grantId || !patched("standing-grants-v1")) await condition(() => answered);
     const outcome = await settleApproval(first.approval);
     const resumed = await segment(request, { approval: first.approval, outcome });
     pending = undefined;
