@@ -10,7 +10,7 @@ The comparison is a snapshot taken on 2026-11-12.
 
 | Column | Product | Kind | Read at |
 | --- | --- | --- | --- |
-| Crew | This repository | Open source (MIT), headless service | `main` at `47f3c0f` |
+| Crew | This repository | Open source (MIT), headless service | `main` at `f742b11` |
 | OpenBot | [CopilotKit/OpenBot](https://github.com/CopilotKit/OpenBot) | Open source (MIT), self-hosted workspace | `0fe182c` (2026-11-12) |
 | Grok Bot | xAI Grok Bot | Hosted, beta since 2026-08-11 | xAI docs and press |
 | Muse | Meta Muse | Hosted, announced 2026-09-08 | Meta posts and press |
@@ -44,6 +44,9 @@ How the open-source products relate to each other and to the hosted ones:
 | No | The source or the documentation shows that the product lacks the feature. |
 | ? | The sources that were read do not say. |
 
+The Crew column covers the whole repository, including the Python
+documentation pilot. Row 8 is "Part" only because of the pilot.
+
 How much to trust each column:
 
 - **Crew, OpenBot, OpenMuse, OpenDots, OpenDuet.** Read from source code and
@@ -71,14 +74,14 @@ vendor cloud.
 | 3 | Model choice, own key, or base-URL override | Yes | Yes | No | ? | Yes | ? | Part | No | Yes |
 | 4 | Conversations that survive a restart | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 | 5 | Subagents or delegation inside one agent | Part | Yes | Yes | ? | Part | Yes | No | ? | Part |
-| 6 | Agent-to-agent handoff or group conversations | No | Yes | Yes | ? | No | Part | No | ? | Yes |
+| 6 | Agent-to-agent handoff or group conversations | Part | Yes | Yes | ? | No | Part | No | ? | Yes |
 
 ### Tools
 
 | # | Feature | Crew | OpenBot | Grok Bot | Muse | OpenMuse | Dots | OpenDots | Duet | OpenDuet |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 7 | A computer or browser for the agent | No | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| 8 | Shell and file access | No | Yes | Yes | Part | Yes | Part | Yes | Part | Yes |
+| 8 | Shell and file access | Part | Yes | Yes | Part | Yes | Part | Yes | Part | Yes |
 | 9 | MCP connectors or an app catalogue | No | Yes | Yes | Yes | Part | Yes | Yes | Yes | Yes |
 | 10 | Custom tools that the deployer registers | Part | Yes | Yes | Yes | No | ? | Yes | ? | Yes |
 | 11 | Generative UI or rich components | No | Yes | Yes | Part | Yes | Part | Yes | Part | Yes |
@@ -134,7 +137,8 @@ vendor cloud.
 
 ## What Crew has for each row
 
-Each line states what Crew does at `47f3c0f` and where the feature stops.
+Each line states what Crew does at `f742b11` and where the feature stops. A line
+that names a later pull request describes Crew after that pull request instead.
 
 ### Agents and runtime
 
@@ -144,15 +148,15 @@ Each line states what Crew does at `47f3c0f` and where the feature stops.
 | 2 | No | `POST /members` accepts only a profile that the operator registered. The AG-UI route only observes a conversation and rejects tools, context, and state from a client. |
 | 3 | Yes | The operator chooses the model in a profile module. [AI proxy profiles](ai-proxy-profiles.md) route Claude Messages, Codex Responses, and Pi Chat Completions through an operator proxy. An owner can only pick among the profiles that the operator registered. No request field names a model. |
 | 4 | Yes | Temporal orders turns. PostgreSQL stores each conversation, its native checkpoint, and its AG-UI history. See [the design](architecture.md) and [bounded conversations](bounded-conversations.md). |
-| 5 | Part | A Pi parent can call `delegate_task` to start at most two child workflows. Claude and Codex members have no subagents. |
-| 6 | No | Each conversation binds one member. The audit trail documentation names member handoff as a future initiator kind. |
+| 5 | Part | A Pi member with a `.crew.v1` profile can call `delegate_task` to start at most two child workflows in one turn. Each child is a separate Pi session with a fixed role, `analyst` or `recorder`. Claude and Codex members have no subagents. |
+| 6 | Part | An owner can hand a conversation to another of their members, also one with a different engine, through `POST /v1/conversations/{id}/handoffs`. The target is a fresh conversation whose first request carries the source's newest whole committed turns, at most 64 KiB, as a verbatim quoted transcript. The source is sealed, and a handoff cannot be undone. Only the owner starts a handoff: no member can hand off or delegate to another member, and each conversation still binds one member. See [conversation handoff](handoffs.md). |
 
 ### Tools
 
 | # | Crew | Detail |
 | --- | --- | --- |
 | 7 | No | Members have no browser and no computer. |
-| 8 | No | Claude runs with no built-in tools and no operator MCP servers. Codex runs with its shell off in a read-only workspace. Only the Python documentation pilot writes files, through its Codex author. See [the persistent pilot](persistent-pilot.md). |
+| 8 | Part | Members have no shell and no file tools. Claude runs with no built-in tools and no operator MCP servers, Codex runs with its shell off in a read-only workspace, and Pi gets only its profile tools. The Python documentation pilot's Codex author has a shell and writes files in a workspace-write sandbox with no network, limited to one scratch worktree. See [the persistent pilot](persistent-pilot.md). |
 | 9 | No | The profile fixes the tools of a member: `record_work_item`, `choose_next_step`, and `delegate_task` for Pi, plus any tools that a trusted application registers in code. Crew has no connector catalogue. Claude and Codex each reach their one profile tool through an MCP server that Crew creates for the invocation. |
 | 10 | Part | A backend application can register at most eight tools in code through the trusted context library. No HTTP route registers a tool. See [trusted application context](trusted-application-context.md). |
 | 11 | No | The gateway emits run, step, text, tool-call, subagent, and snapshot events. It emits no custom or component events. |
@@ -163,15 +167,15 @@ Each line states what Crew does at `47f3c0f` and where the feature stops.
 | # | Crew | Detail |
 | --- | --- | --- |
 | 13 | Yes | A `record_work_item` call opens an approval card. A `choose_next_step` call opens a question. See [the gateway guide](member-gateway.md). |
-| 14 | Yes | An owner can answer a card with `allow_conversation` or `allow_always`. A grant matches the tool, not its arguments. A grant never expires by time and never applies to a routine. See [standing grants](standing-grants.md). |
-| 15 | No | Crew has no deny rule and no rule language. The eligibility of a grant is fixed in code. |
-| 16 | Yes | `GET /v1/audit` returns an append-only trail of 19 event types as JSON or CSV. The only filter is `conversationId`. Refused HTTP calls leave no row. No retention limit and no deletion route exist. See [the audit trail](audit-trail.md). |
-| 17 | Yes | Each request admission records an initiator of kind `owner` or `routine`. The audit trail copies the initiator from the admission. |
+| 14 | Yes | An owner can answer a card with `allow_conversation` or `allow_always`. A grant matches the tool, not its arguments. A grant never expires by time and never applies to a routine's request or to a handoff's first request. See [standing grants](standing-grants.md). |
+| 15 | No | Crew has no deny rule and no rule language. The eligibility of a grant is fixed in code. A routine's `fail_closed` approval policy cancels the waiting request rather than denying the call. |
+| 16 | Yes | `GET /v1/audit` returns an append-only trail of 20 event types as JSON or CSV. The only filter is `conversationId`. Refused HTTP calls leave no row. No retention limit and no deletion route exist. See [the audit trail](audit-trail.md). |
+| 17 | Yes | Each request admission records an initiator of kind `owner`, `routine`, or `handoff`. The audit trail copies the initiator from the admission. |
 | 18 | No | Grant matching runs only inside the transaction that records a call. |
 | 19 | No | Members have no computer. |
-| 20 | No | Provider keys come from environment variables and owner-only files. Native transcripts are plain text in the state directory. |
-| 21 | Part | Clients cannot supply tools, context, or instructions. Crew injects project notes and member memory under a header that labels them as reference data. Crew has no classifier and no check of tool arguments. |
-| 22 | Part | A Landlock and seccomp launcher confines the Claude and Codex native processes. Pi runs in the worker process. See [verification](verification.md). |
+| 20 | No | Provider keys come from environment variables, operator-provided private files, the operator's Codex login, or an operator credential command for proxy profiles. Crew has no credential store and encrypts none of them. Native transcripts are plain text in the state directory. |
+| 21 | Part | Clients cannot supply tools, context, or instructions. Crew injects project notes and member memory under a header that labels them as reference data. Crew has no injection classifier. It checks tool arguments only against strict schemas and binds `operation_id` to the request; it does not inspect free text such as the `note` of a work item. A handoff passes the source's replies to the target inside a user message, which [the handoff guide](handoffs.md) says is not a security boundary. |
+| 22 | Part | A Landlock and seccomp launcher confines the Claude and Codex native processes. Pi does not use the launcher: it runs unconfined in a Node runner process that the worker's supervisor forks each time a turn runs or resumes. See [verification](verification.md). |
 
 ### Work over time
 
@@ -181,18 +185,18 @@ Each line states what Crew does at `47f3c0f` and where the feature stops.
 | 24 | No | No webhook, repository, or email event starts a request. |
 | 25 | No | A member has no tool that schedules a later turn. Only an owner creates a routine. |
 | 26 | Yes | An owner saves at most 32 entries of at most 1,024 bytes for each member. A conversation takes a snapshot of the entries when it opens. The model cannot write memory, and Crew has no search over memory. See [member memory](memories.md). |
-| 27 | No | Pi loads no skills, no extensions, and no prompt templates. Claude loads no plugins and no setting sources. Codex runs with plugins off and refuses ambient configuration files. The instruction text of a member is fixed. |
+| 27 | No | Pi loads no skills and no prompt templates, and no extensions other than Crew's own inline ones. Claude loads no plugins and no setting sources. Codex runs with plugins off and refuses ambient configuration files. The instruction text of a member is fixed. |
 | 28 | No | Crew does not learn from finished conversations. |
-| 29 | No | A member acts only on an owner request or a routine firing. |
+| 29 | No | A member acts only on an owner request, a handoff's first request, a routine firing, or a trusted application's request. |
 
 ### Surfaces
 
 | # | Crew | Detail |
 | --- | --- | --- |
-| 30 | No | Crew is a headless service. The only clients in the repository are two scripts in `clients/`. `observe.mjs` attaches an AG-UI observer, and `resolve.mjs` posts a decision. |
+| 30 | No | Crew is a headless service. Besides the operator CLI, the only clients in the repository are two scripts in `clients/`. `observe.mjs` attaches an AG-UI observer, and `resolve.mjs` posts a decision. The original first-milestone brief assigns the eventual phone and browser interface to Birbforge. |
 | 31 | No | None. |
-| 32 | No | None. |
-| 33 | No | None. [The first milestone](first-milestone.md) puts Slack out of scope. |
+| 32 | No | None. The original first-milestone brief assigns the eventual phone interface to Birbforge. |
+| 33 | No | None. No Slack, Teams, or SMS integration exists. [The original first-milestone brief](first-milestone.md) excluded sending to Slack. |
 | 34 | No | A pending card and a finished routine appear only to a client that polls or holds an AG-UI stream open. Crew has no webhook and no push. |
 | 35 | No | None. |
 
@@ -201,8 +205,8 @@ Each line states what Crew does at `47f3c0f` and where the feature stops.
 | # | Crew | Detail |
 | --- | --- | --- |
 | 36 | Part | The gateway maps static bearer-token digests to owner IDs. Crew has no sign-in provider, no session, no role, and no user management. |
-| 37 | Part | The repository builds a service image and an executor image and supports Temporal mTLS. It has no Kubernetes manifest and no Helm chart, and a rolling update is documented as unsafe. See [persistent deployment](persistent-deployment.md) and [the in-cluster executor](in-cluster-executor.md). |
-| 38 | Part | Crew exports four trace span names over OTLP. It records no token count and no cost, and it has no spend limit. |
+| 37 | Part | The repository builds a service image, an executor image for the documentation pilot, and the pilot's Python API image, and supports Temporal mTLS. The gateway binds only to 127.0.0.1. The repository has no Kubernetes manifest and no Helm chart, and a rolling update is documented as unsafe. See [persistent deployment](persistent-deployment.md) and [the in-cluster executor](in-cluster-executor.md). |
+| 38 | Part | Crew exports four trace span names over OTLP. It reports no token count and no cost, and it has no spend limit; see [native bounds](native-conversation-bounds.md). |
 | 39 | Yes | An operator can take a quiesced backup of the whole installation and restore it behind a fence. The procedure stops the whole installation. See [coordinated recovery](coordinated-recovery.md). |
 | 40 | Yes | MIT. |
 
@@ -401,7 +405,6 @@ Crew has "No" and at least seven of the eight other products have "Yes" or
 "Part":
 
 - 7, a computer or browser for the agent
-- 8, shell and file access
 - 9, MCP connectors or an app catalogue
 - 11, generative UI or rich components
 - 12, web research
