@@ -15,9 +15,18 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   contiguous. Gaps reflect other owners' events, rolled-back writes and suppressed
   duplicates.
 - `owner_id`: the tenant whose state changed. A foreign key binds the member to
-  that owner. When a conversation is present, a foreign key requires it to exist and
-  a row trigger (`audit_events_conversation_binding`) requires it to belong to that
-  owner and member.
+  that owner. When a conversation is present, a row trigger
+  (`audit_events_conversation_binding`) looks it up as the row is inserted and
+  refuses the row with `23503` unless it finds the conversation with that owner
+  and member. A conversation the lookup cannot see is refused even if it commits
+  before the insert ends: one not yet committed when the trigger runs, or, under
+  REPEATABLE READ, one committed after the transaction's snapshot. A conversation
+  the trigger finds keeps its owner and member until commit, because the binding
+  columns are immutable and a foreign key stops the conversation from being
+  deleted. So every committed row names a conversation of its own owner and
+  member, whoever wrote it, including direct SQL, unless an administrator disables
+  the triggers. Crew's writers append after creating or reading the conversation
+  in the same transaction.
 - `occurred_at`: the database clock (`clock_timestamp()`) when the row was
   inserted, inside the state change's transaction. It is not the commit time.
 - `actor_kind`/`actor_id`: who performed the action. Today this is `owner` (with
@@ -298,6 +307,9 @@ By direct SQL it checks:
 - rejection of `UPDATE`, `DELETE` and `TRUNCATE`, unknown types, other
   initiators, conversations of another owner or member, null natural keys and
   extra payload fields;
+- rejection of a conversation that another owner commits after the binding
+  trigger looked for it but before the foreign key check. A test-only trigger,
+  rolled back afterwards, holds the insert on an advisory lock until that commit;
 - spreadsheet formula prefixes in CSV cells, and that a plain RFC 4180 reader
   recovers the exact values;
 - migration 21 on a version-20 database with members and conversations: the locks

@@ -267,6 +267,42 @@ test("the database refuses to change, remove, misattribute or widen audit rows",
   } finally { db.release(); }
 });
 
+test("an audit row naming a conversation its statement cannot see is refused, even if another owner commits it before the foreign key check", async () => {
+  const ownerId = "owner-" + randomUUID(), other = "owner-" + randomUUID(), conversationId = randomUUID();
+  const mine = await store.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
+  const theirs = await store.spawn({ ownerId: other, requestId: randomUUID(), engine: "pi", profile });
+  const hold = BigInt.asIntN(64, BigInt("0x" + randomUUID().replaceAll("-", "").slice(0, 16))).toString();
+  const creator = await pool.connect(), writer = await pool.connect();
+  try {
+    await creator.query("BEGIN");
+    await creator.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)",
+      [other, theirs.memberId, conversationId]);
+    await creator.query("SELECT pg_advisory_xact_lock($1)", [hold]);
+    // Rolled back below: a row trigger after the binding check waits for the creator to commit,
+    // so the foreign key check that follows runs with a snapshot that sees the conversation.
+    await writer.query("BEGIN");
+    await writer.query(`CREATE FUNCTION pg_temp.hold_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN PERFORM pg_advisory_xact_lock(${hold}); RETURN NEW; END $$`);
+    await writer.query(`CREATE TRIGGER audit_events_zz_hold BEFORE INSERT ON birbcrew_ts.audit_events
+      FOR EACH ROW EXECUTE FUNCTION pg_temp.hold_audit()`);
+    const { rows: [{ pid }] } = await writer.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+    let settled = false;
+    const inserting = appendAudit(writer, { type: "conversation.opened", ownerId, memberId: mine.memberId, conversationId, payload: {} })
+      .then(() => "accepted", (error: unknown) => error).finally(() => { settled = true; });
+    // Commit only once the insert has passed the binding trigger and waits on the hold, or has already failed.
+    while (!settled && !(await pool.query("SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND NOT granted", [pid])).rowCount) {
+      await delay(5);
+    }
+    await creator.query("COMMIT");
+    const outcome = await inserting;
+    assert.ok(outcome instanceof Error && "code" in outcome && outcome.code === "23503", `expected 23503, got ${String(outcome)}`);
+  } finally {
+    await creator.query("ROLLBACK");
+    await writer.query("ROLLBACK");
+    creator.release(); writer.release();
+  }
+});
+
 test("keyset pages and CSV export return the same rows; queries are strictly validated", async (t) => {
   const f = await fixture(); t.after(f.stop);
   const member = await store.spawn({ ownerId: f.ownerId, requestId: randomUUID(), engine: "pi", profile });

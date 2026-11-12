@@ -42,15 +42,20 @@ CREATE TABLE birbcrew_ts.audit_events (
     FOREIGN KEY (conversation_id) REFERENCES birbcrew_ts.conversations
 );
 
--- The conversation must belong to the row's owner and member. A composite foreign key
--- would need a new unique constraint on conversations. Bindings are immutable
--- (001-members.sql) and the foreign key above keeps the row from being deleted, so
--- this check cannot go stale. A missing conversation is left to the foreign key.
+-- The conversation must be visible to this lookup and belong to the row's owner and
+-- member. A composite foreign key would need a new unique constraint on conversations.
+-- A conversation the lookup cannot see is refused here, not left to the foreign key:
+-- that check runs later with a newer snapshot and would accept a conversation another
+-- owner committed in between without comparing its owner. A conversation found here
+-- keeps its binding until commit, because bindings are immutable (001-members.sql) and
+-- the foreign key above keeps the row from being deleted.
 CREATE FUNCTION birbcrew_ts.bind_audit_conversation() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE bound record;
 BEGIN
-    IF EXISTS (SELECT 1 FROM birbcrew_ts.conversations WHERE conversation_id = NEW.conversation_id
-            AND (owner_id, member_id) IS DISTINCT FROM (NEW.owner_id, NEW.member_id)) THEN
-        RAISE EXCEPTION 'Audit conversation belongs to another owner or member' USING ERRCODE = '23503';
+    SELECT owner_id, member_id INTO bound FROM birbcrew_ts.conversations
+     WHERE conversation_id = NEW.conversation_id;
+    IF NOT FOUND OR (bound.owner_id, bound.member_id) IS DISTINCT FROM (NEW.owner_id, NEW.member_id) THEN
+        RAISE EXCEPTION 'Audit conversation is missing or belongs to another owner or member' USING ERRCODE = '23503';
     END IF;
     RETURN NEW;
 END;
