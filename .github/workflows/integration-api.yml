@@ -39,6 +39,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:api
+      - run: npm run test:audit
       - run: node --test tests/service/store.test.ts tests/service/rollover-client.test.ts
   actual-service:
     runs-on: ubuntu-24.04

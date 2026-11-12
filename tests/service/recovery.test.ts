@@ -8,6 +8,7 @@ import {Pool} from 'pg';
 import {MemberStore} from '../../src/service/store.ts';
 import {InstallationRecovery,readRecoveryManifest,type RecoveryPins,type RecoveryHooks} from '../../src/service/recovery.ts';
 import {FileRecoveryFence} from '../../src/service/recovery-fence.ts';
+import {auditQuerySchema,readAudit} from '../../src/service/audit.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 const exec=promisify(execFile);
@@ -138,8 +139,19 @@ test('real PostgreSQL archive restores mappings, checkpoint, committed replay an
   await assert.rejects(store.beginTurn({...request,requestId:randomUUID()}));
   assert.deepEqual((await restored.query('SELECT * FROM birbcrew_ts.public_events ORDER BY cursor')).rows,(await t.pool.query('SELECT * FROM birbcrew_ts.public_events ORDER BY cursor')).rows);
   assert.ok((await restored.query('SELECT * FROM birbcrew_ts.public_events')).rowCount!>0);
+  // The append-only trigger is created after pg_restore loads rows, and still guards the copy.
+  const audit=(await t.pool.query('SELECT * FROM birbcrew_ts.audit_events ORDER BY event_id')).rows;
+  assert.deepEqual(audit.map(row=>row.event_type),['member.spawned','conversation.opened','request.finished']);
+  assert.deepEqual((await restored.query('SELECT * FROM birbcrew_ts.audit_events ORDER BY event_id')).rows,audit);
+  assert.deepEqual((await readAudit(restored,'owner',auditQuerySchema.parse({}))).events.map(event=>event.eventId),audit.map(row=>row.event_id));
+  await assert.rejects(restored.query('DELETE FROM birbcrew_ts.audit_events'),{code:'23514'});
   await assert.rejects(t.recovery.resume(t.hooks),/fenced/);
-  const manifest=await readRecoveryManifest(relocated);await recovery.resume(t.hooks,manifest);
+  const manifest=await readRecoveryManifest(relocated);
+  assert.equal(manifest.inventory.audit_events,audit.length);
+  await recovery.resume(t.hooks,manifest);
+  await store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'});
+  const {rows:[next]}=await restored.query("SELECT max(event_id)::text AS id FROM birbcrew_ts.audit_events WHERE event_type='member.spawned'");
+  assert.ok(BigInt(next.id)>BigInt(audit.at(-1)!.event_id),'restored identity continues after the restored rows');
   assert.deepEqual(await store.beginTurn(request),{kind:'replay',reply:'recorded'});
   assert.equal((await restored.query('SELECT phase FROM birbcrew_ts.turns WHERE request_id=$1',[pending.requestId])).rows[0].phase,'started');
  } finally {await restored?.end();await admin.query(`DROP DATABASE IF EXISTS ${restoredName} WITH(FORCE)`);await t.cleanup();}

@@ -1,4 +1,5 @@
-import type { PoolClient } from "pg";
+import { setTimeout as delay } from "node:timers/promises";
+import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { nextStep, toolNameSchema } from "./deferral.ts";
 import { engineSchema } from "./domain.ts";
@@ -55,3 +56,76 @@ export async function appendAudit<T extends AuditEventType>(db: Pick<PoolClient,
       fact.conversationId ?? null, fact.requestId ?? null, JSON.stringify(payload)]);
 }
 
+// Same default for both formats, so a format change never changes which rows return.
+export const auditLimits = { default: 100, json: 1000, csv: 10_000 } as const;
+
+// Zod runs refinements even after a failed regex, so they must accept any input.
+const auditParameters = {
+  after: z.string().regex(/^(0|[1-9][0-9]{0,18})$/)
+    .refine(value => value.length < 19 || value <= "9223372036854775807").optional(),
+  limit: z.string().regex(/^[1-9][0-9]{0,4}$/).optional(),
+  conversationId: z.uuid().transform(value => value.toLowerCase()).optional(),
+  format: z.enum(["json", "csv"]).optional(),
+};
+// A strict object still accepts inherited names such as __proto__; callers check names too.
+export const auditParameterNames: readonly string[] = Object.keys(auditParameters);
+export const auditQuerySchema = z.strictObject(auditParameters)
+  .refine(query => Number(query.limit ?? 1) <= auditLimits[query.format === "csv" ? "csv" : "json"], { path: ["limit"] })
+  .transform(query => ({ after: query.after ?? "0", limit: query.limit ? Number(query.limit) : auditLimits.default,
+    conversationId: query.conversationId ?? null, format: query.format ?? "json" }));
+export type AuditQuery = z.output<typeof auditQuerySchema>;
+
+export interface AuditEvent {
+  eventId: string; occurredAt: string; type: AuditEventType;
+  actor: { kind: "owner" | "system"; id: string | null };
+  initiator: { kind: "owner"; id: string };
+  memberId: string; conversationId: string | null; requestId: string | null;
+  payload: Record<string, unknown>;
+}
+
+// Identity values are allocated before commit, so a later ID can become visible first;
+// paging past it would lose the earlier row forever. Inserts hold the shared lock taken
+// by 021-audit.sql's statement trigger. Obtaining it exclusively proves every allocated
+// ID has committed or rolled back, and this statement's snapshot predates the lock, so
+// its maximum is a safe horizon. Polling with try-lock never queues ahead of writers.
+async function stableHorizon(pool: Pool): Promise<string> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    const { rows: [row] } = await pool.query<{ horizon: string | null }>(`SELECT CASE
+      WHEN pg_try_advisory_xact_lock(hashtextextended('birbcrew_ts.audit_events', 0))
+      THEN (SELECT coalesce(max(event_id), 0) FROM birbcrew_ts.audit_events)::text END AS horizon`);
+    if (row.horizon !== null) return row.horizon;
+    if (Date.now() > deadline) throw new Error("Audit writers did not settle");
+    await delay(10);
+  }
+}
+
+/** Owner comes from authentication only. Another owner's conversation filter matches nothing. */
+export async function readAudit(pool: Pool, ownerId: string, query: AuditQuery) {
+  const horizon = await stableHorizon(pool);
+  const { rows } = await pool.query<AuditEvent>(`SELECT event_id::text AS "eventId",
+      to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt", event_type AS type,
+      json_build_object('kind', actor_kind, 'id', actor_id) AS actor,
+      json_build_object('kind', initiator_kind, 'id', initiator_id) AS initiator,
+      member_id AS "memberId", conversation_id AS "conversationId", request_id AS "requestId", payload
+    FROM birbcrew_ts.audit_events
+    WHERE owner_id=$1 AND event_id>$2 AND event_id<=$3 AND ($4::uuid IS NULL OR conversation_id=$4)
+    ORDER BY event_id LIMIT $5`, [ownerId, query.after, horizon, query.conversationId, query.limit + 1]);
+  const events = rows.slice(0, query.limit);
+  return { events, nextAfter: events.at(-1)?.eventId ?? query.after, hasMore: rows.length > query.limit };
+}
+
+const csvColumns = ["eventId", "occurredAt", "type", "actorKind", "actorId", "initiatorKind", "initiatorId",
+  "memberId", "conversationId", "requestId", "payload"];
+function csvCell(value: string | null) {
+  if (value === null) return "";
+  return /[",\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
+}
+export function auditCsv(events: AuditEvent[]) {
+  const lines = [csvColumns.join(",")];
+  for (const event of events) {
+    lines.push([event.eventId, event.occurredAt, event.type, event.actor.kind, event.actor.id, event.initiator.kind,
+      event.initiator.id, event.memberId, event.conversationId, event.requestId, JSON.stringify(event.payload)].map(csvCell).join(","));
+  }
+  return lines.join("\r\n") + "\r\n";
+}

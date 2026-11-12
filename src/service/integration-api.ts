@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { appendAudit } from "./audit.ts";
+import { appendAudit, auditEventTypes, auditLimits } from "./audit.ts";
 import type { MemberClient } from "./client.ts";
 import { MemberStoreError, submitSchema, turnKey } from "./domain.ts";
 import { conversationTurnLimit, workflowGenerationTurnLimit } from "./limits.ts";
@@ -15,6 +15,10 @@ export const integrationCapabilities = {
   proxy: { version: 1, protocols: ["anthropic-messages", "openai-responses", "openai-chat-completions"] },
   trustedContext: { version: 1, transport: "operator-configured-local-runtime", httpSubmission: false },
   observation: { version: 1, protocol: "AG-UI", mode: "snapshot-and-bounded-tail", cursorExpiry: "reconnect-for-snapshot" },
+  audit: {
+    version: 1, route: "/v1/audit", eventTypes: auditEventTypes, pagination: "event-id-keyset-no-skipped-commits",
+    formats: ["json", "csv"], limits: auditLimits, retention: "append-only-with-database; no-automatic-TTL",
+  },
 } as const;
 
 const keySchema = turnKey;
