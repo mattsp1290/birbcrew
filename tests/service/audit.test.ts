@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { readdir, readFile } from "node:fs/promises";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { Pool } from "pg";
@@ -12,6 +13,7 @@ import type { MemberClient } from "../../src/service/client.ts";
 import type { TurnRequest } from "../../src/service/domain.ts";
 import { createGateway } from "../../src/service/gateway.ts";
 import { IntegrationApi } from "../../src/service/integration-api.ts";
+import { withNativeAdmission } from "../../src/service/native-admission.ts";
 import { MemberStore } from "../../src/service/store.ts";
 
 const url = process.env.BIRBCREW_TEST_DATABASE_URL;
@@ -241,10 +243,17 @@ test("the database refuses to change, remove, misattribute or widen audit rows",
     VALUES ($1,'owner',$1,'owner',$1,$2,$3,$4,$5,'{}')`;
   await assert.rejects(pool.query(insert, [ownerId, "request.deleted", member.memberId, null, null]), { code: "23514" });
   await assert.rejects(pool.query(insert, [ownerId, "request.accepted", member.memberId, conversationId, randomUUID()]), { code: "23503" });
+  // The same owner's conversation still binds its own member only.
+  const sibling = await store.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
+  const own = randomUUID();
+  await store.openConversation({ ownerId, memberId: member.memberId, conversationId: own });
+  await assert.rejects(pool.query(insert, [ownerId, "request.accepted", sibling.memberId, own, randomUUID()]),
+    { code: "23503", message: /another owner or member/ });
+  await assert.rejects(pool.query(insert, [ownerId, "request.accepted", member.memberId, randomUUID(), randomUUID()]), { code: "23503" });
   // A null or missing natural key would never collide, so the CHECK demands a string.
   for (const payload of [`'{"approvalId":null}'`, "'{}'"]) {
     await assert.rejects(pool.query(insert.replace("'{}'", payload), [ownerId, "approval.decided", member.memberId,
-      conversationId, randomUUID()]), { code: "23514" }, payload);
+      own, randomUUID()]), { code: "23514" }, payload);
   }
   await assert.rejects(pool.query(insert.replace("'owner',$1,'owner'", "'owner',$1,'routine'"), [ownerId, "member.spawned", randomUUID(), null, null]), { code: "23514" });
   await assert.rejects(pool.query(`INSERT INTO birbcrew_ts.audit_events (event_id,owner_id,actor_kind,actor_id,initiator_kind,initiator_id,event_type,member_id,payload)
@@ -345,4 +354,76 @@ test("the SQL CHECK and the TypeScript registry name the same event types", asyn
     FROM pg_constraint WHERE conrelid='birbcrew_ts.audit_events'::regclass AND conname='audit_events_type_check'`);
   const named = new Set([...constraint.definition.matchAll(/'([a-z_]+\.[a-z_]+)'/g)].map(match => match[1]));
   assert.deepEqual([...named].sort(), [...auditEventTypes].sort());
+});
+
+test("migration 21 upgrades a v20 database with rows while a native turn holds its admission", async (t) => {
+  const source = new URL(url!);
+  const admin = new Pool({ connectionString: source.href });
+  const database = "audit_upgrade_" + randomUUID().replaceAll("-", "");
+  await admin.query("CREATE DATABASE " + database);
+  source.pathname = "/" + database;
+  const upgraded = new Pool({ connectionString: source.href });
+  t.after(async () => {
+    await upgraded.end();
+    // Not FORCE: end() resolves before its connections close, and terminating one then is an unhandled pool error.
+    await admin.query(`DROP DATABASE ${database}`);
+    await admin.end();
+  });
+  const sql = new URL("../../src/service/sql/", import.meta.url);
+  await upgraded.query("CREATE SCHEMA birbcrew_ts");
+  await upgraded.query("CREATE TABLE birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
+  for (const file of (await readdir(sql)).sort()) {
+    const version = Number(file.split("-")[0]);
+    if (version > 20) continue;
+    await upgraded.query(await readFile(new URL(file, sql), "utf8"));
+    await upgraded.query("INSERT INTO birbcrew_ts.schema_versions VALUES ($1)", [version]);
+  }
+  // Rows as the v20 service wrote them.
+  const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
+  const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
+    (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi',$3) RETURNING member_id`, [ownerId, randomUUID(), profile]);
+  await upgraded.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)",
+    [ownerId, memberId, conversationId]);
+
+  // Only members and conversations are locked, and not in a mode a native turn's reads conflict with.
+  const db = await upgraded.connect();
+  try {
+    await db.query("BEGIN");
+    await db.query(await readFile(new URL("021-audit.sql", sql), "utf8"));
+    const { rows } = await db.query(`SELECT c.relname AS relation, l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
+      WHERE l.pid=pg_backend_pid() AND c.relkind='r' AND c.relnamespace='birbcrew_ts'::regnamespace
+        AND c.relname<>'audit_events' ORDER BY 1,2`);
+    assert.deepEqual(rows, [
+      { relation: "conversations", mode: "AccessShareLock" }, { relation: "conversations", mode: "ShareRowExclusiveLock" },
+      { relation: "members", mode: "AccessShareLock" }, { relation: "members", mode: "ShareRowExclusiveLock" },
+    ]);
+  } finally {
+    await db.query("ROLLBACK");
+    db.release();
+  }
+
+  const current = new MemberStore(upgraded);
+  const execution = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
+  const start = await current.beginTurn({ ownerId, conversationId, requestId, text }, execution);
+  assert.equal(start.kind, "start"); if (start.kind !== "start") return;
+  await upgraded.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+    VALUES ($1,$2,$3,$4,$5,1)`, [conversationId, requestId, start.token, execution.workflowRunId, execution.activityId]);
+  const launch = { ownerId, conversationId, requestId, text, token: start.token, execution };
+  await withNativeAdmission(upgraded, launch, AbortSignal.timeout(30_000), async () => {
+    const migrated = await Promise.race([current.migrate().then(() => true), delay(5_000, false)]);
+    assert.equal(migrated, true, "migration 21 must not wait for a running native turn");
+    // The turn's own conversation writes are not queued behind the upgrade either.
+    await current.appendText({ ownerId, conversationId, requestId, token: start.token }, requestId + "/assistant", 0, "still running");
+  });
+
+  // Pre-existing conversations bind audit rows like new ones.
+  await current.recordAcceptance({ ownerId, conversationId, requestId: randomUUID(), text: "after upgrade" });
+  const sibling = await current.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
+  const client = await upgraded.connect();
+  try {
+    await assert.rejects(appendAudit(client, { type: "conversation.opened", ownerId, memberId: sibling.memberId, conversationId,
+      payload: {} }), { code: "23503" });
+  } finally { client.release(); }
+  const { rows: types } = await upgraded.query("SELECT event_type FROM birbcrew_ts.audit_events WHERE owner_id=$1 ORDER BY event_id", [ownerId]);
+  assert.deepEqual(types.map(row => row.event_type), ["request.accepted", "member.spawned"]);
 });

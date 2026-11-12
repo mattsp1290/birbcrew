@@ -1,10 +1,10 @@
 -- Append-only, owner-scoped record of who acted and when. Payloads carry
 -- identifiers, digests, choices and statuses only: never prompt or reply text,
 -- tool arguments, tokens or credentials.
--- Lets an audit row prove its conversation really belongs to its owner and member.
-ALTER TABLE birbcrew_ts.conversations
-    ADD CONSTRAINT conversations_owner_binding UNIQUE (conversation_id, owner_id, member_id);
-
+-- Existing tables are only referenced. The two foreign keys take SHARE ROW EXCLUSIVE
+-- on members and conversations, which waits for their inserts but not for the long
+-- read transaction a native turn holds. Adding a constraint or index to conversations
+-- here would take a lock that every conversation statement queues behind.
 CREATE TABLE birbcrew_ts.audit_events (
     event_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     owner_id text NOT NULL,
@@ -37,9 +37,24 @@ CREATE TABLE birbcrew_ts.audit_events (
             AND (jsonb_typeof(payload->'operationId') = 'string') IS TRUE)),
     CHECK (request_id IS NULL OR conversation_id IS NOT NULL),
     FOREIGN KEY (owner_id, member_id) REFERENCES birbcrew_ts.members (owner_id, member_id),
-    FOREIGN KEY (conversation_id, owner_id, member_id)
-        REFERENCES birbcrew_ts.conversations (conversation_id, owner_id, member_id)
+    FOREIGN KEY (conversation_id) REFERENCES birbcrew_ts.conversations
 );
+
+-- The conversation must belong to the row's owner and member. A composite foreign key
+-- would need a new unique constraint on conversations. Bindings are immutable
+-- (001-members.sql) and the foreign key above keeps the row from being deleted, so
+-- this check cannot go stale. A missing conversation is left to the foreign key.
+CREATE FUNCTION birbcrew_ts.bind_audit_conversation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM birbcrew_ts.conversations WHERE conversation_id = NEW.conversation_id
+            AND (owner_id, member_id) IS DISTINCT FROM (NEW.owner_id, NEW.member_id)) THEN
+        RAISE EXCEPTION 'Audit conversation belongs to another owner or member' USING ERRCODE = '23503';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER audit_events_conversation_binding BEFORE INSERT ON birbcrew_ts.audit_events
+    FOR EACH ROW WHEN (NEW.conversation_id IS NOT NULL) EXECUTE FUNCTION birbcrew_ts.bind_audit_conversation();
 
 -- One row per fact: retried activities and replayed requests hit these and append nothing.
 CREATE UNIQUE INDEX audit_events_member_fact ON birbcrew_ts.audit_events (member_id)

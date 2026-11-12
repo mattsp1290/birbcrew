@@ -14,8 +14,10 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   ordering and pagination key. IDs are shared by all owners and are not
   contiguous. Gaps reflect other owners' events, rolled-back writes and suppressed
   duplicates.
-- `owner_id`: the tenant whose state changed. A foreign key binds the member, and
-  the conversation when present, to that owner.
+- `owner_id`: the tenant whose state changed. A foreign key binds the member to
+  that owner. When a conversation is present, a foreign key requires it to exist and
+  a row trigger (`audit_events_conversation_binding`) requires it to belong to that
+  owner and member.
 - `occurred_at`: the database clock (`clock_timestamp()`) when the row was
   inserted, inside the state change's transaction. It is not the commit time.
 - `actor_kind`/`actor_id`: who performed the action. Today this is `owner` (with
@@ -150,6 +152,18 @@ before it have no audit rows. Code without migration 21 writes none either, so r
 the migration before any upgraded instance serves traffic, as the gateway and
 workers already do.
 
+Migration 21 creates the table and only references existing ones. Its foreign keys
+take `SHARE ROW EXCLUSIVE` and `ACCESS SHARE` on `members` and `conversations` until
+the migration commits. Of Crew's own statements, only writes to those two tables
+conflict: the inserts of a spawn or a conversation open. The migration waits for
+those in flight, and new ones wait for the migration. Reads, row locks and the
+transaction a running native turn holds do not conflict, so a live upgrade does not
+stall conversation traffic. Like migrations 014 and 017, which also reference
+`conversations`, it sets no `lock_timeout`. No conflicting holder waits for anything
+that queues behind the migration, so every wait ends. Spawns and opens are short,
+except that an open with project-note capture configured runs its `git` and `bn`
+commands, each limited to 10 s, before it commits.
+
 The table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest
 inventory counts its rows. `pg_dump`/`pg_restore` keep the rows and the identity
@@ -226,8 +240,11 @@ By direct SQL it checks:
 - one row per fact across concurrent duplicates, retries and replays, including
   reconciliation and quarantine;
 - rejection of `UPDATE`, `DELETE` and `TRUNCATE`, unknown types, other
-  initiators, misattributed conversations, null natural keys and extra payload
-  fields;
+  initiators, conversations of another owner or member, null natural keys and
+  extra payload fields;
+- migration 21 on a version-20 database with members and conversations: the locks
+  it takes on existing tables, and that it completes while a native turn holds its
+  admission and that turn still writes to its conversation;
 - that the TypeScript and SQL registries match.
 
 Run the suites one after another, as above. Gateway-starting suites
