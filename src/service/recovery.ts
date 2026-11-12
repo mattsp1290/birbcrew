@@ -2,10 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, open, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import { Client, type Pool } from 'pg';
+import { Client, type Pool, type PoolClient } from 'pg';
 import { z } from 'zod';
 import { fenceEpochLimit, RecoveryRefusedError, type RecoveryFence } from './recovery-fence.ts';
-import { revokeRestoredGrants } from './grants.ts';
+import { appendAudit } from './audit.ts';
 export { RecoveryRefusedError } from './recovery-fence.ts';
 
 const id=z.uuid();
@@ -35,6 +35,22 @@ const auditEpochBits=44n;
 // overran its range.
 const restoredAuditId=`greatest(coalesce(pg_sequence_last_value(pg_get_serial_sequence('birbcrew_ts.audit_events','event_id')::regclass),0),
   (SELECT coalesce(max(event_id),0) FROM birbcrew_ts.audit_events))`;
+/** A restore can bring back grants revoked after its recovery point, so a restored installation
+ * revokes every standing grant as it resumes. It runs in the activation's transaction: the write
+ * barrier admits it only once `activate` has made the installation active there, and a crash
+ * leaves neither. Conversations are locked first, before the activation, as every revocation
+ * locks a conversation before its grant (grants.ts). */
+async function revokeRestoredGrants(db:PoolClient,activate:()=>Promise<boolean>) {
+ await db.query(`SELECT 1 FROM birbcrew_ts.conversations WHERE conversation_id IN
+  (SELECT conversation_id FROM birbcrew_ts.tool_grants WHERE revoked_at IS NULL) ORDER BY conversation_id FOR UPDATE`);
+ if(!await activate()) return;
+ const {rows}=await db.query<{grant_id:string;owner_id:string;member_id:string;conversation_id:string|null}>(`WITH revoked AS
+  (UPDATE birbcrew_ts.tool_grants SET revoked_at=clock_timestamp(),revocation_reason='recovery_restore' WHERE revoked_at IS NULL
+   RETURNING grant_id,owner_id,member_id,conversation_id,created_at)
+  SELECT grant_id,owner_id,member_id,conversation_id FROM revoked ORDER BY created_at,grant_id`);
+ for(const grant of rows) await appendAudit(db,{type:'grant.revoked',ownerId:grant.owner_id,memberId:grant.member_id,
+  conversationId:grant.conversation_id??undefined,payload:{grantId:grant.grant_id,reason:'recovery_restore'}});
+}
 export type SnapshotArtifact={kind:RecoveryManifest['artifacts'][number]['kind'];file:string};
 /** Hooks are trusted operator code, not user/AG-UI input. They must stop ALL
  * consumers/workers/native descendants and await teardown, and stop/fence the
@@ -221,8 +237,8 @@ export class InstallationRecovery {
   const db=await this.pool.connect();
   try {
    await db.query('BEGIN');
+   await db.query("SET LOCAL lock_timeout='10s'");
    const activate=async()=>Boolean((await db.query(`UPDATE birbcrew_ts.recovery_control SET phase='active',generation=NULL WHERE singleton AND instance_id=$1 AND generation=$2`,[c.instance,c.generation])).rowCount);
-   // The restore may have brought back grants revoked after its recovery point.
    if(c.phase==='restored') await revokeRestoredGrants(db,activate); else await activate();
    await db.query('COMMIT');
   } catch(e) {await db.query('ROLLBACK');throw e;} finally {db.release();}
