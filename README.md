@@ -115,3 +115,11 @@ for the rest of the conversation or for every conversation of the member. Later 
 it covers proceed without a card and name the grant. Grants are listed and revoked
 through `/v1/members/{memberId}/grants`. Crew cannot tell a person from an automated
 client holding the owner's token, so a grant covers both.
+
+An owner can save [member memory](docs/memories.md) through `/v1/memories`: up to 32
+short facts per member. Each conversation of the member gets the facts that were
+active when it opened, as system context framed as reference data. Only the owner
+writes memory; the model cannot. Deleting a fact erases its text, but Claude and Codex
+keep the context their session recorded on a conversation's first turn, and native
+session files and Pi checkpoints keep copies. Memory reaches every later conversation
+of the member, so whoever holds the owner's token can steer them all.

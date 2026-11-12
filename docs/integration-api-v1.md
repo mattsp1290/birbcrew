@@ -13,9 +13,10 @@ identifiers, proxy protocol versions, conversation/generation limits, trusted-co
 transport availability, observation limits, receipt retention semantics, the
 request initiator kinds (`initiatorKinds`, today `["owner", "routine"]`), the audit
 contract (event types, page limits, formats) and the scheduled-routine limits and
-policies (`routines`), and `standingGrants` (the standing
+policies (`routines`), `standingGrants` (the standing
 choices, the card and state fields, the grantable tool, policy version and
-initiator kinds, the grants route and the inactive-list limit). Additive
+initiator kinds, the grants route and the inactive-list limit), and `memories` (the
+member memory route, limits, injection and deletion semantics per engine). Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
@@ -37,6 +38,8 @@ proof of the operator's provider access or configured profile availability.
 | `GET /v1/routines/{routineId}/firings` | Firing history, newest first, with each firing's conversation and request |
 | `GET /v1/members/{memberId}/grants` | The member's active standing grants and up to 20 ended ones |
 | `POST /v1/members/{memberId}/grants/{grantId}/revoke` | Revoke a standing grant for later calls, body `{}`; repeating returns the same grant |
+| `POST /v1/memories`, `GET /v1/memories` | Create (`requestId`, `memberId`, `text`) and list member memory entries |
+| `GET`/`DELETE /v1/memories/{memoryId}` | Read one entry, or erase its text and keep a tombstone |
 
 Authentication is required even for capabilities. Other owners get `404`, not a
 confirmation of a request's existence. Versioned request bodies are strict: unknown
@@ -252,6 +255,22 @@ reaches a human decision either waits for it (`wait`) or is cancelled through th
 durable intent above (`fail_closed`). The routes, firing statuses, limits and costs
 are in [scheduled routines](scheduled-routines.md). Like the other routes, bodies
 are strict and the owner comes only from the bearer token.
+
+## Member memory
+
+An owner can save up to 32 active entries of at most 1024 bytes for each member. A
+conversation records the member's active entries when it opens, and its native
+launches get them, framed as reference data, after any project notes. Entries created
+later never reach it. Only the owner writes memory; the model cannot. A create is
+idempotent by `requestId`; a replay of a deleted entry fails `409 memory_deleted`,
+and a 33rd active entry `409 memory_limit`. `POST /v1/conversations` also fails
+`409 memory_limit` when the member's entries, with the conversation's project notes,
+would not fit what the member's engine can be given; nothing is opened. Deleting an
+entry erases its text and keeps a tombstone. A deletion reaches every later launch on
+Pi, but Claude and Codex keep the context their native session recorded on a
+conversation's first turn, so on those engines it reaches only conversations that
+have not run a turn. `capabilities.memories.startedConversations` says which. See
+[member memory](memories.md) for the trust boundary and what deletion does not erase.
 
 ## Validation
 
