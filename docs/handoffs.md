@@ -32,14 +32,19 @@ this in one PostgreSQL transaction:
 The target may be any member of the owner, including the source's own member. After
 the commit the handler submits the reserved request to the target through the normal
 request path (`MemberClient.open`, then `accept`), as the routine dispatcher submits a
-firing. A `201` means both happened: the handoff is committed and the reserved request
-is admitted (`firstRequestAdmitted: true`). The target's worker then runs it like any
-other turn.
+firing. A `201` means the handoff is committed. With `firstRequestAdmitted: true` the
+reserved request is admitted too, and the target's worker runs it like any other turn.
+With `firstRequestAdmitted: false` its submission was refused after the commit, for
+example as `busy` while the target's workflow rolled over: retry with the same
+`requestId`.
 
 `requestId` makes the POST idempotent. The same owner sending the same `requestId`,
-source and `memberId` gets the same handoff back and never a second target, and the
-reserved request is submitted again. So when a POST fails after its commit (the
-gateway died, Temporal was unreachable), retry it with the same `requestId`: the retry
+source and `memberId` gets the same handoff back and never a second target. While the
+reserved request has no admission, each retry submits it again. Once it has one, the
+target's workflow owns it: a retry sends nothing to the target and returns the record,
+and the request's receipt reports how it ended, which may be `failed` or `uncertain`.
+So when a POST fails after its commit (the gateway died, Temporal was unreachable) or
+answers `firstRequestAdmitted: false`, retry it with the same `requestId`: the retry
 completes the submission. The same `requestId` with another `memberId` or another
 source is `409 conflict`. A second handoff of a sealed source under any other
 `requestId` is `409 handed_off`.
@@ -102,10 +107,17 @@ target's first user message in its snapshot, and the reserved request's receipt 
 | `409` | `memory_limit` | the target member's notes and memory would not fit its engine, as for any open |
 | `409` | `conflict` | the `requestId` was used with another source or member; on the target's request routes, the reserved request's ID sent with other text |
 | `409` | `handoff_pending` | on the target's request routes: its reserved request is not admitted yet |
+| `409` | `update_rejected` | after the commit: the target's workflow refused the reserved request's update, as a previous-release worker does with one over 16 KiB (see [Upgrade](#upgrade)); retry with the same `requestId` |
 | `503` | `retry_same_request` | the outcome may be unknown; retry with the same `requestId` |
 
-Every refusal writes nothing: no target, no row, no seal, no audit row. A refused POST
-leaves the source open.
+The POST's refusals, `400`, `404` and the `409`s from `busy` to `conflict`, come before
+or inside its transaction and write nothing: no target, no row, no seal, no audit row.
+Such a refused POST leaves the source open. After the commit nothing is refused: the
+POST returns the committed record, with
+`firstRequestAdmitted: false` when the reserved request's submission was refused, or
+answers `409 update_rejected` or `503 retry_same_request`. In every one of those cases a
+retry with the same `requestId` re-drives the delivery. `409 request_rejected`, which
+other request routes can answer, never reaches this POST.
 
 ## What crosses
 
@@ -117,7 +129,9 @@ BirbCrew conversation handoff v1. The owner moved an earlier conversation with a
 {"sourceEngine":"claude","omittedTurns":2,"uncertainTurns":0,"turns":[{"ownerPrompt":"...","modelReply":"..."}]}
 ```
 
-- Turns are the source's committed turns, oldest first. The newest turns are kept and
+- Turns are the source's committed turns, oldest first, read from the conversation's
+  turns and its snapshot, not from a workflow history. So they span every Temporal
+  Continue-As-New generation of the source. The newest turns are kept and
   the oldest dropped, whole, until the rendered text fits; `omittedTurns` counts the
   dropped ones. Nothing is summarised or truncated. If the newest turn alone does not
   fit, the POST fails `409 handoff_too_large`: a turn can commit a reply of 65,536
@@ -133,8 +147,11 @@ BirbCrew conversation handoff v1. The owner moved an earlier conversation with a
   so model text is never relabelled as the owner's across a chain. Its reply, the
   acknowledgement, is carried.
 - Uncertain turns are counted in `uncertainTurns` and never carried.
-- The JSON keeps every prompt and reply inside its own string. U+2028 and U+2029 are
-  escaped too, as in member memory, so no text can start a line or pose as the header.
+- The JSON keeps every prompt and reply inside its own string. JSON escapes the C0
+  controls; the server also escapes the C1 controls (U+0080 to U+009F, NEL among them)
+  and U+2028 and U+2029, which JSON leaves raw and which can each break a line. So no
+  text can start a line or pose as the header. Member memory refuses control characters
+  instead; a transcript quotes committed text as it is, so it escapes them.
 
 Not carried: tool calls and their arguments, approvals and decisions, work items and
 receipts, Pi child tasks and outputs, native sessions and checkpoints, the source's
@@ -159,8 +176,9 @@ The handoff row is the only authority for the target's first request. At admissi
   it too. No client flag can raise it.
 
 An admission refused inside a conversation's Temporal workflow fails that whole
-conversation, so `MemberClient.accept` and `submit` run the same checks before sending
-any workflow update. A refusal there leaves the workflow untouched.
+conversation, so `MemberClient.accept` and `submit` run the same checks before every
+attempt to send a workflow update, including each retry while the workflow rolls over.
+A refusal there leaves the workflow untouched.
 
 A standing grant never covers the handoff turn. Grants cover only requests whose
 admission names the owner, so a protected call the target model makes while
@@ -176,12 +194,21 @@ observation stream, receipts and results of its requests, a resubmission of a co
 request (which returns the stored result), cancellation of an old request, and the
 audit trail. The busy check and every admission lock the source's conversation row, so
 a request is either admitted before the seal (and the handoff is refused as busy) or
-refused after it. `MemberClient` refuses a sealed source before any workflow update; a
-request that passed that check just before the seal committed is refused at admission
-inside the source's workflow instead, after the activity's 60 s of retries, and that
-workflow then fails. The source admits nothing new either way, and its history and
+refused after it. `MemberClient` refuses a sealed source before every attempt to send a
+workflow update. A request that passed that check just before the seal committed is
+refused at admission inside the source's workflow instead. The admission activity does
+not retry a seal, so that update fails in about a second (`409 update_rejected`), and
+that workflow then fails. The source admits nothing new either way, and its history and
 receipts stay readable. The trusted-context lane cannot attach to either side of a
 handoff.
+
+A Claude turn whose worker failed after its native launch, on a profile with a protected
+or human tool, is left uncertain while the workflow tries to recover it, for up to about
+a minute. It is not busy, so a handoff in that window counts it in `uncertainTurns`. Its
+recovery takes the same row lock and finds the seal, so the turn stays uncertain and
+never resumes, asks for a decision or commits on the sealed source.
+
+A conversation grant of a sealed source is listed as `conversation_closed`.
 
 Sealing does not end the source's Temporal workflow; it stays idle, as any idle
 conversation's does.
@@ -231,6 +258,12 @@ may refuse a large transcript; the reserved request then fails like any provider
 failure and the target closes as any conversation with a failed turn does. The source
 stays sealed, and the target has no committed turn to hand on, so that history can then
 only be read.
+
+A target whose Temporal workflow closes before its reserved request is admitted, for
+example because the admission activity could not reach the database for its whole 60 s,
+stays `handoff_pending` for good. The closed workflow cannot admit the reserved request,
+so every retry of the POST answers `firstRequestAdmitted: false`, and the source stays
+sealed. This release has no recourse for it.
 
 The transcript is copied: into the handoff row, into the target's public snapshot and
 events, its native session files and checkpoints, and Temporal history, where the
@@ -289,7 +322,11 @@ reserved request as the owner's, and fail to read a `handoff` initiator.
 
 Rollback to a release without migration 27 is unsupported. An older release cannot read
 a `handoff` initiator, so status reads and audit of those requests fail, and it ignores
-every seal and reservation.
+every seal and reservation. It also cannot replay a target's workflow run that accepted a
+reserved request over 16 KiB: replaying that update runs its handler, whose 16 KiB check
+throws where the history scheduled the admission activity. That is a nondeterminism
+failure, and the workflow task keeps failing until a worker of this release takes it.
+The same happens to a previous-release worker left polling during a rolling update.
 
 Changing the bound does not affect replay. Temporal does not run an update's validator
 when it replays an accepted update (`run_validator` is false during replay in the
@@ -330,22 +367,32 @@ npm run test:handoffs
 transcript, the target opened fresh with the member's memory snapshot, the reserved
 request admitted with the handoff initiator, the transcript as the target's first user
 message, and the owner continuing there; `404` in both directions of owner isolation and
-strict routes; `busy` for a running turn, a pending approval and a queued request;
+strict routes; `busy` for a running turn, a pending approval and a queued request; a
+handoff and an admission on one source, each held on the row lock in turn, ending `busy`
+or `handed_off`; a recoverable uncertain Claude turn whose recovery the seal refuses;
 idempotent retries that heal a lost submission, concurrent retries that open one target,
-and `requestId` conflicts; a sealed source that refuses new requests and a second
+and `requestId` conflicts; retries that send nothing once the reserved request is
+admitted, whether it then ended uncertain or was rejected; a refusal after the commit that
+returns the record unadmitted; a sealed source that refuses new requests and a second
 handoff but keeps its snapshot, receipts and replays; refusals for an empty source, a
-source with only an uncertain turn, a trusted-lane source, `memory_limit`, and a newest
-reply of exactly 65,536 bytes, each writing nothing, with such a reply left out whole when
-older; tail fitting by whole turns, uncertain turns counted, native call IDs redacted; the
-reserved request admitting only its digest, before every other request including a
-routine firing's, and never on a caller's attestation; the 16 KiB limit for every other
-request in the target, through the routes and admission; `MemberClient` refusing before
-any workflow update; a chained handoff with `ownerPrompt: null`; U+2028 and U+2029 kept
-escaped; an audit trail without text, the row's binding and immutability; a standing grant
-that does not cover the handoff turn, and a tripwire that the target has no cardless call
-any other conversation of the member would not; migration 27's locks, that it never
-queues and does not wait for a native turn, and a turn admitted before the upgrade that
-can be handed off after it.
+source with only an uncertain turn, a trusted-lane source, `memory_limit`, an incomplete
+snapshot, a prompt that no longer matches its digest, and a newest reply of exactly 65,536
+bytes, each writing nothing, with such a reply left out whole when older; a transcript of
+exactly 65,536 bytes carried whole and one byte more leaving its oldest turn out; tail
+fitting by whole turns, uncertain turns counted, native call IDs redacted; the reserved
+request admitting only its digest, before every other request including a routine
+firing's, and never on a caller's attestation; the 16 KiB limit for every other request in
+the target, through the routes and admission; `MemberClient` refusing before any workflow
+update and again before each rollover retry, and admission refusing a seal or a pending
+reservation without retrying; a chained handoff with `ownerPrompt: null`; C1 controls,
+U+2028 and U+2029 kept escaped; an audit trail without text, the row's binding and
+immutability; a standing grant that does not cover the handoff turn, a sealed source's
+conversation grant listed as closed, and a tripwire that the target has no cardless call
+any other conversation of the member would not, including for a request with no admission;
+migration 27's locks, that it never queues and does not wait for a native turn, and a turn
+admitted before the upgrade that can be handed off after it. `npm run test:recovery`
+checks that capture counts `conversation_handoffs` and that a held installation refuses a
+handoff and a direct insert.
 
 The service proof needs Docker, Linux, Landlock and Temporal CLI 1.10.0:
 
@@ -354,8 +401,9 @@ npm run test:handoffs:service
 ```
 
 It runs the real gateway, Temporal worker and fixture providers. For each target engine
-it hands off a Pi conversation whose two turns render to about 60 KB, waits for the
-target's first request to complete, and reads the fixture provider's record of that
+it hands off a Pi conversation whose two turns, nearly all quotes and backslashes that
+JSON escapes, render to exactly 65,536 bytes, waits for the target's first request to
+complete, and reads the fixture provider's record of that
 request: both turns' markers arrive in the messages and none in the system context, and
 the fixture's reply shows it parsed the whole transcript. The owner then continues in the
 target, and the source refuses a new request.
