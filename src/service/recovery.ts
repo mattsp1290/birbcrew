@@ -39,13 +39,13 @@ const restoredAuditId=`greatest(coalesce(pg_sequence_last_value(pg_get_serial_se
  * after it, text and all. So a restored installation revokes every standing grant and suspends
  * every active memory as it resumes. It runs in the activation's transaction: the write barrier
  * admits it only once `activate` has made the installation active there, and a crash leaves
- * neither. Rows are locked first, before the activation: conversations, as every revocation locks
- * a conversation before its grant (grants.ts), then active memories, which a delete locks before
- * its write waits on the activation (memories.ts). */
+ * neither. Conversations are locked first, before the activation, as every revocation locks a
+ * conversation before its grant (grants.ts). Memories need no such order: until this transaction
+ * commits, any other write meets the barrier and fails, so a delete holding an entry's row lock
+ * rolls back and releases it. */
 async function settleRestoredState(db:PoolClient,activate:()=>Promise<boolean>) {
  await db.query(`SELECT 1 FROM birbcrew_ts.conversations WHERE conversation_id IN
   (SELECT conversation_id FROM birbcrew_ts.tool_grants WHERE revoked_at IS NULL) ORDER BY conversation_id FOR UPDATE`);
- await db.query(`SELECT 1 FROM birbcrew_ts.member_memories WHERE state='active' ORDER BY memory_id FOR NO KEY UPDATE`);
  if(!await activate()) return;
  const {rows}=await db.query<{grant_id:string;owner_id:string;member_id:string;conversation_id:string|null}>(`WITH revoked AS
   (UPDATE birbcrew_ts.tool_grants SET revoked_at=clock_timestamp(),revocation_reason='recovery_restore' WHERE revoked_at IS NULL

@@ -410,8 +410,8 @@ test('a restored installation suspends every active memory as it resumes; a held
  const restored=await restoreBundle(t);const recovery=new InstallationRecovery(restored,t.fence);
  await recovery.acceptRestore(t.bundle,pins,randomUUID());
  assert.deepEqual(await states(restored),[{memory_id:alpha.memoryId,state:'active',body:'alpha'},{memory_id:bravo.memoryId,state:'active',body:'bravo'}]);
- // A delete that locked its row before the resume cannot deadlock it: its write meets the hold and
- // fails, and the resume, waiting on that row, goes on.
+ // A delete holding its row when the resume starts cannot deadlock it: the delete's write still sees
+ // the hold and fails, and the resume, waiting on that row, goes on.
  const deleter=await restored.connect();t.defer(async()=>deleter.release());
  await deleter.query('BEGIN');
  await deleter.query('SELECT 1 FROM birbcrew_ts.member_memories WHERE memory_id=$1 FOR NO KEY UPDATE',[alpha.memoryId]);

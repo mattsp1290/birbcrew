@@ -6,11 +6,12 @@
 -- conversations for the two new foreign keys, and ACCESS EXCLUSIVE on audit_events to replace
 -- its type CHECK (dropped and re-added NOT VALID, so no row is scanned) and to build one empty
 -- partial unique index, which reads audit_events once. As in 025 they are taken together with
--- NOWAIT and retried, so the migration never waits in a lock queue, never joins a deadlock and
--- never holds sessions up while it waits. A native turn's admission transaction holds only
--- ACCESS SHARE on members and conversations, which these modes allow, and nothing on
--- audit_events, so a running turn never delays it. After 60 s without the locks it fails with
--- 55P03 and applies nothing.
+-- NOWAIT and retried, so the migration never waits in a lock queue and never joins a deadlock.
+-- Applied alone it holds nothing while it retries. Applied with 025 in one transaction, from
+-- version 24, it retries while holding 025's locks, and admissions and audited writes wait. A
+-- native turn's admission transaction holds only ACCESS SHARE on members and conversations,
+-- which these modes allow, and nothing on audit_events, so a running turn never delays it. After
+-- 60 s without the locks it fails with 55P03 and applies nothing.
 DO $$
 DECLARE deadline timestamptz := clock_timestamp() + interval '60 seconds';
 BEGIN

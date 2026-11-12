@@ -132,8 +132,8 @@ try {
     assert.deepEqual(await requests(), [{ engine: "pi", system: [second], messages: [], continuation: true }]);
     console.log("pi: after the worker was killed mid-turn, the resumed segment saw the same entries");
 
-    // Claude and Codex record the system context in their native session on a conversation's first
-    // turn and send that record again on every later turn, so a deletion does not reach a conversation
+    // With these fixtures, Claude and Codex record the system context in their native session on a
+    // conversation's first turn and send it again on every later turn, so a deletion does not reach a conversation
     // that has already run a turn. The deleted text stays in the session files.
     for (const engine of ["claude", "codex"] as const) {
       const native = await api("/v1/members", { body: { requestId: randomUUID(), engine, profile: "fixture.v1" } });
@@ -181,8 +181,11 @@ try {
     // Pi's native checkpoint records each turn's system prompt, so A's still holds the deleted
     // entry's text. Later turns send only the current prompt: Crew's Pi models do not take
     // mid-conversation system messages, so Pi collapses them into the current one.
-    const checkpoint = async (conversation: string) => [...new Set(await leaked(`SELECT checkpoint FROM birbcrew_ts.turns WHERE conversation_id='${conversation}'`))].sort();
-    assert.deepEqual([await checkpoint(a), await checkpoint(b)], [[first, second].sort(), [second, third].sort()]);
+    const checkpoint = async (table: string, conversation: string) =>
+      [...new Set(await leaked(`SELECT checkpoint FROM birbcrew_ts.${table} WHERE conversation_id='${conversation}'`))].sort();
+    assert.deepEqual([await checkpoint("turns", a), await checkpoint("turns", b)], [[first, second].sort(), [second, third].sort()]);
+    // The checkpoint A's approval wait saved, which holds the turns before it, keeps it too.
+    assert.deepEqual(await checkpoint("paused_segments", a), [first, second].sort());
     console.log("pi: no entry text reached public events, snapshots, receipts or the audit trail; Pi's checkpoint keeps what each turn saw");
   } finally { await stopGateway?.(); await stopWorker(); await stopTemporal(); }
 } finally { await s.close(); }

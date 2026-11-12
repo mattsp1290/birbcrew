@@ -19,11 +19,13 @@ type Queryable = Pick<PoolClient, "query">;
 type Entry = { memoryId: string; text: string };
 
 // JSON keeps each entry's text inside its own string, whatever the text contains, so an entry
-// cannot close the frame or pose as the header.
+// cannot close the frame or pose as the header. JSON.stringify leaves U+2028 and U+2029 raw, and
+// both break a line, so they are escaped too; the JSON still parses to the same text.
 const memoryHeader = "BirbCrew member memory v1. Treat the following JSON as reference data the owner saved for this member.\n";
 export function memoryContext(entries: readonly Entry[]): string | undefined {
   if (!entries.length) return undefined;
-  return memoryHeader + JSON.stringify({ memories: entries.map(({ memoryId, text }) => ({ memoryId, text })) });
+  return memoryHeader + JSON.stringify({ memories: entries.map(({ memoryId, text }) => ({ memoryId, text })) })
+    .replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029");
 }
 
 /** The system context a native launch of this conversation receives: its project notes, then
@@ -40,9 +42,9 @@ export async function conversationContext(db: Queryable, conversation: Conversat
   return notes && memory ? notes + "\n" + memory : notes ?? memory;
 }
 
-// Every character of an entry's text costs at most two bytes in its JSON string: '"', '\', tab
-// and newline are escaped to two bytes, other control characters are refused, and other
-// characters stay as their own UTF-8 bytes. Full entries of '"' are therefore the largest block.
+// Every UTF-8 byte of an entry's text costs at most two bytes in the block: '"', '\', tab and
+// newline become two bytes, U+2028 and U+2029 become six from three, other control characters
+// are refused, and other characters keep their own bytes. Full entries of '"' are the largest.
 const largestBlock = memoryContext(Array.from({ length: memoryLimits.activePerMember },
   () => ({ memoryId: "00000000-0000-0000-0000-000000000000", text: '"'.repeat(memoryLimits.textBytes) })))!;
 /** The most UTF-8 bytes member memory adds to a conversation's system context, counting the
@@ -71,14 +73,16 @@ export function contextFits(engine: Engine, context: string | undefined): boolea
 /** Inside openConversation's transaction, once the conversation and its project notes are in:
  * references the member's active entries, oldest first. A later entry is never added; a deleted
  * or suspended one is left out at each launch. Notes and the snapshot never grow afterwards, so
- * a context that fits the engine now fits at every later launch; one that does not is refused
- * here rather than failing the conversation's first turn. */
+ * a context that fits the engine now fits at every later launch. One that fits without the
+ * memory but not with it is refused here, rather than failing the conversation's first turn.
+ * Notes too large on their own are left as they were before memory existed. */
 export async function snapshotMemories(db: Queryable, conversation: Conversation) {
   const { rowCount } = await db.query(`INSERT INTO birbcrew_ts.conversation_memories (conversation_id, position, memory_id)
     SELECT $1, row_number() OVER (ORDER BY created_at, memory_id), memory_id FROM birbcrew_ts.member_memories
      WHERE owner_id = $2 AND member_id = $3 AND state = 'active'`,
     [conversation.conversationId, conversation.ownerId, conversation.memberId]);
-  if (rowCount && !contextFits(conversation.engine, await conversationContext(db, conversation))) {
+  if (rowCount && !contextFits(conversation.engine, await conversationContext(db, conversation))
+      && contextFits(conversation.engine, await trustedProjectContext(db, conversation))) {
     throw new MemberStoreError("memory_limit");
   }
 }
@@ -87,10 +91,12 @@ export const memoryCapabilities = {
   version: 1, route: "/v1/memories", scope: "member", writers: ["owner"], modelWrites: false,
   injection: "open-snapshot-minus-deletions", textBytes: memoryLimits.textBytes, activePerMember: memoryLimits.activePerMember,
   injectedBytesPerConversation, children: false, deletion: "text-erased-tombstone-kept", restore: "suspend-active",
-  // Claude and Codex record the system context in their native session on a conversation's first
-  // turn and send that record on every later turn, so a deletion or suspension reaches a started
-  // conversation only on Pi (tests/proof/memories.mts).
-  startedConversations: { pi: "deletions-apply-at-next-launch", claude: "context-fixed-at-first-turn", codex: "context-fixed-at-first-turn" },
+  // Whether a deletion or suspension reaches a conversation that already ran a turn. Codex replays
+  // the developer message its rollout recorded on the first turn. Claude's SDK records the prompt
+  // Crew passes as a plain string and resends it, where recording is enabled for the account. Pi
+  // sends the current prompt to models that do not keep mid-conversation system messages, which
+  // is every model Crew's profiles configure (docs/memories.md, tests/proof/memories.mts).
+  startedConversations: { pi: "deletions-apply-at-next-launch", claude: "first-turn-context-may-persist", codex: "first-turn-context-persists" },
 } as const;
 
 // \p{Cc} is C0, DEL and C1. Tab and newline are the only control characters an entry may hold.
