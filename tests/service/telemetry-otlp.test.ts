@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { text } from "node:stream/consumers";
@@ -11,18 +12,17 @@ import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const child = fileURLToPath(new URL("./telemetry-child.ts", import.meta.url));
-type Run = { code: number | null; stdout: string; stderr: string; ms: number };
+type Run = { code: number | null; stdout: string; stderr: string };
 type Received = { method?: string; url?: string; headers: IncomingHttpHeaders; body: string };
 type Span = { name: string; traceId: string; spanId: string; parentSpanId?: string; status: { code: number };
   attributes: { key: string; value: unknown }[] };
 
 // The module reads its configuration at import time, so each case runs in a fresh process.
 function run(env: Record<string, string>, ids: string[]): Promise<Run> {
-  const started = performance.now();
   return new Promise((resolve) => {
     execFile(process.execPath, [child, ...ids], { env: { PATH: process.env.PATH, ...env }, timeout: 20_000 },
       (error, stdout, stderr) => resolve({ code: error ? (typeof error.code === "number" ? error.code : -1) : 0,
-        stdout, stderr, ms: performance.now() - started }));
+        stdout, stderr }));
   });
 }
 
@@ -92,39 +92,53 @@ test("exports validated spans to an OTLP/HTTP collector beside the JSONL file", 
     spans.map((span) => [span.name, span.traceId, span.spanId]).sort());
 });
 
-test("an unreachable or silent collector neither fails nor delays traced work", async (t) => {
-  const refused = createServer();
-  const closedPort = await listen(t, refused);
+test("an unreachable or silent collector cannot hold a flush past its budget", async (t) => {
+  // Bound and released so connections are refused; nothing in this test binds it again.
+  const refused = createServer().listen(0, "127.0.0.1");
+  await once(refused, "listening");
+  const closedPort = (refused.address() as AddressInfo).port;
   refused.close();
+  await once(refused, "close");
   // Accepts connections and never answers.
   const silent = createServer(() => {});
   const silentPort = await listen(t, silent);
   const token = "collector-" + randomUUID();
-  for (const port of [closedPort, silentPort]) {
-    const result = await run({
-      BIRBCREW_OTLP_TRACES_ENDPOINT: `http://127.0.0.1:${port}/v1/traces`, OTEL_EXPORTER_OTLP_HEADERS: "x-collector-token=" + token,
-    }, [...ids(), "private-" + randomUUID()]);
-    assert.equal(result.code, 0, result.stderr);
-    const { value, elapsed } = JSON.parse(result.stdout);
-    assert.equal(value, true);
-    assert.ok(elapsed < 250, `traced work took ${elapsed} ms`);
-    // Process startup plus the one-second flush bound, well under the five-second export timeout.
-    assert.ok(result.ms < 4_500, `child took ${result.ms} ms`);
-    assert.ok(!result.stdout.includes(token) && !result.stderr.includes(token));
+  // Upper bounds sit well above each budget, for slow runners, and well below the five-second export timeout.
+  for (const [flush, limit] of [["turn", 750], ["exit", 2_500]] as const) {
+    for (const port of [closedPort, silentPort]) {
+      const result = await run({
+        BIRBCREW_OTLP_TRACES_ENDPOINT: `http://127.0.0.1:${port}/v1/traces`, OTEL_EXPORTER_OTLP_HEADERS: "x-collector-token=" + token,
+      }, [...ids(), "private-" + randomUUID(), flush]);
+      assert.equal(result.code, 0, result.stderr);
+      const { value, flushed } = JSON.parse(result.stdout);
+      assert.equal(value, true);
+      assert.ok(flushed < limit, `${flush} flush to port ${port} took ${flushed} ms`);
+      assert.ok(!result.stdout.includes(token) && !result.stderr.includes(token));
+    }
   }
 });
 
 test("a malformed endpoint fails at startup without echoing it", async (t) => {
   const { port, received } = await collector(t);
   for (const value of ["collector:4318/v1/traces", "not a url", `ftp://127.0.0.1:${port}/v1/traces`,
-    `http://operator:hunter2@127.0.0.1:${port}/v1/traces`, `http://127.0.0.1:${port}`, `https://127.0.0.1:${port}/`]) {
+    `http://operator:hunter2@127.0.0.1:${port}/v1/traces`, `http://127.0.0.1:${port}`, `https://127.0.0.1:${port}/`,
+    // Plain http beyond numeric loopback would carry collector headers in the clear.
+    `http://collector.example:${port}/v1/traces`, `http://localhost:${port}/v1/traces`,
+    // The exporter would drop these silently.
+    `https://127.0.0.1:${port}/v1/traces?api_key=hunter2`, `https://127.0.0.1:${port}/v1/traces#hunter2`]) {
     const result = await run({ BIRBCREW_OTLP_TRACES_ENDPOINT: value }, [...ids(), "private"]);
     assert.notEqual(result.code, 0, value);
     assert.equal(result.stdout, "", value);
-    assert.match(result.stderr, /BIRBCREW_OTLP_TRACES_ENDPOINT must be an http or https OTLP traces URL/);
+    assert.match(result.stderr, /BIRBCREW_OTLP_TRACES_ENDPOINT must be an https OTLP traces URL/);
     assert.ok(!result.stderr.includes(value) && !result.stderr.includes("hunter2"), value);
   }
   assert.equal(received.length, 0);
+});
+
+test("an https endpoint on any host is accepted", async () => {
+  const result = await run({ BIRBCREW_OTLP_TRACES_ENDPOINT: "https://collector.invalid/v1/traces" }, [...ids(), "private", "turn"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).value, true);
 });
 
 test("with no sink configured traced work runs untouched", async () => {

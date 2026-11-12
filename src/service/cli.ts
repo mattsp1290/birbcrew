@@ -30,8 +30,11 @@ async function main() {
         await registerProfiles(pool, profiles, stateDir);
         await runMemberWorker(store, address, profiles, resolve(configPath), stateDir);
       } finally {
-        await close?.();
-        await flushTelemetry();
+        try {
+          await close?.();
+        } finally {
+          await flushTelemetry();
+        }
       }
       return;
     }

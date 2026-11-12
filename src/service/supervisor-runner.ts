@@ -3,7 +3,7 @@ import { nativeCallIds } from "./text-stream.ts";
 import { MemberStore } from "./store.ts";
 import { runLiveTool } from "./codex-live.ts";
 import { trustedProjectContext } from "./project-notes.ts";
-import { flushTelemetry, traced } from "./telemetry.ts";
+import { flushTelemetry, traced, turnFlushBudgetMs } from "./telemetry.ts";
 import { withNativeAdmission } from "./native-admission.ts";
 import type { Launch } from "./supervisor.ts";
 import { pathToFileURL } from "node:url";
@@ -73,8 +73,10 @@ process.once("message", async (command: AdmittedTurn) => {
   } catch {
     reply = { error: "Native SDK turn failed" };
   } finally {
-    // Batched spans would be lost at process.exit below.
-    await Promise.all([pool.end(), flushTelemetry()]);
+    // Batched spans would be lost at process.exit below. A failing pool.end() still crashes the runner
+    // without a reply, as before, but only after the flush has had its chance.
+    const [ended] = await Promise.allSettled([pool.end(), flushTelemetry(turnFlushBudgetMs)]);
+    if (ended.status === "rejected") throw ended.reason;
   }
   if (process.connected) process.send?.(reply, () => process.exit(0));
 });

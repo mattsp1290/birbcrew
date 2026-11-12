@@ -19,13 +19,16 @@ const output = process.env.BIRBCREW_TRACE_FILE;
 const endpoint = otlpEndpoint(process.env.BIRBCREW_OTLP_TRACES_ENDPOINT);
 
 // A typo must stop startup, not silently send spans elsewhere or drop them. The value is not echoed
-// because a rejected URL may contain credentials.
+// because a rejected URL may contain credentials. As in the proxy relay, plain http is allowed only to
+// numeric loopback, because collector headers from the OTLP environment variables ride on every request.
+// The exporter sends only the path, so a query or fragment (often an ingest key) would be dropped silently.
 function otlpEndpoint(value: string | undefined) {
   if (!value) return undefined;
   const url = URL.parse(value);
-  if (!url || !["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname === "/") {
-    throw new Error("BIRBCREW_OTLP_TRACES_ENDPOINT must be an http or https OTLP traces URL with a path, "
-      + "such as http://127.0.0.1:4318/v1/traces, and no embedded credentials");
+  if (!url || url.username || url.password || url.search || url.hash || url.pathname === "/" ||
+      !(url.protocol === "https:" || (url.protocol === "http:" && ["127.0.0.1", "[::1]"].includes(url.hostname)))) {
+    throw new Error("BIRBCREW_OTLP_TRACES_ENDPOINT must be an https OTLP traces URL with a path (plain http only "
+      + "to 127.0.0.1 or [::1]), such as http://127.0.0.1:4318/v1/traces, with no credentials, query or fragment");
   }
   return url.href;
 }
@@ -67,8 +70,18 @@ const provider = processors.length ? new BasicTracerProvider({
 }) : undefined;
 const tracer = provider?.getTracer("birbcrew");
 
-export async function flushTelemetry() {
-  await provider?.forceFlush().catch(() => {});
+// The host confirms a native turn only after its runner process closes, so the runner's flush is on
+// every turn's critical path and gets a much smaller budget than a worker's exit flush.
+export const turnFlushBudgetMs = 250;
+
+export async function flushTelemetry(budgetMs = 1_000) {
+  if (!provider) return;
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    provider.forceFlush().catch(() => {}),
+    new Promise<void>((resolve) => { timer = setTimeout(resolve, budgetMs); }),
+  ]);
+  clearTimeout(timer);
 }
 
 export function traced<T>(name: Operation, scope: Scope, work: () => Promise<T>): Promise<T> {

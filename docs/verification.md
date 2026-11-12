@@ -109,19 +109,31 @@ timing and status.
 
 Set `BIRBCREW_OTLP_TRACES_ENDPOINT` to also send the same spans over OTLP/HTTP
 JSON to a collector. Give the full traces URL, such as
-`http://127.0.0.1:4318/v1/traces`; it is used as given. Either sink, both or
+`https://collector.example/v1/traces`. It must use `https`, except that plain
+`http` is allowed to `127.0.0.1` or `[::1]`, such as
+`http://127.0.0.1:4318/v1/traces`. It must have a path and must not embed a
+user name, password, query string or fragment; the exporter sends only the
+path, so a query string would otherwise be dropped. Either sink, both or
 neither may be set. Spans come from the member worker and its native turn
-runners, but the gateway also loads the setting, so any of them fails at
-startup when the value is not an `http` or `https` URL, has no path, or embeds
-a user name or password. The error does not repeat the
-value. Each span carries only its name, trace and span IDs, parent, timing,
-status and the same correlation IDs as the file. The resource carries only
-`service.name=birbcrew`. Prompts, replies, tool arguments and credentials are
-never span data. Spans are batched in a bounded queue and dropped when the
-queue is full or the collector fails, without failing or slowing a turn. A
-worker or runner waits at most one second to flush on exit. The exporter
-also honours the standard `OTEL_EXPORTER_OTLP_HEADERS`,
-`OTEL_EXPORTER_OTLP_TRACES_HEADERS`, certificate and compression variables, so
-set collector headers only for this endpoint. Crew registers no OpenTelemetry
+runners, but every process that loads the store also reads the setting: the
+gateway, every `members` command, the worker, the supervisor host and the turn
+runners. Each of them fails at startup when the value breaks these rules, so
+a malformed value stops the whole service, not only tracing. The error does
+not repeat the value. Each span carries only its name, trace and span IDs,
+parent, timing, status and the same correlation IDs as the file. The resource
+carries only `service.name=birbcrew`. Prompts, replies, tool arguments and
+credentials are never span data. Spans are batched in a bounded queue and
+dropped when the queue is full or the collector fails; export never fails a
+turn. It can slow one, though: the host confirms a native turn only after its
+runner exits, and the runner first waits up to 250 milliseconds to flush its
+spans. A slow, stalled or unreachable collector therefore adds up to a quarter
+second to every native turn, and spans not flushed in time are dropped. The
+worker waits up to one second to flush when it stops. The exporter also
+honours the standard `OTEL_EXPORTER_OTLP_HEADERS`,
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS`, certificate, client key and compression
+variables. The generic `OTEL_EXPORTER_OTLP_*` forms apply to every OTLP
+exporter, so a header or certificate set for another service on the same host
+is sent to this collector too. Prefer the `OTEL_EXPORTER_OTLP_TRACES_*` forms
+and keep the generic ones unset for Crew. Crew registers no OpenTelemetry
 diagnostic logger and discards export errors, so header values are not
 logged.
