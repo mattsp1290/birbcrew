@@ -205,7 +205,10 @@ As for every migration, stop every process of the previous release first (see
 [persistent deployment](persistent-deployment.md#upgrades)). A workflow worker of the
 previous release waiting on a card that has a deadline would never expire it, while
 the database refuses a decision past it, so the card would be stuck. Rolling back
-after a card with a deadline was proposed is not supported.
+once a request with a deadline was accepted is not supported: the previous release's
+workflow repeats its update validator when it replays an accepted update, and that
+validator refuses `approvalDeadlineSeconds`, so its worker cannot replay the
+conversation.
 
 The migration adds no table, so recovery capture and the write barrier need no
 change. A restore keeps each card's `expiresAt`, an absolute time. A card whose

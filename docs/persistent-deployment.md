@@ -195,7 +195,7 @@ same for `deferred_calls`, `request_admissions`, `routines`, `routine_firings` a
 `audit_events`, retrying while it holds 27's locks when both run in one transaction. A
 previous-release workflow worker never expires a card that has a deadline, while the
 database refuses a decision past it, so stopping the previous release first is required
-for it too; rolling back once such a card exists is unsupported (see
+for it too; rolling back once a request with a deadline was accepted is unsupported (see
 [approval expiry](approval-expiry.md#upgrade-in-flight-workflows-and-recovery)).
 
 A Kubernetes Deployment's default `RollingUpdate` strategy starts new pods while
