@@ -711,6 +711,57 @@ test("migration 23 records a v21 database's admissions as owner-initiated withou
   assert.deepEqual(events, [rejected, running].map(({ requestId }) => ({ requestId, kind: "owner", id: ownerId })));
 });
 
+test("a request's audit rows carry the initiator its admission recorded; one without an admission records the owner", async (t) => {
+  const ownerId = "owner-" + randomUUID();
+  const member = await store.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
+  const conversationId = randomUUID();
+  await store.openConversation({ ownerId, memberId: member.memberId, conversationId });
+  const initiators = async () => (await pool.query(`SELECT event_type AS type, request_id AS "requestId",
+    initiator_kind AS kind, initiator_id AS id FROM birbcrew_ts.audit_events WHERE owner_id=$1 ORDER BY event_id`, [ownerId])).rows;
+  const owner = { kind: "owner", id: ownerId };
+
+  // A workflow history older than durable admission starts and commits a turn with no admission row.
+  const legacy = { ownerId, conversationId, requestId: randomUUID(), text: "legacy" };
+  const turn = await store.beginTurn(legacy, { workflowRunId: randomUUID(), activityId: "legacy", attempt: 1 });
+  assert.equal(turn.kind, "start"); if (turn.kind !== "start") return;
+  await store.commitTurn({ ownerId, conversationId, requestId: legacy.requestId, token: turn.token, reply: "legacy reply",
+    checkpoint: { version: 1, engine: "pi", state: {} } });
+  const admitted = { ownerId, conversationId, requestId: randomUUID(), text: "admitted" };
+  // A bare string, or an activity bound without its initiator, is refused before anything is written.
+  for (const initiator of ["owner", undefined]) {
+    await assert.rejects(store.recordAcceptance(admitted, initiator as never), z.ZodError);
+  }
+  await store.recordAcceptance(admitted, ownerInitiator);
+  assert.deepEqual(await initiators(), [
+    { type: "member.spawned", requestId: null, ...owner }, { type: "conversation.opened", requestId: null, ...owner },
+    { type: "request.finished", requestId: legacy.requestId, ...owner }, { type: "request.accepted", requestId: admitted.requestId, ...owner },
+  ]);
+  assert.equal(await admittedInitiator(pool, legacy), null);
+  assert.deepEqual(await admittedInitiator(pool, admitted), { kind: "owner" });
+
+  // No other kind exists yet. Widening both CHECKs, as a later migration would, shows the row is
+  // copied from the admission rather than assumed. A separate database keeps the DDL's locks
+  // away from other suites.
+  const widened = await databaseAt(t, 23);
+  await widened.query(`ALTER TABLE birbcrew_ts.request_admissions DROP CONSTRAINT request_admissions_initiator_kind_check;
+    ALTER TABLE birbcrew_ts.audit_events DROP CONSTRAINT audit_events_initiator_check`);
+  const { rows: [{ member_id: memberId }] } = await widened.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
+    (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi',$3) RETURNING member_id`, [ownerId, randomUUID(), profile]);
+  await widened.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)",
+    [ownerId, memberId, conversationId]);
+  const scheduled = randomUUID();
+  await widened.query(`INSERT INTO birbcrew_ts.request_admissions (conversation_id,request_id,prompt_digest,initiator_kind,initiator_id)
+    VALUES ($1,$2,$3,'routine','routine-7')`, [conversationId, scheduled, createHash("sha256").update("scheduled").digest()]);
+  const db = await widened.connect();
+  try {
+    await appendAudit(db, { type: "request.finished", ownerId, memberId, conversationId, requestId: scheduled,
+      payload: { status: "failed" } });
+  } finally { db.release(); }
+  const { rows: [row] } = await widened.query(`SELECT initiator_kind AS kind, initiator_id AS id, actor_kind AS actor
+    FROM birbcrew_ts.audit_events WHERE request_id=$1`, [scheduled]);
+  assert.deepEqual(row, { kind: "routine", id: "routine-7", actor: "system" });
+});
+
 test("the initiator CHECKs and the TypeScript initiator type name the same kinds", async () => {
   const { rows } = await pool.query<{ definition: string }>(`SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
     WHERE (conrelid,conname) IN (('birbcrew_ts.request_admissions'::regclass,'request_admissions_initiator_kind_check'),

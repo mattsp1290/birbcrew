@@ -32,12 +32,21 @@ Each row in `birbcrew_ts.audit_events` records one fact:
 - `actor_kind`/`actor_id`: who performed the action. Today this is `owner` (with
   the owner ID) or `system` (with no ID) for work Crew carries out itself.
 - `initiator_kind`/`initiator_id`: what started the request the action belongs to.
-  Today this is always recorded as the owner. A named CHECK constraint
-  (`audit_events_initiator_check`) allows only that. Scheduled routines, member
-  handoff or standing approvals must widen it in their own migration. No operator
-  or application kind exists yet. Operator CLI commands (`npm run members`) act as
-  the owner they name, and trusted-context effects are attributed to the owning
-  tenant.
+  Migration 23 records it on the request's durable admission
+  (`request_admissions.initiator_kind`/`initiator_id`) once, when the request is
+  admitted, and it never changes afterwards. For an event tied to a request, the
+  audit insert itself copies that initiator, inside the same transaction, so no
+  caller chooses it. An owner admission stores no `initiator_id`; the audit row
+  names the owner ID. A request with no admission row is recorded as
+  owner-initiated, as before migration 23: requests admitted by workflow histories
+  older than `bounded-conversations-v1`, and trusted-context effects, whose lane
+  records no admission. `member.spawned` and `conversation.opened` belong to no
+  request and name the acting owner. The owner is the only kind today. A named
+  CHECK constraint (`audit_events_initiator_check`) allows only it, as
+  `request_admissions_initiator_kind_check` does for admissions. Scheduled
+  routines, member handoff or standing approvals must widen both in their own
+  migration. No operator or application kind exists yet. Operator CLI commands
+  (`npm run members`) act as the owner they name.
 - `event_type`, `member_id`, `conversation_id`, `request_id` and a small
   `payload` object.
 
@@ -323,8 +332,10 @@ through the gateway.
 - Operator CLI actions are indistinguishable from the same owner's gateway
   actions.
 - Requests admitted by workflow histories older than `bounded-conversations-v1` have
-  no durable admission and so no `request.accepted`. The v1 cancel backfill does not
-  invent one.
+  no durable admission and so no `request.accepted` and no recorded initiator. Their
+  rows name the owner, the only possible initiator then. The v1 cancel backfill
+  records an owner-initiated admission for such a request but does not invent a
+  `request.accepted`.
 - If a workflow is terminated externally before `reconcileTurn` runs, its started
   turn has no `request.finished` row.
 - Reads are not audited: status, snapshots, observation and audit reads.
@@ -394,6 +405,11 @@ By direct SQL it checks:
   `initiator_id`, that an admission naming no initiator (including the previous
   release's cancel backfill), an unknown kind, or an owner with an ID is refused,
   and that a recorded initiator cannot be updated;
+- that a request's audit rows copy the initiator its admission recorded (shown
+  with a second kind admitted only inside a rolled-back transaction that widens
+  both CHECKs), that a request without an admission row is still recorded as
+  owner-initiated, and that an admission given a bare string or no initiator is
+  refused before anything is written;
 - that the TypeScript and SQL registries match, for event types and for
   initiator kinds.
 
