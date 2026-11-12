@@ -1,5 +1,7 @@
-import { acceptsChoice, emptyToolArguments, nextStep, recordWorkItemArguments, toolNameSchema, type DeferredTool, type ToolOutcome } from "./deferral.ts";
+import { acceptsChoice, emptyToolArguments, nextStep, recordWorkItemArguments, standingChoice, toolNameSchema, type DeferredTool, type ToolOutcome } from "./deferral.ts";
+import { createGrant, grantable, proposalGrant, standingScope } from "./grants.ts";
 import { publishObservation } from "./observation.ts";
+import { appendAudit } from "./audit.ts";
 import { createHash } from "node:crypto";
 import { MemberStore } from "./store.ts";
 import type { Pool, PoolClient } from "pg";
@@ -20,7 +22,8 @@ const proposalSchema = z.discriminatedUnion("toolName", [
 ]);
 const approvalKey = callSchema.extend({ approvalId: uuid });
 export const decisionSchema = approvalKey.extend({
-  argumentDigest: z.string().regex(/^[0-9a-f]{64}$/), version: z.number().int(), choice: z.enum(["approve", "deny", ...nextStep.options]),
+  argumentDigest: z.string().regex(/^[0-9a-f]{64}$/), version: z.number().int(),
+  choice: z.enum(["approve", "deny", ...nextStep.options, ...standingChoice.options]),
 });
 const settleSchema = approvalKey.extend({ token: uuid });
 
@@ -33,17 +36,27 @@ export type Choice = z.infer<typeof decisionSchema>["choice"];
 export const approvalSchema = approvalKey.extend({
   toolName: toolNameSchema, argumentDigest: decisionSchema.shape.argumentDigest,
   version: z.literal(1), policyVersion: z.literal(1), summary: z.enum(["Record one work item", "Choose the next step"]),
+  // The standing grant that approved the call when it was proposed; such a call has no card.
+  grantId: uuid.optional(),
 });
 export type Approval = z.infer<typeof approvalSchema>;
 export type { ToolOutcome } from "./deferral.ts";
 
+/** The choice a card reports, for deferred_calls alias p: a standing choice is stored as approve
+ * plus the scope it granted. Module scope must not need grants.ts, which imports this one in a cycle. */
+export const recordedChoice = `CASE p.grant_scope WHEN 'conversation' THEN 'allow_conversation'
+  WHEN 'member' THEN 'allow_always' ELSE p.decision END`;
 type CallRow = {
   approvalId: string; invocationId: string; nativeCallId: string; argumentDigest: string;
-  toolName: DeferredTool; version: 1; policyVersion: 1; decision: Choice | null; budget_exhausted: boolean;
+  toolName: DeferredTool; version: 1; policyVersion: 1; budget_exhausted: boolean; grantId: string | null;
+  /** As stored: a standing choice is stored as approve. */
+  decision: "approve" | "deny" | z.infer<typeof nextStep> | null;
+  /** As reported, including a standing choice. */
+  choice: Choice | null;
 };
 const columns = `p.approval_id AS "approvalId", p.invocation_id AS "invocationId", p.native_call_id AS "nativeCallId",
   p.argument_digest AS "argumentDigest", p.tool_name AS "toolName", p.decision_version AS version,
-  p.policy_version AS "policyVersion", p.decision, p.budget_exhausted`;
+  p.policy_version AS "policyVersion", p.decision, ${recordedChoice} AS choice, p.grant_id AS "grantId", p.budget_exhausted`;
 
 function publicApproval(scope: Scope, row: CallRow): Approval {
   return {
@@ -51,6 +64,7 @@ function publicApproval(scope: Scope, row: CallRow): Approval {
     approvalId: row.approvalId, invocationId: row.invocationId, nativeCallId: row.nativeCallId,
     toolName: row.toolName, argumentDigest: row.argumentDigest, version: row.version, policyVersion: row.policyVersion,
     summary: row.toolName === "choose_next_step" ? "Choose the next step" : "Record one work item",
+    ...(row.grantId && { grantId: row.grantId }),
   };
 }
 
@@ -134,6 +148,9 @@ export class ApprovalStore {
     return this.transaction(db => this.proposeLocked(db, input, pendingCheckpoint, mode));
   }
 
+  /** A call an active grant covers is inserted already approved and appends approval.auto_approved,
+   * whose shared lock every owner's audit read waits on until commit. After it returns, run only
+   * database statements and commit: await nothing outside the database. */
   async proposeLocked(db: PoolClient, input: Proposal, pendingCheckpoint?: unknown, mode?: ProposalMode): Promise<Approval> {
     const key = proposalSchema.parse(input);
     if (key.toolName === "record_work_item" && key.arguments.operation_id !== key.requestId) throw new MemberStoreError("conflict");
@@ -183,13 +200,16 @@ export class ApprovalStore {
       "SELECT public_id,native_call_id,generation FROM birbcrew_ts.tool_previews WHERE conversation_id=$1 AND request_id=$2 AND invocation_id=$3",
       ids.slice(0, 3));
     if (preview && (preview.native_call_id !== key.nativeCallId || preview.generation !== key.token)) throw new MemberStoreError("stale");
+    // A grant decides the call at its first insert; retries and replays read that back above.
+    const standing = await proposalGrant(db, key);
     const inserted = await db.query<CallRow>(
       `INSERT INTO birbcrew_ts.deferred_calls AS p
        (conversation_id, request_id, invocation_id, native_call_id, tool_name, arguments, argument_digest,
-        policy_version, decision_version, approval_id)
-       SELECT $1, $2, $3, $4, $5, $6, $7, 1, 1, COALESCE($8::uuid,gen_random_uuid())
+        policy_version, decision_version, approval_id, decision, grant_id)
+       SELECT $1, $2, $3, $4, $5, $6, $7, 1, 1, COALESCE($8::uuid,gen_random_uuid()), $9::text, $10::uuid
        WHERE (SELECT count(*) FROM birbcrew_ts.deferred_calls WHERE conversation_id = $1 AND request_id = $2) < 16
-       RETURNING ${columns}`, [...ids, key.toolName, key.arguments, digest, preview?.public_id ?? null],
+       RETURNING ${columns}`, [...ids, key.toolName, key.arguments, digest, preview?.public_id ?? null,
+        standing.grant && "approve", standing.grant?.grantId ?? null],
     );
     if (!inserted.rows.length) throw new MemberStoreError("input_limit");
     const row = inserted.rows[0];
@@ -203,7 +223,11 @@ export class ApprovalStore {
     }
     const approval = publicApproval(key, row);
     await publishObservation(db, key.conversationId, { kind: "call", approval,
-      ...(mode && "liveDeadline" in mode && { expiresAt: mode.liveDeadline }) });
+      ...(mode && "liveDeadline" in mode && { expiresAt: mode.liveDeadline }),
+      ...(standing.grant ? { grant: standing.grant } : standing.grantable && { standing: true }) });
+    if (standing.grant) await appendAudit(db, { type: "approval.auto_approved", ownerId: key.ownerId, memberId: key.memberId,
+      conversationId: key.conversationId, requestId: key.requestId, payload: { approvalId: row.approvalId,
+        invocationId: key.invocationId, toolName: "record_work_item", argumentDigest: digest, grantId: standing.grant.grantId } });
     return approval;
   }
 
@@ -241,8 +265,9 @@ export class ApprovalStore {
       const call = await findCall(db, key);
       if (!acceptsChoice(call.toolName, key.choice)) throw new MemberStoreError("conflict");
       if (call.version !== key.version || call.argumentDigest !== key.argumentDigest ||
-          (call.decision && call.decision !== key.choice)) throw new MemberStoreError("conflict");
-      if (!call.decision && (turn.phase !== "started" || call.childStopped || await cancelled(db,key))) {
+          (call.choice && call.choice !== key.choice)) throw new MemberStoreError("conflict");
+      if (!call.choice && (turn.phase !== "started" || call.childStopped || await cancelled(db,key) ||
+          (standingScope(key.choice) && !await grantable(db, { ...key, toolName: call.toolName })))) {
         throw new MemberStoreError("conflict");
       }
       if (!call.decision && call.live) {
@@ -252,7 +277,7 @@ export class ApprovalStore {
             (s.conversation_id,s.request_id,s.token)=(l.conversation_id,l.request_id,l.token)))`,[key.approvalId]);
         if (closed.rowCount) throw new MemberStoreError("conflict");
       }
-      return call.decision;
+      return call.choice;
     });
   }
 
@@ -260,19 +285,29 @@ export class ApprovalStore {
     return this.transaction(db => this.decideLocked(db, decisionSchema.parse(input)));
   }
 
+  /** Storing a choice appends the approval.decided audit row, and a standing choice also
+   * grant.created, whose shared lock every owner's audit read waits on until commit. After it
+   * returns, run only database statements and commit: await nothing outside the database. */
   async decideLocked(db: PoolClient, key: Decision, live = false): Promise<Choice> {
     const turn = await lockTurn(db, key);
     const call = await findCall(db, key);
     if (call.live !== live) throw new MemberStoreError("stale");
     if (!acceptsChoice(call.toolName, key.choice)) throw new MemberStoreError("conflict");
     if (call.version !== key.version || call.argumentDigest !== key.argumentDigest) throw new MemberStoreError("conflict");
-    if (call.decision === key.choice) return call.decision;
-    if (call.decision || turn.phase !== "started" || call.childStopped || await cancelled(db, key)) throw new MemberStoreError("conflict");
-    const accepted = await db.query(`UPDATE birbcrew_ts.deferred_calls SET decision=$2 WHERE approval_id=$1
+    if (call.choice === key.choice) return call.choice;
+    if (call.choice || turn.phase !== "started" || call.childStopped || await cancelled(db, key)) throw new MemberStoreError("conflict");
+    const scope = standingScope(key.choice);
+    const target = { ...key, toolName: call.toolName };
+    if (scope && !await grantable(db, target)) throw new MemberStoreError("conflict");
+    const accepted = await db.query(`UPDATE birbcrew_ts.deferred_calls SET decision=$2, grant_scope=$4 WHERE approval_id=$1
       AND (NOT $3::boolean OR EXISTS (SELECT 1 FROM birbcrew_ts.codex_live_calls l WHERE l.approval_id=$1
-        AND l.phase='waiting' AND l.expires_at>clock_timestamp()))`, [key.approvalId,key.choice,live]);
+        AND l.phase='waiting' AND l.expires_at>clock_timestamp()))`, [key.approvalId, scope ? "approve" : key.choice, live, scope]);
     if (!accepted.rowCount) throw new MemberStoreError("stale");
     await publishObservation(db, key.conversationId, { kind: "answered", approvalId: key.approvalId });
+    await appendAudit(db, { type: "approval.decided", ownerId: key.ownerId, memberId: key.memberId,
+      conversationId: key.conversationId, requestId: key.requestId, payload: { approvalId: key.approvalId,
+        invocationId: key.invocationId, toolName: call.toolName, argumentDigest: call.argumentDigest, choice: key.choice } });
+    if (scope) await createGrant(db, target, scope);
     return key.choice;
   }
 
@@ -314,6 +349,8 @@ export class ApprovalStore {
         await this.settleLocked(db,{...key,invocationId:call.invocationId,nativeCallId:call.nativeCallId,
           approvalId:call.approvalId,token:turn.token});
       }
+      await appendAudit(db, { type: "request.cancellation_requested", ownerId: key.ownerId, memberId: key.memberId,
+        conversationId: key.conversationId, requestId: key.requestId, payload: {} });
     });
   }
 
@@ -339,6 +376,9 @@ export class ApprovalStore {
     return this.transaction((db) => this.settleLocked(db, key));
   }
 
+  /** May append the work_item.committed audit row, whose shared lock every owner's audit
+   * read waits on until commit. After it returns, run only database statements and commit:
+   * await nothing outside the database. */
   async settleLocked(db: PoolClient, key: z.infer<typeof settleSchema>, live = false): Promise<ToolOutcome> {
     const turn = await lockTurn(db, key);
     if (turn.token !== key.token) throw new MemberStoreError("stale");
@@ -380,6 +420,10 @@ export class ApprovalStore {
       [key.approvalId,live],
     );
     if (!inserted.rowCount) throw new MemberStoreError("stale");
-    return finish({ nativeCallId, kind: "recorded", receipt: { receiptId: inserted.rows[0].receipt_id, operationId: key.requestId } });
+    const receiptId = inserted.rows[0].receipt_id;
+    const outcome = await finish({ nativeCallId, kind: "recorded", receipt: { receiptId, operationId: key.requestId } });
+    await appendAudit(db, { type: "work_item.committed", ownerId: key.ownerId, memberId: key.memberId,
+      conversationId: key.conversationId, requestId: key.requestId, payload: { receiptId, approvalId: key.approvalId } });
+    return outcome;
   }
 }

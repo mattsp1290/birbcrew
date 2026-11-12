@@ -66,6 +66,9 @@ try {
       await gateway();
       const capabilities = await (await request("/v1/capabilities")).json();
       assert.equal(capabilities.apiVersion, "1");
+      const health = await request("/v1/health");
+      assert.equal(health.status, 200, "real PostgreSQL and Temporal frontend are ready");
+      assert.equal((await health.json()).dependencies.temporal.status, "ready");
       for (const engine of ["claude", "codex", "pi"] as Engine[]) {
         const member = await post("/v1/members", { requestId: randomUUID(), engine, profile: "proxy.fixture.v1" }, 201);
         const conversationId = randomUUID();

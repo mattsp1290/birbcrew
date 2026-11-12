@@ -45,8 +45,21 @@ migrations at startup (see [Database role](#database-role)).
 
 | Process | Command | Notes |
 | --- | --- | --- |
-| Gateway | `node src/service/gateway.ts /etc/crew/gateway.json` | JSON `{ "port": 8080, "tokenHashes": { "<sha256 hex>": "<owner id>" } }` as in the [gateway guide](member-gateway.md). Listens on `127.0.0.1:<port>` and prints `{"url": ...}`. |
+| Gateway | `node src/service/gateway.ts /etc/crew/gateway.json` | JSON `{ "port": 8080, "tokenHashes": { "<sha256 hex>": "<owner id>" } }` as in the [gateway guide](member-gateway.md). Listens on `127.0.0.1:<port>` and prints `{"url": ...}`. Also runs the [scheduled-routine](scheduled-routines.md) dispatcher. |
 | Worker | `node src/service/cli.ts worker src/service/providers.ts` | Registers the profiles enabled by the attestation variables below. |
+
+Every gateway fires scheduled routines from a PostgreSQL leased queue, beside its
+cancellation outbox; there is no separate scheduler process and no Temporal
+Schedule. Several gateway replicas on one database are safe: claims skip rows
+another replica has locked and each window has a primary key, so a window fires at
+most once. Give every replica the same `tokenHashes`. A replica that does not know a
+routine's owner records that owner's windows as skipped `owner_unavailable`, which
+counts toward disabling the routine after ten failures. A restarted replica fires no
+window from the 5 minutes before it started, but another running replica does; with
+one replica, a restart skips any window in those 5 minutes. A routine fires only
+while at least one gateway runs, so stopping every gateway pauses routines and their
+missed windows are skipped, not replayed. Routine firings use the gateway's clock;
+keep replicas' clocks synchronised.
 
 Run one container per process with the hardening below. `tini` is the image
 entrypoint and reaps orphaned SDK descendants, so do not add Docker's `--init`.
@@ -148,10 +161,39 @@ GRANT CONNECT, CREATE, TEMPORARY ON DATABASE crew TO crew_service;
 `CREATEROLE`: the first start created `birbcrew_ts` owned by `crew_service`.
 With only `CONNECT` and `CREATE`, the first start failed with
 `permission denied to create temporary tables` and created nothing (migration
-006 uses `pg_temp` functions); after `GRANT TEMPORARY` it applied all 20
-migrations. `CREATE SCHEMA IF NOT EXISTS` checks database `CREATE` even after
+006 uses `pg_temp` functions); after `GRANT TEMPORARY` it applied every
+migration. `CREATE SCHEMA IF NOT EXISTS` checks database `CREATE` even after
 the schema exists, so a role with only `CONNECT` cannot start. The current code
 therefore cannot run with separate migration and runtime roles.
+
+## Upgrades
+
+Stop every gateway, worker and CLI process of the previous release, including
+scheduled CLI jobs, before the first process of the new release starts. That
+first process applies the new migrations, and a previous-release process does not
+know about them. After migration 21, for example, it keeps committing spawns,
+admissions and decisions without the audit rows the new release writes, and
+nothing marks the gap (see [the audit trail](audit-trail.md#retention-upgrade-and-recovery)).
+Rolling back has the same effect for as long as the earlier release runs.
+
+Migration 25 (scheduled routines) takes its locks on `members`,
+`request_admissions` and `audit_events` without queueing: it retries for up to 60 s
+while other sessions hold them, then fails with `55P03` and the process exits
+without applying anything. Restart it once the other sessions are done (see
+[scheduled routines](scheduled-routines.md#upgrade-and-recovery)). Migration 26
+(member memory) does the same for `members`, `conversations` and `audit_events`.
+From version 24 both run in one transaction, and 26 retries while holding 25's
+locks, so admissions and audited writes wait meanwhile; an open of the previous
+release still in flight makes it fail after the 60 s (see
+[member memory](memories.md#upgrade)).
+
+A Kubernetes Deployment's default `RollingUpdate` strategy starts new pods while
+old ones still run, which is exactly what this forbids. Scale every Deployment
+that runs a Crew process to zero, wait for its pods to terminate and suspend
+CronJobs that run the CLI before you roll out the new image. `strategy: {type:
+Recreate}` stops old pods before new ones start only within one Deployment, so it
+is enough on its own only when one Deployment runs every Crew process
+(**unverified** on a cluster).
 
 ## Provider accounts
 

@@ -6,6 +6,7 @@ import { publishObservation } from "./observation.ts";
 import type { Pool, PoolClient } from "pg";
 import type { ChildOutcome, Delegation } from "@birbcrew/pi-subagents";
 import { ApprovalStore, confirmedApproval, type Approval } from "./approvals.ts";
+import { appendAudit } from "./audit.ts";
 import { checkpointSchema, MemberStoreError, type Conversation, type Checkpoint, type TurnRequest } from "./domain.ts";
 
 type PersistedDelegation = Omit<Delegation, "profile"> & {
@@ -187,7 +188,7 @@ export class ChildStore {
 
   async quarantineDelegation(conversation: Conversation, request: TurnRequest, runId: string) {
     await transaction(this.pool, async db => {
-      await lockParent(db, {...conversation, requestId: request.requestId});
+      const parent = await lockParent(db, {...conversation, requestId: request.requestId});
       const args = [conversation.conversationId, request.requestId];
       const retired = await db.query(`UPDATE birbcrew_ts.turns SET phase='uncertain'
         WHERE conversation_id=$1 AND request_id=$2 AND workflow_run_id=$3 AND prompt_digest=$4
@@ -197,6 +198,9 @@ export class ChildStore {
         SELECT conversation_id,request_id,generation FROM birbcrew_ts.pi_children WHERE conversation_id=$1 AND request_id=$2
           AND generation IS NOT NULL AND outcome IS NULL ON CONFLICT DO NOTHING`, args);
       await publishObservation(db, conversation.conversationId, {kind:"failed",requestId:request.requestId});
+      // The workflow fails without reconcileTurn after a quarantined delegation.
+      await appendAudit(db, {type:"request.finished", ownerId:parent.ownerId, memberId:parent.memberId,
+        conversationId:parent.conversationId, requestId:request.requestId, payload:{status:"uncertain"}});
     });
   }
 

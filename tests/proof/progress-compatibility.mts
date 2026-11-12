@@ -11,7 +11,7 @@ import { defaultPayloadConverter } from "@temporalio/common";
 import { historyFromJSON, historyToJSON } from "@temporalio/common/proto-utils";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { Pool } from "pg";
-import { MemberStore } from "../../src/service/store.ts";
+import { MemberStore, ownerAdmissionActivity } from "../../src/service/store.ts";
 import { MemberClient } from "../../src/service/client.ts";
 import { progressActivity } from "../../src/service/progress-activity.ts";
 import { activityQueue, memberTaskQueue } from "../../src/service/queues.ts";
@@ -75,7 +75,7 @@ if (process.argv[2] === "offline-replay") {
     await writeFile(oldPath,oldSource.replaceAll('from "./','from "../../src/service/'));
     const makeWorker=async(legacy:boolean)=>Worker.create({connection:native!,taskQueue:memberTaskQueue,
       workflowsPath:legacy?fileURLToPath(new URL("../../"+oldPath,import.meta.url)):workflowsPath,
-      activities:{recordAcceptance:store.recordAcceptance.bind(store),rejectAccepted:store.rejectAccepted.bind(store),
+      activities:{recordAcceptance:ownerAdmissionActivity(store),rejectAccepted:store.rejectAccepted.bind(store),
         reconcileTurn:store.reconcileTurn.bind(store),
         conversationProgress:async(input:unknown)=>{
           if(legacy){

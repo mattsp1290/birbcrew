@@ -10,7 +10,14 @@ trusted scopes, tool registries, or engine configuration in a turn request.
 
 `GET /v1/capabilities` returns `apiVersion: "1"`, request and cancellation contract
 identifiers, proxy protocol versions, conversation/generation limits, trusted-context
-transport availability, observation limits, and receipt retention semantics. Additive
+transport availability, observation limits, receipt retention semantics, the
+request initiator kinds (`initiatorKinds`, today `["owner", "routine"]`), the audit
+contract (event types, page limits, formats) and the scheduled-routine limits and
+policies (`routines`), `standingGrants` (the standing
+choices, the card and state fields, the grantable tool, policy version and
+initiator kinds, the grants route and the inactive-list limit), `memories` (the
+member memory route, limits, injection and deletion semantics per engine), health
+dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
@@ -26,12 +33,133 @@ proof of the operator's provider access or configured profile availability.
 | `GET /v1/conversations/{conversationId}` | Current public snapshot |
 | `POST /v1/conversations/{conversationId}/events` | Independent, read-only AG-UI observation |
 | `POST /v1/conversations/{conversationId}/human` | Existing explicit human-decision contract |
+| `GET /v1/health` | Readiness of PostgreSQL and Temporal; `200` ready, `503` not ready |
+| `GET /v1/members` | The owner's members, keyset-paginated |
+| `GET /v1/conversations` | The owner's conversations with coarse phase, optional `memberId` filter, keyset-paginated |
+| `GET /v1/audit` | Owner-scoped, append-only audit events; keyset pages as JSON or CSV export |
+| `POST /v1/routines`, `GET /v1/routines` | Create (`requestId`, `memberId`, `schedule`, `prompt`, `approvalPolicy`) and list scheduled routines |
+| `GET`/`DELETE /v1/routines/{routineId}`, `POST .../enable`, `POST .../disable` | Read, tombstone, enable or disable one routine |
+| `GET /v1/routines/{routineId}/firings` | Firing history, newest first, with each firing's conversation and request |
+| `GET /v1/members/{memberId}/grants` | The member's active standing grants and up to 20 ended ones |
+| `POST /v1/members/{memberId}/grants/{grantId}/revoke` | Revoke a standing grant for later calls, body `{}`; repeating returns the same grant |
+| `POST /v1/memories`, `GET /v1/memories` | Create (`requestId`, `memberId`, `text`) and list member memory entries |
+| `GET`/`DELETE /v1/memories/{memoryId}` | Read one entry, or erase its text and keep a tombstone |
 
-Authentication is required even for capabilities. Other owners get `404`, not a
+Authentication is required even for capabilities and health. Other owners get `404`, not a
 confirmation of a request's existence. Versioned request bodies are strict: unknown
-fields (including an attempted `ownerId` override) fail `400`. The only
-unauthenticated route is the unversioned `GET /healthz` liveness check, which
-answers loopback peers with a constant and is not part of this API.
+fields (including an attempted `ownerId` override or an `initiator`) fail `400`. Query parameters on the
+health and listing routes are strict too: unknown or repeated parameters fail `400`.
+
+## Health and listing
+
+These routes exist only under `/v1`; `/health` and `GET /members` or
+`GET /conversations` without the prefix are not served.
+
+`GET /v1/health` takes no parameters. It probes both dependencies concurrently, each
+bounded to 2 seconds: a PostgreSQL round trip that reads the highest applied schema
+version, and a Temporal frontend `GetSystemInfo` call on the gateway's connection. The
+probe never starts, signals or describes a workflow. A ready Temporal result proves only
+that the frontend answers: `GetSystemInfo` names no namespace, so it does not show that
+the namespace the gateway uses exists, or that workers are polling. It returns `200`
+when every dependency is ready and `503` with the same body shape otherwise, for
+example:
+
+```json
+{
+  "apiVersion": "1",
+  "status": "not_ready",
+  "dependencies": {
+    "database": { "status": "unavailable", "schemaVersion": null },
+    "temporal": { "status": "ready" }
+  }
+}
+```
+
+The top-level `status` is `ready` or `not_ready`. Each dependency reports `ready` or
+`unavailable` (failed or exceeded its bound). Driver errors, addresses and connection
+strings are never returned.
+
+The database probe opens its own short-lived PostgreSQL connection with the gateway's
+connection settings instead of borrowing one from the gateway's pool. It never queues
+behind other requests or takes a pool slot, and a saturated pool does not affect it:
+the database is `ready` whenever a fresh connection can read the schema version, even
+while every pooled connection is busy. Each step of that connection has the same
+2-second bound: connecting (including TLS and authentication), the read (the server
+cancels it if it is blocked on a lock, and the gateway abandons it if the server goes
+silent) and closing. Concurrent health requests share one probe, so health polling
+holds at most one database connection beyond the pool at a time. A response never
+waits past its bound. A probe still running then reports `unavailable` and ends within
+three times the bound (6 seconds), whether the server refuses connections, drops
+packets, accepts a connection and never answers, or answers slowly. The next health
+request after that starts a fresh probe, so health stops reporting `unavailable`
+within about 6 seconds of PostgreSQL becoming reachable again.
+
+Leave PostgreSQL one connection slot of headroom beyond the gateway's pool for this
+probe. The probe sends `statement_timeout` as a connection startup parameter. A pooler
+that rejects startup parameters it does not track, as PgBouncer does by default, refuses
+that connection, and health then reports the database `unavailable` while requests
+through the pool still work. Allow the parameter in the pooler (PgBouncer's
+`ignore_startup_parameters`) or point the gateway at PostgreSQL directly.
+
+When the database is ready, `schemaVersion` is the highest migration number applied to
+it. It is `null` when the database is unavailable. Migration numbers are not
+contiguous, and a later release can add a migration numbered below one that an earlier
+release already applied, so a database can gain a migration without `schemaVersion`
+changing. `schemaVersion` therefore names the newest migration present, not the full
+applied set, and cannot by itself identify a release. The gateway applies its
+migrations at startup, so a value below the largest number in the deployed release's
+migration list (in `src/service/store.ts`) means the database is behind that release;
+an equal value does not prove that every migration is present.
+
+`GET /v1/members` and `GET /v1/conversations` return only the authenticated owner's
+rows:
+
+```json
+{ "apiVersion": "1", "members": [{ "memberId": "UUID", "engine": "pi", "profile": "name" }], "next": "opaque" }
+```
+
+```json
+{
+  "apiVersion": "1",
+  "conversations": [
+    { "conversationId": "UUID", "memberId": "UUID", "engine": "claude", "profile": "name", "phase": "idle" }
+  ],
+  "next": null
+}
+```
+
+| Parameter | Routes | Meaning |
+| --- | --- | --- |
+| `limit` | both | Decimal page size from 1 to 100, without sign or leading zeros; default 50 |
+| `after` | both | The previous page's `next`, unchanged |
+| `memberId` | conversations | Only that member's conversations |
+
+Pages follow a stable ascending identifier order. Neither table records creation time,
+so the order is not chronological. `next` is `null` on the last page. Treat it as
+opaque and send it back with the same parameters that produced it. A cursor records
+only its resource (members or conversations) and a position. A malformed or altered
+value, or one from the other resource, fails `400`. Because it does not record the
+`memberId` filter, reusing it with a different `memberId`, or without one, is accepted
+and returns that other listing from after the cursor's identifier, skipping that
+listing's earlier rows. A row that exists throughout pagination appears exactly
+once; a row created meanwhile appears only if it sorts after the current position.
+
+`phase` uses the snapshot vocabulary (`idle`, `running`, `waiting`, `complete`,
+`cancelled`, `failed`). It is `null` for a conversation that predates the public event
+ledger, whose snapshot returns `409 history_unavailable`. Listings never include
+messages, prompts or results; read the snapshot or request receipts for those.
+Conversations used through operator-configured trusted context are ordinary owned
+conversations and are listed like any other, including after their trusted session is
+deleted. A
+`memberId` that is not the owner's, whether another owner's or nonexistent, returns an
+empty `200` page, exactly like an owned member without conversations.
+
+A rejected query parameter on the health or listing routes (unknown, repeated or
+invalid, including a malformed `after`, `limit` or `memberId`) returns
+`400 {"error":"invalid_input"}`. If PostgreSQL fails while a listing is read, the
+route returns `503 {"error":"retry_same_request"}`; listings are read-only, so
+repeating the request is safe. Health does not use that body: a failed dependency is
+reported in the health body itself.
 
 ### Identity and equivalence
 
@@ -58,9 +186,21 @@ A successful submit returns `202` with a receipt:
   "conversationId": "UUID",
   "requestId": "UUID",
   "acceptance": { "boundary": "sql_admission_and_temporal_queue" },
-  "status": "accepted"
+  "status": "accepted",
+  "initiator": { "kind": "owner" }
 }
 ```
+
+`initiator` is read-only: what started the request, recorded once when Crew
+admitted it. Requests submitted through this API are started by the authenticated
+owner, so the owner kind carries no ID. A request a scheduled routine submitted
+reports `{"kind": "routine", "id": "<routineId>"}`; only the routine's firing record
+can make an admission say so (see [scheduled routines](scheduled-routines.md)), and
+a request sent here under a claimed firing's conversation and request UUIDs with
+exactly the routine's prompt is that firing's request. No request body can set it. A later release that adds a kind lists it in
+`initiatorKinds`. The field is absent for a request admitted before admissions were
+durable (a workflow history older than bounded conversations) until a cancellation
+intent records its admission.
 
 The successful boundary means the admission identity/payload digest is committed in
 Crew PostgreSQL and the Temporal workflow owns the queued work. It does **not**
@@ -169,6 +309,85 @@ returns `410 CURSOR_EXPIRED`. A gap during streaming emits `CURSOR_EXPIRED`; rec
 without the old cursor for a fresh snapshot. Do not promise arbitrary historic token
 replay, including across rollover. Committed per-request results use the separate
 request lookup above, not the event cursor.
+
+## Standing grants
+
+A work-item card may carry `standingChoices: ["allow_conversation", "allow_always"]`
+beside its unchanged `choices`. Answering with one approves the call and creates a
+grant, and the human route reports that choice. Later top-level work-item calls of
+owner-started requests that the grant covers proceed without a card: their request
+reads `running`, not `waiting`, and the conversation state's `grantedCalls` names
+the grant. No route creates a grant. Revocation affects later calls only. Crew has
+one token per owner, so it cannot tell a person from an automated client holding
+it, and a grant covers both. See [standing grants](standing-grants.md).
+
+## Audit trail
+
+`GET /v1/audit` returns the authenticated owner's durable record of who acted and
+when. It covers member spawn, conversation open, request admission, approval and
+question decisions, committed work-item and trusted effects, cancellation requests
+and terminal request status. Unlike the AG-UI tail, it is not truncated. Each fact
+is written in the same transaction as the change it records, appears once despite
+retries, and cannot be updated or deleted. Only releases that include the audit
+migration write facts: while a process of an earlier release still runs, during an
+upgrade or after a rollback, its changes leave silent gaps. See
+[the audit trail](audit-trail.md#retention-upgrade-and-recovery) for how to
+upgrade without them.
+
+| Parameter | Meaning |
+| --- | --- |
+| `after` | Decimal event ID; return later events only. Default `0`. |
+| `limit` | Default 100 in both formats. At most 1000 for JSON and 10000 for CSV (the hard row cap). |
+| `conversationId` | Restrict to one conversation. Another owner's ID yields an empty page. |
+| `format` | `json` (default) or `csv`. |
+
+Unknown, repeated or malformed parameters fail `400`, as strict bodies do. JSON
+responses are `{ apiVersion, events, nextAfter, hasMore }`. CSV responses carry the
+same rows, with `Audit-Next-After` and `Audit-Has-More` headers. Pass `nextAfter`
+as the next `after`. Event IDs are global across owners and not contiguous. Pages
+never skip an event that commits late. A read waits for in-flight writes without
+delaying them. If it cannot settle within 5 s, because writes overlap continuously
+or a writer process stalled mid-transaction, it returns `503 audit_unsettled` with
+`Retry-After: 1`; retry the same read. Event IDs are decimal strings of up to 19
+digits; compare them as 64-bit integers, not as strings or JavaScript numbers. A
+restore removes the events after its recovery point, and new event IDs jump to a
+range above every earlier ID, so a saved cursor never skips a new event; the audit
+trail guide states the conditions. Any CSV cell that starts with `=`, `+`, `-`,
+`@`, tab, CR or `'` gets one extra leading `'`, so a spreadsheet shows it as text;
+to recover the exact value, remove one leading `'` from any cell that starts with
+it.
+Payloads hold identifiers, digests, choices and statuses only, never prompt or
+reply text, tool arguments or credentials. See [the audit trail](audit-trail.md)
+for the event registry, field semantics and limits.
+
+## Scheduled routines
+
+An owner can define a routine: a five-field UTC cron schedule, one of their members
+and a fixed prompt. The gateway submits the prompt at each window in a new
+conversation, through the same admission as a request sent here, with nobody
+present. Windows are at least 15 minutes apart and an owner has at most 20 enabled
+routines. Missed windows are skipped, never replayed. A routine's request that
+reaches a human decision either waits for it (`wait`) or is cancelled through the
+durable intent above (`fail_closed`). The routes, firing statuses, limits and costs
+are in [scheduled routines](scheduled-routines.md). Like the other routes, bodies
+are strict and the owner comes only from the bearer token.
+
+## Member memory
+
+An owner can save up to 32 active entries of at most 1024 bytes for each member. A
+conversation records the member's active entries when it opens, and its native
+launches get them, framed as reference data, after any project notes. Entries created
+later never reach it. Only the owner writes memory; the model cannot. A create is
+idempotent by `requestId`; a replay of a deleted entry fails `409 memory_deleted`,
+and a 33rd active entry `409 memory_limit`. `POST /v1/conversations` also fails
+`409 memory_limit` when the conversation's project notes fit what the member's engine
+can be given but notes and entries together do not; nothing is opened. Deleting an
+entry erases its text and keeps a tombstone. A deletion reaches every later launch on
+Pi with Crew's Pi models. Codex replays the context its rollout recorded on a
+conversation's first turn, and Claude's SDK may resend the prompt it recorded then, so
+on those engines a deletion may reach only conversations that have not run a turn.
+`capabilities.memories.startedConversations` says which. See
+[member memory](memories.md) for the trust boundary and what deletion does not erase.
 
 ## Validation
 

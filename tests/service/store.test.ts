@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import { Pool } from "pg";
 import { MemberStore } from "../../src/service/store.ts";
-import type { Engine } from "../../src/service/domain.ts";
+import { ownerInitiator, type Engine } from "../../src/service/domain.ts";
 
 const url = process.env.BIRBCREW_TEST_DATABASE_URL;
 if (!url) throw new Error("Set BIRBCREW_TEST_DATABASE_URL to a disposable PostgreSQL database.");
@@ -192,16 +192,16 @@ test("durable admissions preserve rejected queue outcomes without replay or iden
   const key=await newConversation("pi");
   const first={...key,requestId:randomUUID(),text:"pending first"};
   const queued={...key,requestId:randomUUID(),text:"queued private prompt"};
-  await store.recordAcceptance(first);
-  await Promise.all([store.recordAcceptance(queued),store.recordAcceptance(queued)]);
-  await assert.rejects(store.recordAcceptance({...queued,text:"changed"}),{code:"conflict"});
+  await store.recordAcceptance(first,ownerInitiator);
+  await Promise.all([store.recordAcceptance(queued,ownerInitiator),store.recordAcceptance(queued,ownerInitiator)]);
+  await assert.rejects(store.recordAcceptance({...queued,text:"changed"},ownerInitiator),{code:"conflict"});
   assert.deepEqual(await store.requestStatus({...key,requestId:queued.requestId}),{requestId:queued.requestId,phase:"accepted"});
   await store.rejectAccepted(queued,"predecessor_cancelled");
   await store.rejectAccepted(queued,"predecessor_cancelled");
   const fresh=new MemberStore(pool);
   assert.deepEqual(await fresh.requestStatus({...key,requestId:queued.requestId}),{
     requestId:queued.requestId,phase:"rejected",reason:"predecessor_cancelled"});
-  await assert.rejects(fresh.recordAcceptance(queued),{code:"request_rejected"});
+  await assert.rejects(fresh.recordAcceptance(queued,ownerInitiator),{code:"request_rejected"});
   await assert.rejects(fresh.committedReply(queued),{code:"request_rejected"});
   await assert.rejects(fresh.beginTurn(queued),{code:"request_rejected"});
   await assert.rejects(fresh.requestStatus({...key,ownerId:randomUUID(),requestId:queued.requestId}),{code:"not_found"});
@@ -228,14 +228,14 @@ test("progress activity projects only exact legacy DTOs without weakening the st
 
 test("unconfirmed admission rejection is digest-bound and cannot overwrite begun or committed work",async()=>{
   const key=await newConversation("pi"),request={...key,requestId:randomUUID(),text:"original"};
-  await store.recordAcceptance(request);
+  await store.recordAcceptance(request,ownerInitiator);
   await store.rejectUnstartedAdmission({...request,text:"changed"});
   assert.equal((await store.requestAdmission(request))?.phase,"accepted");
   await store.rejectUnstartedAdmission(request);
   assert.deepEqual(await store.requestStatus({...key,requestId:request.requestId}),{requestId:request.requestId,phase:"rejected",reason:"admission_unconfirmed"});
   await store.rejectUnstartedAdmission(request);
   await assert.rejects(store.beginTurn(request),{code:"request_rejected"});
-  const active={...key,requestId:randomUUID(),text:"active"};await store.recordAcceptance(active);
+  const active={...key,requestId:randomUUID(),text:"active"};await store.recordAcceptance(active,ownerInitiator);
   const started=await store.beginTurn(active);assert.equal(started.kind,"start");
   await store.rejectUnstartedAdmission(active);
   assert.equal((await store.requestStatus({...key,requestId:active.requestId})).phase,"started");

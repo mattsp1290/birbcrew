@@ -1,8 +1,16 @@
 import { z } from "zod";
+import { appendAudit, auditEventTypes, auditLimits } from "./audit.ts";
 import type { MemberClient } from "./client.ts";
-import { MemberStoreError, submitSchema, turnKey } from "./domain.ts";
+import { initiatorColumns, initiatorFromColumns, initiatorKinds, MemberStoreError, ownerInitiator, submitSchema, turnKey,
+  type Engine, type RequestInitiator } from "./domain.ts";
+import { standingChoice } from "./deferral.ts";
+import { grantListLimit } from "./grants.ts";
 import { conversationTurnLimit, workflowGenerationTurnLimit } from "./limits.ts";
+import { memoryCapabilities } from "./memories.ts";
+import { routineCapabilities } from "./routines.ts";
 import type { MemberStore } from "./store.ts";
+
+const listDefaultLimit = 50, listMaximumLimit = 100;
 
 export const integrationCapabilities = {
   apiVersion: "1",
@@ -13,8 +21,44 @@ export const integrationCapabilities = {
   rollover: { version: 1, maximumTurns: conversationTurnLimit, generationTurns: workflowGenerationTurnLimit },
   proxy: { version: 1, protocols: ["anthropic-messages", "openai-responses", "openai-chat-completions"] },
   trustedContext: { version: 1, transport: "operator-configured-local-runtime", httpSubmission: false },
+  initiatorKinds,
   observation: { version: 1, protocol: "AG-UI", mode: "snapshot-and-bounded-tail", cursorExpiry: "reconnect-for-snapshot" },
+  health: { version: 1, dependencies: ["database", "temporal"] },
+  listing: { version: 1, resources: ["members", "conversations"], defaultLimit: listDefaultLimit, maximumLimit: listMaximumLimit },
+  audit: {
+    version: 1, route: "/v1/audit", eventTypes: auditEventTypes, pagination: "event-id-keyset-no-skipped-commits",
+    formats: ["json", "csv"], limits: auditLimits, retention: "append-only-with-database; no-automatic-TTL",
+  },
+  routines: routineCapabilities,
+  standingGrants: {
+    version: 1, choices: standingChoice.options, cardField: "standingChoices", stateField: "grantedCalls", tools: ["record_work_item"], policyVersion: 1,
+    initiatorKinds: ["owner"], route: "/v1/members/{memberId}/grants", inactiveListLimit: grantListLimit,
+    revocation: "later-proposals-only",
+  },
+  memories: memoryCapabilities,
 } as const;
+
+type Listing = "member" | "conversation";
+// Opaque keyset position: the last returned identifier, tagged by listing. It is only
+// compared, never looked up, so another owner's identifier confirms nothing.
+const encodeAfter = (kind: Listing, id: string) => Buffer.from(kind + ":" + id).toString("base64url");
+// Cursors carry PostgreSQL's lowercase uuid output, so the same rule as memberId plus that case.
+const listedId = z.uuid().refine(id => id === id.toLowerCase());
+function decodeAfter(kind: Listing, value: string) {
+  const id = Buffer.from(value, "base64url").toString("utf8").slice(kind.length + 1);
+  return listedId.safeParse(id).success && encodeAfter(kind, id) === value ? id : undefined;
+}
+const after = (kind: Listing) => z.string().max(128).refine(value => decodeAfter(kind, value) !== undefined)
+  .transform(value => decodeAfter(kind, value)!).optional();
+const limit = z.string().regex(/^[1-9][0-9]{0,2}$/).transform(Number).pipe(z.number().max(listMaximumLimit)).default(listDefaultLimit);
+const memberListQuery = z.strictObject({ limit, after: after("member") });
+const conversationListQuery = memberListQuery.extend({
+  after: after("conversation"), memberId: z.uuid().transform(value => value.toLowerCase()).optional(),
+});
+
+function page<T>(kind: Listing, rows: T[], size: number, id: (row: T) => string) {
+  return { items: rows.slice(0, size), next: rows.length > size ? encodeAfter(kind, id(rows[size - 1])) : null };
+}
 
 const keySchema = turnKey;
 type Key = z.infer<typeof keySchema>;
@@ -25,6 +69,8 @@ export interface RequestReceipt {
   requestId: string;
   acceptance: { boundary: "sql_admission_and_temporal_queue" };
   status: Status;
+  /** Absent for a request admitted before admissions were durable. */
+  initiator?: RequestInitiator;
   result?: { text: string };
   reason?: string;
   cancellation?: { receiptId: string; delivery: "pending" | "delivered"; nativeTermination: "confirmed" | "unconfirmed"; effects: "not_assessed" };
@@ -56,9 +102,9 @@ export class IntegrationApi {
     // This observes Temporal only: it never starts a workflow or dispatches inference.
     await this.members.requestStatus(key);
     const { rows: [row] } = await this.store.pool.query<{
-      admission: string; reason: string | null; phase: string | null; reply: string | null;
-      receipt_id: string | null; delivered_at: Date | null; stopped: boolean; waiting: boolean;
-    }>(`SELECT a.phase AS admission,a.reason,t.phase,t.reply,x.receipt_id,x.delivered_at,
+      admission: string | null; reason: string | null; initiator_kind: string | null; initiator_id: string | null;
+      phase: string | null; reply: string | null; receipt_id: string | null; delivered_at: Date | null; stopped: boolean; waiting: boolean;
+    }>(`SELECT a.phase AS admission,a.reason,a.initiator_kind,a.initiator_id,t.phase,t.reply,x.receipt_id,x.delivered_at,
        EXISTS(SELECT 1 FROM birbcrew_ts.deferred_calls d WHERE d.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND d.request_id=COALESCE(a.request_id,t.request_id) AND d.decision IS NULL) AS waiting,
        (EXISTS(SELECT 1 FROM birbcrew_ts.tool_cancellations tc WHERE tc.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND tc.request_id=COALESCE(a.request_id,t.request_id))
         AND EXISTS(SELECT 1 FROM birbcrew_ts.native_launches n WHERE n.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND n.request_id=COALESCE(a.request_id,t.request_id))
@@ -78,6 +124,7 @@ export class IntegrationApi {
     return {
       apiVersion: "1", conversationId: key.conversationId, requestId: key.requestId,
       acceptance: { boundary: "sql_admission_and_temporal_queue" }, status,
+      ...(row.initiator_kind ? { initiator: initiatorFromColumns(row.initiator_kind, row.initiator_id) } : {}),
       ...(row.phase === "committed" ? { result: { text: row.reply! } } : {}),
       ...(row.reason ? { reason: row.reason } : {}),
       ...(row.receipt_id ? { cancellation: {
@@ -87,22 +134,64 @@ export class IntegrationApi {
     };
   }
 
-  async cancel(input: unknown): Promise<RequestReceipt> {
+  /** `policy` marks an intent a routine's fail_closed policy requested rather than the owner. */
+  async cancel(input: unknown, policy?: "fail_closed"): Promise<RequestReceipt> {
     const key = keySchema.parse(input);
     // Backfill active legacy turns created after migration17, without inventing an
-    // admission for an unknown UUID or accepting a new payload.
-    await this.store.pool.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest)
-      SELECT t.conversation_id,t.request_id,t.prompt_digest FROM birbcrew_ts.turns t
+    // admission for an unknown UUID or accepting a new payload. Such turns come from
+    // workflow histories older than durable admission, which only the owner could start.
+    await this.store.pool.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest,initiator_kind,initiator_id)
+      SELECT t.conversation_id,t.request_id,t.prompt_digest,$4,$5 FROM birbcrew_ts.turns t
       JOIN birbcrew_ts.conversations c USING(conversation_id)
       WHERE c.owner_id=$1 AND t.conversation_id=$2 AND t.request_id=$3
-      ON CONFLICT(conversation_id,request_id) DO NOTHING`, [key.ownerId,key.conversationId,key.requestId]);
+      ON CONFLICT(conversation_id,request_id) DO NOTHING`, [key.ownerId,key.conversationId,key.requestId,...initiatorColumns(ownerInitiator)]);
     // Atomic ownership check and FK admission requirement. Repeated intent has one receipt.
-    await this.store.pool.query(`INSERT INTO birbcrew_ts.integration_cancellations(conversation_id,request_id)
-      SELECT a.conversation_id,a.request_id FROM birbcrew_ts.request_admissions a
-      JOIN birbcrew_ts.conversations c USING(conversation_id)
-      WHERE c.owner_id=$1 AND a.conversation_id=$2 AND a.request_id=$3
-      ON CONFLICT(conversation_id,request_id) DO NOTHING`, [key.ownerId,key.conversationId,key.requestId]);
+    await this.store.transaction(async db => {
+      // Lock the conversation first, like every workflow-side canceller; inserting the
+      // shared audit key before this lock can deadlock against them.
+      const { rows: [conversation] } = await db.query<{ member_id: string }>(
+        "SELECT member_id FROM birbcrew_ts.conversations WHERE conversation_id=$1 AND owner_id=$2 FOR KEY SHARE",
+        [key.conversationId,key.ownerId]);
+      if (!conversation) return;
+      const { rows: [intent] } = await db.query<{ receipt_id: string }>(`INSERT INTO birbcrew_ts.integration_cancellations(conversation_id,request_id)
+        SELECT a.conversation_id,a.request_id FROM birbcrew_ts.request_admissions a
+        JOIN birbcrew_ts.conversations c USING(conversation_id)
+        WHERE c.owner_id=$1 AND a.conversation_id=$2 AND a.request_id=$3
+        ON CONFLICT(conversation_id,request_id) DO NOTHING RETURNING receipt_id`, [key.ownerId,key.conversationId,key.requestId]);
+      if (intent) await appendAudit(db, { type: "request.cancellation_requested", ownerId: key.ownerId, memberId: conversation.member_id,
+        conversationId: key.conversationId, requestId: key.requestId, payload: { receiptId: intent.receipt_id, ...(policy && { policy }) } });
+    });
     return this.status(key);
+  }
+
+  /** Owner-scoped keyset page in identifier order; backed by members UNIQUE (owner_id, member_id). */
+  async listMembers(ownerId: string, query: unknown) {
+    const { limit, after } = memberListQuery.parse(query);
+    const { rows } = await this.store.pool.query<{ memberId: string; engine: Engine; profile: string }>(
+      `SELECT member_id AS "memberId",engine,profile FROM birbcrew_ts.members
+       WHERE owner_id=$1 AND ($2::uuid IS NULL OR member_id>$2) ORDER BY member_id LIMIT $3`,
+      [ownerId, after ?? null, limit + 1]);
+    const { items, next } = page("member", rows, limit, row => row.memberId);
+    return { apiVersion: "1" as const, members: items, next };
+  }
+
+  /**
+   * Coarse snapshot phase only; never message text. Phase is null where the snapshot reports history_unavailable.
+   * Backed by the owner indexes from migration 022, one per query shape.
+   */
+  async listConversations(ownerId: string, query: unknown) {
+    const { limit, after, memberId } = conversationListQuery.parse(query);
+    // Keep unnamed (no `name:`): PostgreSQL plans unnamed statements with the actual values, so the 022 indexes seek on memberId and the cursor; a generic plan seeks on owner_id alone.
+    const { rows } = await this.store.pool.query<{ conversationId: string; memberId: string; engine: Engine; profile: string; phase: string | null }>(
+      `SELECT c.conversation_id AS "conversationId",c.member_id AS "memberId",m.engine,m.profile,
+         CASE WHEN s.conversation_id IS NULL THEN 'idle' WHEN s.history_complete THEN s.state->>'phase' END AS phase
+       FROM birbcrew_ts.conversations c JOIN birbcrew_ts.members m USING (owner_id,member_id)
+       LEFT JOIN birbcrew_ts.public_snapshots s USING (conversation_id)
+       WHERE c.owner_id=$1 AND ($2::uuid IS NULL OR c.member_id=$2) AND ($3::uuid IS NULL OR c.conversation_id>$3)
+       ORDER BY c.conversation_id LIMIT $4`,
+      [ownerId, memberId ?? null, after ?? null, limit + 1]);
+    const { items, next } = page("conversation", rows, limit, row => row.conversationId);
+    return { apiVersion: "1" as const, conversations: items, next };
   }
 
   /** Restart-safe delivery outbox. Reads never call this; gateway invokes it on a timer. */
