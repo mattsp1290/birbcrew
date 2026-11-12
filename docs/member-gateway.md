@@ -24,7 +24,7 @@ The gateway prints its loopback URL. Send the token as an `Authorization: Bearer
 | POST /conversations | Send `memberId` and a new `conversationId` (UUID). Returns the initial public snapshot. |
 | GET /conversations/{id} | Returns `messages`, `state` and the committed `cursor`. State includes the member, engine, profile, phase, pending approvals and any pending questions. |
 | POST /conversations/{id}/inputs | Send a new `requestId` and `text`. A 202 response acknowledges the input. Retry ambiguous acknowledgements with the same ID and text. |
-| POST /conversations/{id}/human | Copy `memberId`, `requestId`, `invocationId`, `approvalId` and `version` from the pending card. Set `choice` to a value in its `choices` array. Cards in `state.pendingApprovals` accept `approve` or `deny`. Cards in `state.pendingQuestions` accept `inspect` or `test`. |
+| POST /conversations/{id}/human | Copy `memberId`, `requestId`, `invocationId`, `approvalId` and `version` from the pending card. Set `choice` to a value in its `choices` array. Cards in `state.pendingApprovals` accept `approve` or `deny`, and a card with a `standingChoices` array also accepts `allow_conversation` or `allow_always` (see [standing grants](standing-grants.md)). Cards in `state.pendingQuestions` accept `inspect` or `test`. The response reports the recorded choice. |
 | POST /conversations/{id}/cancel | Send the active `requestId`. The command acknowledges cancellation. Both observers receive the terminal state after native cleanup. |
 | POST /conversations/{id}/events | Attach a read-only AG-UI observer using the route's conversation ID as its thread ID. |
 
@@ -57,6 +57,11 @@ Codex publishes one balanced text message for each completed native assistant it
 A live MCP proposal has an `expiresAt` deadline. Disconnecting an observer leaves the call open for another owner client to resolve. If the deadline expires or the worker dies, both observers receive the interruption and the card closes. A late decision returns HTTP 409.
 
 Inspect `state.liveOperations` for the effect and its native delivery status. For an interrupted call with zero effect, open a new conversation under the same member, submit a new request and approve its new call. For a committed effect, use the existing receipt. If execution is uncertain, wait for reconciliation. Native delivery stays unknown until Codex confirms the result on that call.
+
+A call that a [standing grant](standing-grants.md) approved has no card. Observers
+receive its tool-call frames, a state snapshot whose `grantedCalls` entry names the
+grant, and then its result. The phase stays `running`. Revoking a grant through
+`POST /v1/members/{memberId}/grants/{grantId}/revoke` affects later calls only.
 
 Pi crew profiles publish each delegation with a public tool-call ID. A child’s
 `SUBAGENT_STARTED` carries that ID in `parentToolCallId`. Its text, protected

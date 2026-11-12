@@ -56,7 +56,8 @@ export class MemberClient {
     await this.temporal.connection.withDeadline(deadline, () => this.temporal.connection.workflowService.getSystemInfo({}));
   }
 
-  async open(input: unknown) {
+  async open(input: unknown, deadline?: number): Promise<Conversation> {
+    if (deadline !== undefined) return this.temporal.connection.withDeadline(deadline, () => this.open(input));
     const conversation = await this.store.openConversation(openSchema.parse(input));
     await this.workflow(conversation);
     return conversation;
@@ -119,7 +120,8 @@ export class MemberClient {
     return handle.executeUpdate<void, [typeof key]>("cancelPending", { args: [key] });
   }
 
-  async accept(input: unknown) {
+  async accept(input: unknown, deadline?: number): Promise<{ requestId: string }> {
+    if (deadline !== undefined) return this.temporal.connection.withDeadline(deadline, () => this.accept(input));
     const request = submitSchema.parse(input);
     const conversation = await this.store.getConversation({ ownerId: request.ownerId, conversationId: request.conversationId });
     await this.reconcileAcceptance(request);

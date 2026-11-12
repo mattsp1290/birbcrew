@@ -4,7 +4,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import type { Pool } from "pg";
+import type { PoolClient } from "pg";
 import { z } from "zod";
 import type { Conversation } from "./domain.ts";
 
@@ -86,7 +86,7 @@ export async function captureProjectNotes(ownerId: string) {
   return frozen.parse({ version: 1, project: source.project, actor: source.actor, commit, notes });
 }
 
-export async function trustedProjectContext(pool: Pool, { ownerId, memberId, conversationId }: Conversation) {
+export async function trustedProjectContext(pool: Pick<PoolClient, "query">, { ownerId, memberId, conversationId }: Conversation) {
   const { rows: [row] } = await pool.query<{ capture: unknown }>(
     `SELECT n.capture FROM birbcrew_ts.conversations c LEFT JOIN birbcrew_ts.conversation_notes n USING (conversation_id)
       WHERE c.owner_id=$1 AND c.member_id=$2 AND c.conversation_id=$3`, [ownerId, memberId, conversationId]);
