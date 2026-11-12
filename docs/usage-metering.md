@@ -165,12 +165,14 @@ records. Pass `nextAfter` as the next `after`, or `nextBefore` as the next `befo
 drawn before a row commits, so a row can commit after a later one. A records page you
 have already read past does not gain that row; the totals always include it. A
 coordinated restore reissues the IDs drawn after its recovery point to new rows (see
-[below](#upgrade-and-recovery)), so a consumer that mirrors records must read the
-restored installation's newest `usageId` while it is still held, before it resumes and
-draws new IDs, then drop the rows it holds above that ID and read again.
+[below](#upgrade-and-recovery)). Gateways are stopped while a restored installation is
+held, so the operator reads its newest ID before `resume`
+(`SELECT max(usage_id) FROM birbcrew_ts.usage_ledger`) and gives it to consumers that
+mirror records; each drops the rows it holds above that ID and reads again.
 
 `GET /v1/capabilities` describes the feature under `usage`: the states, the token and
-cost rules, what each engine reports, the budget period and refusal code, and that a
+cost rules, what each engine reports, the budget period, the refusal codes
+(`refusal` and `refusalClosingConversation`), and that a
 restore rewinds the ledger and reissues record IDs.
 
 ## Budgets
@@ -212,7 +214,9 @@ request can be sent again later. The check runs twice:
    set or lowered, between the two checks. Its refusal fails the admission activity
    without retries. Like any refused admission, that closes the conversation to new
    turns, so `MemberClient` reports it as `409 usage_limit_closed`: send the request
-   again in a new conversation. A routine firing fails `usage_limit` either way.
+   again in a new conversation. That conversation stays closed even though later
+   requests to it, while the member is over budget, get the first check's plain
+   `usage_limit`. A routine firing fails `usage_limit` either way.
 
 The first check reads nothing more for a member without a budget, and leaves a
 trusted-context conversation to admission, which refuses it as before.
@@ -244,7 +248,7 @@ by the budget runs with nobody watching. And it has a natural key: it names a re
 identity in a conversation the owner already has, so retrying the same request adds no
 row. A client that sends new request IDs in a loop adds one row per ID. The refused
 request has no admission, so the row names the owner as initiator, and `routineId`
-names the firing that submitted it, as `conversation.opened` does.
+names the routine whose firing submitted it, as `conversation.opened` does.
 
 ## Telemetry
 
@@ -308,9 +312,14 @@ PostgreSQL 17 database whose role may create databases.
 npm ci
 npm run build
 export BIRBCREW_TEST_DATABASE_URL='postgresql://birbcrew:fixture-only@127.0.0.1:55432/integration_test'
-node --test tests/service/usage.test.ts tests/service/usage-capture.test.ts
+npm run test:usage
+npm run test:usage:capture
 npm run test:recovery
 ```
+
+The integration API workflow's `consumer-contract` job runs `npm run test:usage`. The
+capture suite also needs the native launcher and the Claude and Codex CLIs, which only
+a full build host provides.
 
 `usage-capture.test.ts` runs the real drivers against the local fixture providers. It
 checks that Codex records each turn's share of the running total over three resumed

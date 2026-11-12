@@ -114,8 +114,9 @@ When the database is ready, `schemaVersion` is the highest migration number appl
 it. It is `null` when the database is unavailable. Migration numbers are not
 contiguous. Up to migration 26, a later release could add a migration numbered below one
 that an earlier release had already applied (22 came after 26), so a database can gain a
-migration without `schemaVersion` changing. From migration 27 on, the gateway refuses to
-start rather than apply a migration below the newest applied one. `schemaVersion` therefore names the newest migration present, not the full
+migration without `schemaVersion` changing. (From migration 27 on, every gateway,
+worker and CLI process refuses to start rather than apply a migration below the newest
+applied one.) `schemaVersion` therefore names the newest migration present, not the full
 applied set, and cannot by itself identify a release. The gateway applies its
 migrations at startup, so a value below the largest number in the deployed release's
 migration list (in `src/service/store.ts`) means the database is behind that release;
@@ -414,7 +415,8 @@ provider billed it; it never estimates one. The `/v1/usage` routes total an owne
 rows, per member and per conversation, and mark the part that routines started. An
 owner can set one daily token budget per member (`PUT /v1/usage/budgets/{memberId}`).
 While the member's input and output tokens for the UTC day are at or over it, a new
-request, the owner's or a routine's, fails `409 usage_limit`; a request already
+request, the owner's or a routine's, fails `409 usage_limit` (or `409 usage_limit_closed`
+when the refusal also closed the conversation); a request already
 admitted is never refused or interrupted, so the cap can be passed by what running
 requests use. See [usage metering](usage-metering.md).
 

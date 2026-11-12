@@ -44,7 +44,8 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   owner-initiated, as before migration 23: requests admitted by workflow histories
   older than `bounded-conversations-v1`, trusted-context effects, whose lane
   records no admission, and a request refused under its member's usage budget
-  (`usage.request_refused`, which names a routine's firing in its payload instead).
+  (`usage.request_refused`, whose payload names the routine instead when a routine's
+  firing submitted it).
   `member.spawned`, `conversation.opened`, the routine facts, the memory facts and
   the budget facts belong to no request and name the acting owner. Migration 25 adds the
   second kind, `routine`, with the routine's ID: an admission records it only from

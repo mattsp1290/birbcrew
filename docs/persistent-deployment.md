@@ -187,12 +187,15 @@ locks, so admissions and audited writes wait meanwhile; an open of the previous
 release still in flight makes it fail after the 60 s (see
 [member memory](memories.md#upgrade)). Migration 31 (usage metering) does the same
 for `members`, `native_launches`, `audit_events` and `routine_firings` (see
-[usage metering](usage-metering.md#upgrade-and-recovery)). From migration 27 on, a
-process refuses to start with `Migration N would apply after migration M` when the
-database already has a newer migration than one it would apply: that database ran a
-release whose migrations were numbered differently. Restore it from a backup taken
-before that release, or rebuild it; applying the older migration would silently narrow
-constraints the newer one widened.
+[usage metering](usage-metering.md#upgrade-and-recovery)). From migration 27 on, every
+gateway, worker and CLI process refuses to start with `Migration N would apply after
+migration M` when the database already has a newer migration than one it would apply,
+because applying the older one would silently narrow constraints the newer one widened.
+Nothing was applied, and the previous release still starts: keep running it. The usual
+cause is a release that numbered a migration below one an earlier release already
+shipped; report it and deploy a release that renumbers that migration. Do not delete the
+`schema_versions` row. Only a database that ran an unreleased or branch build needs
+restoring from a backup taken before that build, or rebuilding.
 
 A Kubernetes Deployment's default `RollingUpdate` strategy starts new pods while
 old ones still run, which is exactly what this forbids. Scale every Deployment
