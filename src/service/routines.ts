@@ -377,6 +377,7 @@ export class RoutineDispatcher {
     try {
       const claims = [...await this.claim(now, this.armedAt), ...await this.expiredLeases(now)];
       const waiting = this.waiting = new AbortController();
+      if (this.stopped) waiting.abort(); // stop() came during the claim
       await Promise.race([Promise.allSettled(claims.map(claim => this.drive(claim))),
         delay(this.driveWaitMs, undefined, { ref: false, signal: waiting.signal }).catch(() => {})]);
       waiting.abort();

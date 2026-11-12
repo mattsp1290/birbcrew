@@ -314,8 +314,9 @@ before any recovery command runs against the fence. `$FENCE` is the
 Every gateway runs the [scheduled-routine](scheduled-routines.md) dispatcher, which
 submits turns with nobody present. Treat the gateways as consumer ingress: the
 `quiesce` hook stops them with the other consumers, and after `resume` they stay
-stopped while the restarted workers reconcile lost native processes, until step 5 of
-[source fencing and restore](#source-fencing-and-restore) allows consumer ingress. A Temporal
+stopped while the restarted workers reconcile lost native processes, until the last
+step of the restore procedure in [source fencing and restore](#source-fencing-and-restore)
+(its step 5, not the fence-epoch repair steps) allows consumer ingress. A Temporal
 Schedule would fire whenever the Temporal server runs, including before `resume`;
 the dispatcher instead runs only in a gateway and checks the recovery phase before
 every pass, and both routine tables carry the write barrier, so a held or restored
