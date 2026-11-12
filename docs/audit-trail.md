@@ -174,12 +174,29 @@ only an advisory lock. Like the recovery protocol, this assumes trusted database
 administrators. The trigger does not stop a database owner who drops it or uses
 replication-role bypass.
 
-Restoring a generation rewinds the trail to that recovery point. New events then
-reuse IDs above the restored maximum. A consumer whose cursor is past that point
-must treat the restore like any other post-restore reconciliation. Re-read from the
-last ID it holds that is at or below the restored maximum, and discard its copies
-of later IDs. The response carries no recovery epoch, because recovery state is
-never exposed through the gateway.
+Restoring a generation rewinds the trail to that recovery point. Events committed
+after it on the previous timeline are gone from the trail, along with the state
+changes they recorded. The dump saves the identity's position, so on its own the
+restored identity would reissue IDs that the previous timeline had already handed
+out, and a consumer whose cursor had passed them would skip the new events.
+Accepting the restore (`npm run recovery -- accept-restore`) therefore moves the
+identity to the restore time in microseconds since 1970, or past the restored
+maximum if that is larger. New IDs are then larger than every ID an earlier timeline
+issued, including a target restored earlier from the same generation. A fixed jump
+from the restored maximum would not cover that case: both targets would jump to the
+same place. Across a restore, a consumer sees this:
+
+- Its saved `after` cursor stays valid and never skips a new event.
+- Events it holds with IDs above the restored maximum no longer exist, and no page
+  returns them. Once the operator reports a restore, a consumer that keeps copies
+  should re-read from an earlier cursor and drop the copies the trail no longer
+  returns.
+- IDs jump, typically to sixteen digits. Keep treating them as strings.
+
+The response carries no recovery epoch, because recovery state is never exposed
+through the gateway. The jump assumes that the database servers' clocks agree to
+within the time a restore takes, and that the trail draws fewer than one ID per
+microsecond. A retried acceptance only moves the identity further forward.
 
 ## Not covered
 
@@ -254,8 +271,10 @@ pending intents.
 
 `trusted-context.test.ts` checks the single `trusted_effect.completed` row for a
 replayed effect. The recovery suite restores a real `pg_dump` archive and compares the audit rows.
-It confirms the restored copy stays append-only and readable while held, and that
-new IDs continue past the restored ones.
+It confirms the restored copy stays append-only and readable while held. Another
+test lets the source run past the recovery point, restores the generation, runs
+the target, then restores the same generation again. Each target's new IDs pass
+every ID issued before it, and a saved cursor returns the new event.
 
 Not claimed: these suites call the store, approval and child-store functions the
 way Temporal activities do. They do not run a Temporal worker or native SDK. The

@@ -222,6 +222,53 @@ test('retained A backup restores to C after A→B, but only after current owner 
  }finally{await poolC?.end();await admin.query(`DROP DATABASE IF EXISTS ${nameC} WITH(FORCE)`);await t.cleanup();}
 });
 
+test('a restored audit trail never reissues an event ID, even when one generation is restored twice',async()=>{
+ const t=await setup();const databases:string[]=[];const pools:Pool[]=[];
+ try {
+  const spawn=(store:MemberStore)=>store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'});
+  const lastId=async(pool:Pool)=>(await pool.query<{id:string}>('SELECT max(event_id)::text AS id FROM birbcrew_ts.audit_events')).rows[0].id;
+  const page=async(pool:Pool,after:string)=>(await readAudit(pool,'owner',auditQuerySchema.parse({after}))).events.map(event=>event.eventId);
+  await spawn(t.store);
+  const sourceUrl=new URL(url!);sourceUrl.pathname='/'+t.name;
+  await t.recovery.capture(t.bundle,pins,{...t.hooks,snapshot:async directory=>{
+   const artifacts=await t.hooks.snapshot(directory);
+   await writeFile(join(directory,'application-postgres.fixture'),await postgresTool('pg_dump',['--dbname',sourceUrl.toString(),'--format=custom','--no-owner']));
+   return artifacts;
+  }});
+  const manifest=await readRecoveryManifest(t.bundle);const recoveryPoint=await lastId(t.pool);
+  // The source runs on past the recovery point, and a consumer pages past what the restore keeps.
+  await t.recovery.resume(t.hooks);await spawn(t.store);const seenOnSource=await lastId(t.pool);
+  async function restore(currentSourceInstance?:string) {
+   const name='recovery_'+randomUUID().replaceAll('-','');databases.push(name);
+   await admin.query(`CREATE DATABASE ${name}`);const target=new URL(url!);target.pathname='/'+name;
+   await postgresTool('pg_restore',['--dbname',target.toString(),'--no-owner'],await readFile(join(t.bundle,'application-postgres.fixture')));
+   const pool=new Pool({connectionString:target.toString()});pools.push(pool);
+   const recovery=new InstallationRecovery(pool,t.fence);const instance=randomUUID();
+   await recovery.acceptRestore(t.bundle,pins,instance,currentSourceInstance);
+   await recovery.acceptRestore(t.bundle,pins,instance,currentSourceInstance); // acknowledgement retry
+   assert.equal(await lastId(pool),recoveryPoint,'events after the recovery point are gone');
+   await recovery.resume(t.hooks,manifest);
+   return {pool,recovery,store:new MemberStore(pool),instance};
+  }
+  await t.recovery.holdForRestore(manifest.generation,t.hooks);
+  const b=await restore();
+  await spawn(b.store);const onB=await lastId(b.pool);
+  assert.ok(BigInt(onB)>BigInt(seenOnSource),'a restored target never reissues an ID the source issued');
+  assert.deepEqual(await page(b.pool,seenOnSource),[onB],'a saved cursor never skips a new event');
+  // The retained bundle is restored again after B has run: C must pass B's IDs too.
+  await b.recovery.holdForRestore(manifest.generation,t.hooks);
+  const c=await restore(b.instance);
+  await spawn(c.store);const onC=await lastId(c.pool);
+  assert.ok(BigInt(onC)>BigInt(onB),'a second restore of one generation never reissues the first one\'s IDs');
+  assert.deepEqual(await page(c.pool,onB),[onC]);
+ } finally {
+  for(const pool of pools) await pool.end();
+  // Not FORCE: end() resolves before its connections close, and terminating one then is an unhandled pool error.
+  for(const name of databases) await admin.query(`DROP DATABASE IF EXISTS ${name}`);
+  await t.cleanup();
+ }
+});
+
 test('bundle directory fsync failure cannot record a successful or transferable backup',async()=>{
  const fs=(await import('node:fs/promises')).default;
  const {syncBuiltinESMExports}=await import('node:module');

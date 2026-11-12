@@ -165,8 +165,22 @@ export class InstallationRecovery {
   const restoredInventory=await this.inventory();
   if(JSON.stringify(restoredInventory)!==JSON.stringify(manifest.inventory)) throw new Error("Restored inventory does not match generation");
   await this.fence.transfer(c.installation,sourceInstance,targetInstance,manifest.generation);
+  await this.advanceAuditIdentity();
   await this.pool.query(`UPDATE birbcrew_ts.recovery_control SET instance_id=$1,phase='restored' WHERE singleton`,[targetInstance]);
   return {generation:manifest.generation,instance:targetInstance,phase:'restored' as const};
+ }
+ /** The dump resumes the audit identity at the recovery point, so it would reissue IDs
+  * a later timeline already gave consumers, who would then skip the new events. A fixed
+  * jump from the restored maximum is not enough: a second restore of this generation,
+  * after the first one ran, would jump to the same place. Jump to the restore time in
+  * microseconds instead. Each earlier timeline began at an earlier restore time (or at 1)
+  * and drew fewer IDs than microseconds have passed since, so this passes all of them,
+  * given database clocks that agree to within a restore's duration. setval is not a
+  * table write, so the held installation allows it; a retry only moves further forward. */
+ private async advanceAuditIdentity() {
+  await this.pool.query(`SELECT setval(seq,greatest(coalesce(pg_sequence_last_value(seq),0),
+    (SELECT coalesce(max(event_id),0) FROM birbcrew_ts.audit_events),(extract(epoch FROM clock_timestamp())*1000000)::bigint))
+    FROM (SELECT pg_get_serial_sequence('birbcrew_ts.audit_events','event_id')::regclass AS seq) AS identity`);
  }
  private async resumeImpl(hooks:Pick<RecoveryHooks,'reconcile'>,manifest:RecoveryManifest|null=null) {
   const {control:c}=await this.status();

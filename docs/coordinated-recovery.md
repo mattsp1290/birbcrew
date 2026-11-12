@@ -185,6 +185,12 @@ moving state. Independent restored databases cannot discover arbitrary clones.
    atomically transfers authority to the new instance. Source resume and another
    clone's transfer are rejected. The target remains `restored`, blocking writes
    and native execution. Read-only committed receipt/history queries can work.
+   Acceptance also moves the audit event identity forward, to the restore time in
+   microseconds or past the restored maximum if that is larger. Audit events
+   committed after the recovery point are gone from the trail. New event IDs are
+   larger than any ID an earlier timeline issued, including an earlier restore of
+   this generation, so an audit consumer's saved cursor never skips a new event. See
+   [the audit trail](audit-trail.md) for what consumers see and the clock assumption.
 5. Reconcile effects/decisions first, then explicitly resume:
 
    ```
@@ -245,7 +251,8 @@ npm run test:recovery:coordinated
 The database suite exercises actual dump/restore to a second database, preserved
 conversation/checkpoint/observation state, completed replay and held pending work,
 write/native fences, interrupted capture, checksums, version mismatch and source /
-clone overlap. The native fixture archives stopped Claude/Codex/Pi session state,
+clone overlap, and that audit event IDs are never reissued, even when one generation
+is restored twice. The native fixture archives stopped Claude/Codex/Pi session state,
 restores it under a different host root mounted at `/native`, and performs actual
 SDK follow-ups with fresh synthetic proxy credentials. It makes no live requests.
 The coordinated proof additionally backs up and restores one actual generation
