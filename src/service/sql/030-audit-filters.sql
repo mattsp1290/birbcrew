@@ -19,9 +19,10 @@
 -- walks the owner's trail once, as an unfiltered export does.
 --
 -- Each build reads audit_events once and holds SHARE on it until migrate() commits: audited writes
--- wait for the builds. Applied alone, from version 26, audit reads continue meanwhile; applied with
--- earlier migrations in one transaction, it builds under their ACCESS EXCLUSIVE lock, so reads wait too. As
--- in 025 and 026 the lock is taken with NOWAIT and retried, so the migration never waits in a lock
+-- wait for the builds. Applied alone, from version 29, audit reads continue meanwhile; applied with
+-- earlier migrations in one transaction, from version 28 or earlier, it builds under the ACCESS
+-- EXCLUSIVE lock that 027, 028 or 029 already holds on audit_events, so reads wait too. As
+-- in 025 to 029 the lock is taken with NOWAIT and retried, so the migration never waits in a lock
 -- queue, and writes never queue behind it while an open audited write finishes. A native turn's
 -- admission transaction holds nothing on audit_events, so a running turn never delays it. A long
 -- autovacuum of audit_events conflicts with SHARE too, and NOWAIT never asks it to yield. After 60 s

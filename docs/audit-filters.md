@@ -5,7 +5,7 @@
 denial for one member, had to download the whole trail and filter it. The route
 now also filters by member, event type, actor kind, initiator kind, initiator ID
 and a time window, in JSON and in CSV. Filters combine with AND. Paging, limits,
-the CSV cursor headers and `503 audit_unsettled` are unchanged. Migration 27 adds
+the CSV cursor headers and `503 audit_unsettled` are unchanged. Migration 30 adds
 three indexes so that the selective filters do not walk an owner's whole trail.
 
 ## Parameters
@@ -116,7 +116,7 @@ A read walks the owner's rows in event ID order from its cursor and stops after
 `limit + 1` matches or at the read horizon. A filter only skips rows on that
 walk. When a filter's rows are rare, the walk reaches the horizon. An empty page
 leaves the cursor where it was, so a client polling such a filter would walk the
-owner's trail from its last match on every poll. Migration 27 adds an index for
+owner's trail from its last match on every poll. Migration 30 adds an index for
 each filter where that happens, so the read touches only matching rows. One
 member, one type or one routine reads a single range that is already in event ID
 order. Several types, or `initiatorKind=routine` alone, read their matching rows
@@ -149,14 +149,14 @@ A manual `EXPLAIN ANALYZE` on PostgreSQL 17, which is not part of the suites, ra
 on a trail of 200,000 rows for one owner. It used these indexes for member, type
 and routine filters and read only the matching rows. A single type read its range
 in page order without a sort. Several types read their rows and sorted them. On
-that trail (58 MB of heap) migration 27 built all three indexes in 0.4 s. The
+that trail (58 MB of heap) the migration built all three indexes in 0.4 s. The
 member and type indexes took 18 MB each, against 15 MB for the existing owner
 index. Each audited insert now also writes those two indexes, and writes the
 routine index when a routine started the request.
 
 ## Upgrade and recovery
 
-Migration 27 adds the three indexes and nothing else: no table, column,
+Migration 30 adds the three indexes and nothing else: no table, column,
 constraint, trigger or audit event type. The append-only, ordering, binding and
 recovery barrier triggers on `audit_events` are unchanged.
 
@@ -164,11 +164,12 @@ Until `migrate()` commits, the migration holds `SHARE` on `audit_events`, as
 measured with `pg_locks` on PostgreSQL 17, and no lock on any other table that
 requests use. Each index build reads `audit_events` once, so audited writes wait
 for the three builds, for a time that grows with the table. Applied alone, from
-version 26, audit reads continue meanwhile. Applied in one `migrate()` transaction
-with earlier migrations, from version 25 or earlier, it builds under their `ACCESS
-EXCLUSIVE` lock on `audit_events`, so audit reads wait too.
+version 29, audit reads continue meanwhile. Applied in one `migrate()` transaction
+with earlier migrations, from version 28 or earlier, it builds under the `ACCESS
+EXCLUSIVE` lock on `audit_events` that migration 27, 28 or 29 already holds, so
+audit reads wait too.
 
-As in migrations 25 and 26 it takes the lock with `NOWAIT` and retries for up to
+As in migrations 25 to 29 it takes the lock with `NOWAIT` and retries for up to
 60 s, so it never waits in a lock queue, and writes never queue behind it while
 an open audited transaction finishes. A running native turn's admission
 transaction holds nothing on `audit_events`, so it does not delay the migration.
@@ -181,8 +182,15 @@ process of that release writes the same rows, which the indexes cover, and
 answers a filter with `400`. Stop it anyway, as
 [persistent deployment](persistent-deployment.md#upgrades) requires for every
 upgrade. Rolling back leaves the indexes in place. The earlier release keeps
-working with them, and its `migrate()` ignores version 27. No workflow code
+working with them, and its `migrate()` ignores version 30. No workflow code
 changes, so Temporal histories are unaffected.
+
+Before conversation handoff took number 27, this change was migration 27. A
+development database that applied it then has version 27 recorded, so
+`migrate()` skips migration 27 (conversation handoff), applies 28 and 29, and
+fails on 30 with `42P07` because the indexes already exist. Its transaction
+rolls back, so nothing is applied and the process does not start. Recreate such
+a database.
 
 `pg_dump` and `pg_restore` recreate the indexes, so a restored trail answers the
 same filters with the same rows. Restore does not change what a filter means:
@@ -229,7 +237,7 @@ members, a denied card and a routine that fires and completes:
 - each malformed value above returns `400 invalid_input`;
 - the capability report lists the filters and actor kinds, and the actor kinds
   match the SQL CHECK;
-- migration 27 on a version-26 database locks only `audit_events` in `SHARE` mode,
+- migration 30 on a version-29 database locks only `audit_events` in `SHARE` mode,
   rewrites nothing, retries rather than queue behind an open audited write,
   completes while a native turn holds its admission, filters rows written before
   it, and leaves the table append-only.

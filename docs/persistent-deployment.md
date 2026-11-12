@@ -201,9 +201,10 @@ Migration 29 (member instructions) does the same for `members` and `audit_events
 After 27 in one transaction it already holds both; from version 27 it retries for
 `members` while holding 28's locks, and a spawn of the previous release still in flight
 makes it fail after the 60 s (see [member instructions](member-instructions.md#upgrade)).
-Migration 30 (audit filters) takes `SHARE` on `audit_events` the same way and
-builds three indexes, so audited writes wait for a time that grows with the audit
-table, and a long autovacuum of that table can also make it fail after the 60 s
+Migration 30 (audit filters) builds three indexes under `SHARE` on `audit_events`,
+taken the same way; after 27, 28 or 29 in one transaction it already holds that
+table. Audited writes wait for a time that grows with the audit table, and from
+version 29 a long autovacuum of that table can also make it fail after the 60 s
 (see [audit filters](audit-filters.md#upgrade-and-recovery)).
 
 A Kubernetes Deployment's default `RollingUpdate` strategy starts new pods while

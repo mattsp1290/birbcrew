@@ -1036,8 +1036,8 @@ test("filter values are validated at the gateway: unknown types and kinds and ma
   }
 });
 
-test("migration 27 indexes a version-26 trail without queueing for an open audited write or waiting for a native turn", async (t) => {
-  const upgraded = await databaseAt(t, 26);
+test("migration 30 indexes a version-29 trail without queueing for an open audited write or waiting for a native turn", async (t) => {
+  const upgraded = await databaseAt(t, 29);
   const current = new MemberStore(upgraded);
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
   const { memberId } = await current.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
@@ -1050,7 +1050,7 @@ test("migration 27 indexes a version-26 trail without queueing for an open audit
     await db.query("BEGIN");
     const file = "SELECT pg_relation_filenode('birbcrew_ts.audit_events') AS audit";
     const { rows: [before] } = await db.query(file);
-    await db.query(await readFile(new URL("027-audit-filters.sql", sql), "utf8"));
+    await db.query(await readFile(new URL("030-audit-filters.sql", sql), "utf8"));
     assert.deepEqual((await db.query(file)).rows[0], before);
     const { rows } = await db.query(`SELECT c.relname AS relation, l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
       WHERE l.pid=pg_backend_pid() AND c.relkind='r' AND c.relnamespace='birbcrew_ts'::regnamespace ORDER BY 1,2`);
@@ -1089,7 +1089,7 @@ test("migration 27 indexes a version-26 trail without queueing for an open audit
       assert.ok(Date.now() - appended < 1_000, "the open write's next append is not held up");
       await holder.query("COMMIT");
       const finished = await Promise.race([migrating.then(() => true), delay(5_000, false)]);
-      assert.equal(finished, true, "migration 27 must not wait for a running native turn");
+      assert.equal(finished, true, "migration 30 must not wait for a running native turn");
     } finally { holder.release(); }
     await current.appendText({ ownerId, conversationId, requestId, token: start.token }, requestId + "/assistant", 0, "still running");
   });
@@ -1102,6 +1102,8 @@ test("migration 27 indexes a version-26 trail without queueing for an open audit
   assert.deepEqual(page.events.map(event => [event.type, event.conversationId]), [["conversation.opened", conversationId],
     ["request.accepted", conversationId], ["conversation.opened", opening], ["conversation.opened", second]]);
   await assert.rejects(upgraded.query("DELETE FROM birbcrew_ts.audit_events WHERE owner_id=$1", [ownerId]), { code: "23514" });
-  assert.deepEqual((await upgraded.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version>=26 ORDER BY 1")).rows
-    .map(row => row.version), [26, 27]);
+  // migrate() brought it to the newest migration in the directory, whatever that is.
+  const migrations = (await readdir(sql)).map(file => Number(file.split("-")[0])).sort((a, b) => a - b);
+  assert.deepEqual((await upgraded.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version>=29 ORDER BY 1")).rows
+    .map(row => row.version), migrations.filter(version => version >= 29));
 });

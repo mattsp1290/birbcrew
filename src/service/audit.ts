@@ -151,7 +151,7 @@ const instant = z.string().refine(isRfc3339).transform(value => value.toUpperCas
 /** Every filter GET /v1/audit accepts: how its value is validated, and the predicate it adds after the
  * owner and the cursor. Filters combine with AND. A value is only ever bound; `where` gets its placeholder
  * and the validated value, which may choose the predicate's shape but never appears in it.
- * 027-audit-filters.sql says which filters have an index and why the others need none. */
+ * 030-audit-filters.sql says which filters have an index and why the others need none. */
 const auditFilters = {
   conversationId: { value: lowerUuid, where: (p: string) => `conversation_id = ${p}::uuid` },
   memberId: { value: lowerUuid, where: (p: string) => `member_id = ${p}::uuid` },
