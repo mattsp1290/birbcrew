@@ -1,0 +1,9 @@
+*
+!package.json
+!package-lock.json
+!vendor/ag-ui/*.tgz
+!packages/pi-subagents/birbcrew-pi-subagents-0.1.0.tgz
+!scripts/build-native
+!native/member-launch.c
+!src/service/
+!src/service/**

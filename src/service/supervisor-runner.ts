@@ -12,6 +12,7 @@ import { registerProfiles } from "./deployment.ts";
 import { memberProfiles } from "./profiles.ts";
 import type { DriverInput } from "./activities.ts";
 import type { Conversation, Checkpoint } from "./domain.ts";
+import { temporalSettings } from "./temporal-config.ts";
 
 interface AdmittedTurn {
   launch: Launch;
@@ -35,6 +36,8 @@ process.once("message", async (command: AdmittedTurn) => {
   const pool = new Pool({ connectionString: process.env.BIRBCREW_DATABASE_URL });
   let reply;
   try {
+    // The worker validated this same inherited environment before forking the supervisor.
+    const temporal = temporalSettings(process.env);
     const { profiles, close } = await import(pathToFileURL(configPath).href);
     try {
       await registerProfiles(pool, profiles, stateDir);
@@ -60,7 +63,7 @@ process.once("message", async (command: AdmittedTurn) => {
         const scope = {...command.launch, engine:member.engine, workflowRunId:command.launch.execution.workflowRunId};
         const invoke = () => traced("model.invoke",scope, async () => {
           const result = items && tool
-            ? await runLiveTool(pool, command.launch, member, tool, input, value => driver(value, member), items.disclose)
+            ? await runLiveTool(pool, temporal, command.launch, member, tool, input, value => driver(value, member), items.disclose)
             : await driver(input, member);
           await items?.finish();
           return result;
