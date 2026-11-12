@@ -101,7 +101,8 @@ trigger keeps a firing's identity fixed.
 
 A success resets the consecutive-failure count. A failure adds one, and the tenth in
 a row disables the routine with reason `consecutive_failures`, in the transaction
-that records it. Only an enabled routine counts.
+that records it. Only an enabled routine counts. A firing claimed before the routine
+was disabled and re-enabled still counts after the re-enable reset the count.
 
 **One conversation per firing.** An uncertain turn or a cancellation closes a
 conversation to new turns, and a failed request rejects the requests queued behind
@@ -175,15 +176,18 @@ admission records `routine` and that routine's ID, but only when the firing is s
 `claimed`, the conversation belongs to the routine's owner and member, and the text
 is the routine's prompt; otherwise the admission is refused with `409 conflict`. A
 caller that names any initiator other than the owner is refused. So no request body
-or caller can make a request a routine's, and a person cannot submit other text
-under a firing's identity. A request with the firing's identity and exactly the
-routine's prompt is the routine's request and is recorded as such. An owner's own
-request in a routine's conversation, under a new request UUID, is the owner's.
+or caller can choose the initiator, and a person cannot submit other text under a
+firing's identity. The firing history shows a claimed firing's identity, so its owner
+can submit that identity with exactly the routine's prompt before the dispatcher
+does; by [identity and equivalence](integration-api-v1.md#identity-and-equivalence)
+that is the routine's request, recorded as the routine's, and the dispatcher's
+attempt then finds it admitted. An owner's own request in a routine's conversation,
+under a new request UUID, is the owner's.
 
 The share lock orders an admission against the dispatcher settling the claim, which
-locks the firing row before it checks for the admission: either the admission
-commits first and the firing becomes `admitted`, or the firing is failed first and
-the admission is refused.
+locks the firing row and then, in a separate statement with a fresh snapshot, checks
+for the admission: either the admission commits first and the firing becomes
+`admitted`, or the firing is failed first and the admission is refused.
 
 Request receipts carry `initiator: {"kind": "routine", "id": "<routineId>"}`, and
 every request-tied audit row copies it, as [the audit trail](audit-trail.md)
@@ -192,7 +196,9 @@ describes. A routine acts with its owner's authority, so rows its firing causes
 owner as actor, as an operator CLI command does. `conversation.opened` names the
 routine in its payload (`routineId`), read from the firing row, and
 `request.cancellation_requested` carries `policy: "fail_closed"` when the routine's
-policy asked for it. Crew's own decisions name the system as actor:
+policy asked for it. The routine's own facts are below; the owner's lifecycle actions
+name the owner, and Crew's own decisions (a skipped or settled window, disabling the
+routine after ten failures) name the system:
 
 | Type | Actor | Recorded when | One row per | Payload |
 | --- | --- | --- | --- | --- |
@@ -215,7 +221,7 @@ routine is `404 not_found`. Bodies are strict: an unknown field, including an
 | Route | Purpose |
 | --- | --- |
 | `POST /v1/routines` | Create `{ "requestId", "memberId", "schedule", "prompt", "approvalPolicy" }`; `201` with the routine |
-| `GET /v1/routines?after=&limit=` | The owner's routines in every state, ordered by `routineId`; `{ apiVersion, routines, nextAfter, hasMore }` |
+| `GET /v1/routines?after=&limit=` | The owner's routines in every state, including deleted ones, ordered by `routineId`; `{ apiVersion, routines, nextAfter, hasMore }` |
 | `GET /v1/routines/{routineId}` | One routine, including a deleted one |
 | `POST /v1/routines/{routineId}/enable` | Body `{}`; `200` with the routine |
 | `POST /v1/routines/{routineId}/disable` | Body `{}`; `200` with the routine |
@@ -243,8 +249,9 @@ settledAt }`. `conversationId` and `requestId` are null only for a skipped windo
 For an open firing they lead to the request's receipt
 (`GET /v1/conversations/{conversationId}/requests/{requestId}`) and to the
 conversation snapshot with any pending card. Pages are keyset pages on
-`scheduledFor`: pass `nextBefore` as the next `before`. `limit` defaults to 100 and
-is at most 1000 on both lists. Query parameters are strict like the audit route's.
+`scheduledFor`: pass `nextBefore` as the next `before`. `limit` defaults to 100 on
+both lists and is at most 100 routines, because each carries its prompt, or 1000
+firings. Query parameters are strict like the audit route's.
 `GET /v1/capabilities` lists the limits and policies under `routines` and adds
 `routine` to `initiatorKinds`.
 
@@ -261,9 +268,18 @@ interval fires is joined, not repeated. Each pass:
    transaction, records each window as claimed or skipped and advances
    `next_window`.
 3. Re-leases claims whose lease expired, then opens and submits every claim it
-   holds, with a 60-second Temporal deadline each.
+   holds, with a 60-second Temporal deadline each. The pass waits at most 75 s for
+   them: an attempt stalled longer, for example on a database connection that stopped
+   answering, carries on alone, and this gateway does not start another attempt for
+   that firing while it runs.
 4. Observes up to 32 open firings, each at most every 5 seconds, by reading their
    request receipts, and settles them.
+
+The dispatcher's own transactions give up on a lock after 10 s (`lock_timeout`), so a
+blocked pass fails and the next one retries. A window this gateway is waiting on for
+an armed replica is left out of the claim batch, so it cannot crowd later windows
+out. Nothing is logged when a pass fails: the firing history (missed windows,
+firings left `claimed`) is the record.
 
 All times come from an injected clock and reach SQL as parameters, so the tests set
 them. `SKIP LOCKED` and the firing primary key make several gateways on one database
@@ -368,7 +384,9 @@ the real store. It checks:
 - strict bodies, the prompt and schedule limits, idempotent create, `409` on a
   changed body, `404` for another owner's routine or member, query validation, the
   lifecycle and its audit rows, and the definition, tombstone and delete triggers;
-- the limit of 20 under 25 concurrent creates and under concurrent re-enables;
+- the limit of 20 under 25 concurrent creates and under concurrent re-enables, and
+  an uncommitted 20th routine making a 21st create wait on the owner's lock and then
+  fail;
 - two dispatchers at the same instant firing twelve due routines exactly once each,
   with one identity and one admission each;
 - an ambiguous error before admission keeping the firing claimed and uncounted until
@@ -386,6 +404,9 @@ the real store. It checks:
   caller naming a routine refused; other text under a firing's identity refused and
   the identical request recorded as the routine's; another member refused a firing's
   conversation;
+- a refusal that races an earlier attempt's admission settling as `admitted`, a
+  stalled attempt that neither holds up later passes nor is retried by its own
+  gateway, and waiting windows that do not crowd a due one out of the claim batch;
 - the gateway's dispatcher firing on the gateway's clock and stopping when it closes;
 - migration 25 on a version-24 database: its locks, that it rewrites neither table
   and leaves the constraints `NOT VALID`, that it never queues while an admission

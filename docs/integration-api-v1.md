@@ -72,8 +72,9 @@ A successful submit returns `202` with a receipt:
 admitted it. Requests submitted through this API are started by the authenticated
 owner, so the owner kind carries no ID. A request a scheduled routine submitted
 reports `{"kind": "routine", "id": "<routineId>"}`; only the routine's firing record
-can make an admission say so (see [scheduled routines](scheduled-routines.md)). No
-request body can set it. A later release that adds a kind lists it in
+can make an admission say so (see [scheduled routines](scheduled-routines.md)), and
+a request sent here under a claimed firing's conversation and request UUIDs with
+exactly the routine's prompt is that firing's request. No request body can set it. A later release that adds a kind lists it in
 `initiatorKinds`. The field is absent for a request admitted before admissions were
 durable (a workflow history older than bounded conversations) until a cancellation
 intent records its admission.

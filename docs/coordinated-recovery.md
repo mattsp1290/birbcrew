@@ -314,7 +314,8 @@ before any recovery command runs against the fence. `$FENCE` is the
 Every gateway runs the [scheduled-routine](scheduled-routines.md) dispatcher, which
 submits turns with nobody present. Treat the gateways as consumer ingress: the
 `quiesce` hook stops them with the other consumers, and after `resume` they stay
-stopped until reconciliation has finished, as step 5 above requires. A Temporal
+stopped while the restarted workers reconcile lost native processes, until step 5 of
+[source fencing and restore](#source-fencing-and-restore) allows consumer ingress. A Temporal
 Schedule would fire whenever the Temporal server runs, including before `resume`;
 the dispatcher instead runs only in a gateway and checks the recovery phase before
 every pass, and both routine tables carry the write barrier, so a held or restored
@@ -327,7 +328,9 @@ was `claimed` at the recovery point, so its conversation and request UUIDs are i
 database but its admission may or may not be, is restored `claimed`. The first
 gateway after `resume` retries it with those stored UUIDs once its 2-minute lease has
 expired, never under new ones, so it runs once whether or not its admission reached
-the recovery point. A firing waiting on an approval is restored `waiting`, under the
+the recovery point. Unlike a window, such a firing is not dropped for being late: it
+starts when the first gateway does, however long after its window that is, and even
+if its owner's token was removed meanwhile. A firing waiting on an approval is restored `waiting`, under the
 same rules as any other pending decision. There is no gateway option to run without
 the dispatcher, and disabling a routine needs a gateway, so the first gateway after a
 restore fires any routine due from the moment it starts.
