@@ -59,7 +59,7 @@ function searchParams(url: URL): Record<string, string> {
   return Object.fromEntries(entries);
 }
 
-const probeTimeout = 2_000;
+export const probeTimeout = 2_000;
 // A slow or failing dependency becomes undefined, so no driver text or address is reported.
 async function probe<T>(check: () => Promise<T>): Promise<T | undefined> {
   const timer = new AbortController();
@@ -68,17 +68,37 @@ async function probe<T>(check: () => Promise<T>): Promise<T | undefined> {
   finally { timer.abort(); }
 }
 
-// probe() abandons a slow query; pg's own timeout then discards its client instead of stranding a pool slot.
-const schemaVersionQuery = { text: "SELECT max(version) AS version FROM birbcrew_ts.schema_versions", query_timeout: probeTimeout };
-async function health(store: MemberStore, members: MemberClient) {
-  const [schemaVersion, temporal] = await Promise.all([
-    probe(async () => (await store.pool.query<{ version: number | null }>(schemaVersionQuery)).rows[0].version),
+// probe() only ends the HTTP wait, and pg's query_timeout starts after pool acquisition and only abandons the
+// client, so each step is bounded here: a client granted after the deadline goes straight back unused,
+// statement_timeout makes the server cancel a lock-blocked read, and query_timeout covers a silent socket.
+// The acquisition bound is per probe so real routes keep the pool's unbounded wait (no connectionTimeoutMillis).
+async function readSchemaVersion(pool: Pool): Promise<number | null> {
+  const deadline = Date.now() + probeTimeout;
+  const client = await pool.connect();
+  if (Date.now() >= deadline) { client.release(); throw new Error("probe deadline passed"); }
+  const bounded = (text: string) => ({ text, query_timeout: probeTimeout });
+  try {
+    await client.query(bounded(`BEGIN READ ONLY; SET LOCAL statement_timeout = ${Math.max(1, deadline - Date.now())}`));
+    const { rows: [row] } = await client.query<{ version: number | null }>(
+      bounded("SELECT max(version) AS version FROM birbcrew_ts.schema_versions"));
+    await client.query(bounded("COMMIT"));
+    client.release();
+    return row.version;
+  } catch (error) {
+    client.release(true);
+    throw error;
+  }
+}
+
+async function health(schemaVersion: () => Promise<number | null>, members: MemberClient) {
+  const [version, temporal] = await Promise.all([
+    probe(schemaVersion),
     probe(async () => { await members.temporalReachable(Date.now() + probeTimeout); return true; }),
   ]);
-  const database = typeof schemaVersion === "number" ? "ready" : "unavailable";
+  const database = typeof version === "number" ? "ready" : "unavailable";
   return {
     apiVersion: "1", status: database === "ready" && temporal ? "ready" : "not_ready",
-    dependencies: { database: { status: database, schemaVersion: schemaVersion ?? null }, temporal: { status: temporal ? "ready" : "unavailable" } },
+    dependencies: { database: { status: database, schemaVersion: version ?? null }, temporal: { status: temporal ? "ready" : "unavailable" } },
   } as const;
 }
 
@@ -151,6 +171,10 @@ async function observe(
 export function createGateway(store: MemberStore, members: MemberClient, owners: Record<string, string>) {
   const integration = new IntegrationApi(store, members);
   const accounts = Object.entries(credentials.parse(owners)).map(([hash, actor]) => ({ digest: Buffer.from(hash, "hex"), actor }));
+  // One database probe at a time, shared by concurrent health calls: polling adds at most one queued connection
+  // request or statement, even while a connect to an unreachable server is still pending.
+  let databaseProbe: Promise<number | null> | undefined;
+  const schemaVersion = () => databaseProbe ??= readSchemaVersion(store.pool).finally(() => { databaseProbe = undefined; });
   async function route(request: IncomingMessage, response: ServerResponse) {
     const auth = request.headers.authorization;
     if (!auth?.startsWith("Bearer ") || auth.length === 7) throw new HttpError(401, "authentication_required");
@@ -163,7 +187,7 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
     if (versioned && path === "/capabilities" && request.method === "GET") return json(response, 200, integrationCapabilities);
     if (versioned && path === "/health" && request.method === "GET") {
       z.strictObject({}).parse(searchParams(url));
-      const report = await health(store, members);
+      const report = await health(schemaVersion, members);
       return json(response, report.status === "ready" ? 200 : 503, report);
     }
     if (versioned && path === "/members" && request.method === "GET") return json(response, 200, await integration.listMembers(ownerId, searchParams(url)));

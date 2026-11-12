@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import { after, before, test } from "node:test";
 import { Pool } from "pg";
 import type { Client } from "@temporalio/client";
 import { MemberClient } from "../../src/service/client.ts";
 import { ApprovalStore } from "../../src/service/approvals.ts";
 import { MemberStore } from "../../src/service/store.ts";
-import { createGateway } from "../../src/service/gateway.ts";
+import { createGateway, probeTimeout } from "../../src/service/gateway.ts";
 import { IntegrationApi } from "../../src/service/integration-api.ts";
 import type { TurnRequest } from "../../src/service/domain.ts";
 
@@ -414,7 +415,7 @@ test("v1 health answers 503 with the same shape, bounded and without dependency 
     { store: new MemberStore(refused), members: { async temporalReachable() {} },
       dependencies: { database: { status: "unavailable", schemaVersion: null }, temporal: { status: "ready" } } },
     // Both dependencies hang: the probes run concurrently and each is cut off.
-    { store: new MemberStore({ query: () => new Promise(() => {}) } as unknown as Pool), members: { temporalReachable: () => new Promise(() => {}) },
+    { store: new MemberStore({ connect: () => new Promise(() => {}) } as unknown as Pool), members: { temporalReachable: () => new Promise(() => {}) },
       dependencies: { database: { status: "unavailable", schemaVersion: null }, temporal: { status: "unavailable" } } },
   ];
   for (const { store: target, members, dependencies } of cases) {
@@ -422,7 +423,7 @@ test("v1 health answers 503 with the same shape, bounded and without dependency 
     try {
       const started = Date.now();
       const response = await gateway.get("/v1/health");
-      assert.ok(Date.now() - started < 4_000, "each dependency probe is bounded");
+      assert.ok(Date.now() - started < probeTimeout * 1.5, "both dependency probes run concurrently, each bounded");
       assert.equal(response.status, 503);
       const report = await response.json();
       assert.deepEqual(report, { apiVersion: "1", status: "not_ready", dependencies });
@@ -444,10 +445,56 @@ test("v1 health gives back a blocked probe's pooled connection so other routes k
     assert.equal(blocked.status, 503);
     assert.equal((await blocked.json()).dependencies.database.status, "unavailable");
     assert.equal((await gateway.get("/v1/members")).status, 200, "the only pooled connection was not stranded on the lock");
+    // The server cancels the blocked read itself; abandoning it client-side would leave a backend waiting on the lock.
+    const waiting = async () => (await pool.query(`SELECT count(*)::integer AS n FROM pg_stat_activity
+      WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%FROM birbcrew_ts.schema_versions'`)).rows[0].n;
+    for (const started = Date.now(); await waiting() && Date.now() - started < probeTimeout;) await delay(50);
+    assert.equal(await waiting(), 0, "no probe backend is left waiting while the lock is still held");
   } finally {
     await lock.query("ROLLBACK");
     lock.release();
   }
+});
+
+test("v1 health on a saturated pool answers 503 within its bound and queues at most one probe", { timeout: 30_000 }, async (t) => {
+  const single = new Pool({ connectionString: url, max: 1 });
+  const gateway = await serve(new MemberStore(single), { async temporalReachable() {} } as unknown as MemberClient);
+  t.after(async () => { await gateway.stop(); await single.end(); });
+  const statements: string[] = [], seen = new WeakSet<object>();
+  single.on("acquire", client => {
+    if (seen.has(client)) return; seen.add(client);
+    const query = client.query.bind(client) as (...args: unknown[]) => unknown;
+    client.query = ((...args: unknown[]) => {
+      statements.push(typeof args[0] === "string" ? args[0] : (args[0] as { text: string }).text);
+      return query(...args);
+    }) as typeof client.query;
+  });
+  const held = await single.connect();
+  let released = false;
+  try {
+    const health = async () => {
+      const started = Date.now(), response = await gateway.get("/v1/health");
+      assert.ok(Date.now() - started < probeTimeout * 1.5, "health is bounded while the pool is saturated");
+      assert.equal(response.status, 503);
+      assert.equal((await response.json()).dependencies.database.status, "unavailable");
+    };
+    // The gateway's cancellation flusher queues one scan of its own on the saturated pool.
+    for (const started = Date.now(); !single.waitingCount && Date.now() - started < 3_000;) await delay(10);
+    assert.equal(single.waitingCount, 1);
+    const calls = [health(), health()];
+    await delay(probeTimeout / 2);
+    await Promise.all([...calls, health()]);
+    await health();
+    assert.equal(single.waitingCount, 2, "concurrent and repeated health calls share one queued probe");
+    const real = gateway.get("/v1/members");
+    for (const started = Date.now(); single.waitingCount < 3 && Date.now() - started < probeTimeout;) await delay(10);
+    assert.equal(single.waitingCount, 3);
+    statements.length = 0;
+    held.release(); released = true;
+    assert.equal((await real).status, 200);
+    assert.ok(!statements.some(text => text.includes("schema_versions")), "the abandoned probe ran no query ahead of the real request");
+    assert.equal((await gateway.get("/v1/health")).status, 200, "the next probe starts afresh once the pool frees");
+  } finally { if (!released) held.release(); }
 });
 
 test("v1 listings page an owner's members and conversations without gaps, duplicates or text", async (t) => {
