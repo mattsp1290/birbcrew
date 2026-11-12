@@ -16,6 +16,7 @@ import {RoutineApi,RoutineDispatcher} from '../../src/service/routines.ts';
 import {ApprovalStore} from '../../src/service/approvals.ts';
 import {revokeGrant} from '../../src/service/grants.ts';
 import {conversationContext,MemoryApi} from '../../src/service/memories.ts';
+import {recordSegmentUsage,UsageApi} from '../../src/service/usage.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 const exec=promisify(execFile);
@@ -442,6 +443,47 @@ test('a restored installation suspends every active memory as it resumes; a held
  assert.match((await conversationContext(restored,later))!,new RegExp(again.memoryId));
  // The source, which resumed without a restore, kept its active entry.
  assert.deepEqual((await states(t.pool)).map(row=>row.state),['deleted','active']);
+});
+
+test('capture accepts the usage tables; a restore rewinds the ledger and budgets and resume leaves both as restored',async context=>{
+ const t=await setup(context);
+ const {memberId}=await spawn(t.store);const usage=new UsageApi(t.store);
+ await usage.setBudget('owner',memberId,{tokenLimit:1000});
+ async function spend(store:MemberStore,pool:Pool,input:number) {
+  const conversationId=randomUUID();await store.openConversation({ownerId:'owner',memberId,conversationId});
+  const request={ownerId:'owner',conversationId,requestId:randomUUID(),text:'metered'};
+  await store.recordAcceptance(request,ownerInitiator);
+  const execution={workflowRunId:randomUUID(),activityId:'turn',attempt:1};
+  const turn=await store.beginTurn(request,execution);assert.equal(turn.kind,'start');if(turn.kind!=='start')return;
+  await pool.query('INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt) VALUES ($1,$2,$3,$4,$5,1)',
+   [conversationId,request.requestId,turn.token,execution.workflowRunId,execution.activityId]);
+  await recordSegmentUsage(pool,{...request,token:turn.token,execution},{state:'reported',model:'m',inputTokens:input,outputTokens:0,
+   cachedInputTokens:null,cacheWriteTokens:null,reasoningTokens:null,costUsd:null});
+ }
+ await spend(t.store,t.pool,600);
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);
+ assert.deepEqual([manifest.inventory.usage_ledger,manifest.inventory.usage_budgets],[1,1]);
+ await assert.rejects(usage.setBudget('owner',memberId,{tokenLimit:5}),{code:'55000'});
+ await t.recovery.resume(t.hooks);
+ // After the recovery point the member spends more and the owner tightens its budget: the source refuses.
+ await spend(t.store,t.pool,500);
+ await usage.setBudget('owner',memberId,{tokenLimit:900});
+ const refused={ownerId:'owner',conversationId:randomUUID(),requestId:randomUUID(),text:'refused'};
+ await t.store.openConversation({ownerId:'owner',conversationId:refused.conversationId,memberId});
+ await assert.rejects(t.store.recordAcceptance(refused,ownerInitiator),{code:'usage_limit'});
+ await t.recovery.holdForRestore(manifest.generation,t.hooks);
+ const restored=await restoreBundle(t);const recovery=new InstallationRecovery(restored,t.fence);
+ await recovery.acceptRestore(t.bundle,pins,randomUUID());
+ await recovery.resume(t.hooks,manifest);
+ // The restore brought back the earlier limit and forgot the later 500 tokens; resume changed neither.
+ const view=await new UsageApi(new MemberStore(restored)).budget('owner',memberId);
+ assert.deepEqual([view.budget?.tokenLimit,view.budget?.revision,view.usedTokens,view.admitting],[1000,1,600,true]);
+ assert.equal((await restored.query("SELECT count(*)::integer AS n FROM birbcrew_ts.audit_events WHERE event_type LIKE 'usage.%'")).rows[0].n,1);
+ const restoredStore=new MemberStore(restored);
+ await restoredStore.openConversation({ownerId:'owner',conversationId:refused.conversationId,memberId});
+ await restoredStore.recordAcceptance(refused,ownerInitiator);
+ await assert.rejects(restored.query('DELETE FROM birbcrew_ts.usage_ledger'),{code:'23514'});
 });
 
 test('a restore past the fence epoch, its epoch file missing or behind, starts above every ID the restored identity drew',async context=>{
