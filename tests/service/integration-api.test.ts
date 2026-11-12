@@ -174,6 +174,8 @@ test("v1 HTTP contract enforces ownership, strict identity, capability version a
   assert.equal((await f.api(path + "/" + requestId, undefined, "invalid")).status, 401);
   const capabilities = await (await f.api("/v1/capabilities")).json();
   assert.equal(capabilities.apiVersion, "1");
+  assert.deepEqual(capabilities.health, { version: 1, dependencies: ["database", "temporal"] });
+  assert.deepEqual(capabilities.listing, { version: 1, resources: ["members", "conversations"], defaultLimit: 50, maximumLimit: 100 });
   const before = f.counts();
   assert.deepEqual(await (await f.api(path + "/" + requestId)).json(), receipt);
   assert.deepEqual(f.counts(), before);
@@ -571,6 +573,36 @@ test("v1 listings page an owner's members and conversations without gaps, duplic
   assert.deepEqual((await all("/v1/members", "members", f.stranger)).rows, []);
   assert.deepEqual((await all(`/v1/conversations?memberId=${first}`, "conversations", f.stranger)).rows, []);
   assert.equal((await f.api("/v1/members", undefined, "invalid")).status, 401);
+});
+
+test("v1 listings default to 50 rows, pass snapshot phases through and keep trusted-context conversations", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  const { memberId } = await store.getConversation({ ownerId: f.ownerId, conversationId: f.conversationId });
+  const waiting = randomUUID(), complete = randomUUID(), trusted = randomUUID();
+  for (const conversationId of [waiting, complete, trusted]) await store.openConversation({ ownerId: f.ownerId, conversationId, memberId });
+  await pool.query(`INSERT INTO birbcrew_ts.public_snapshots (conversation_id,state) VALUES ($1,'{"phase":"waiting"}'),($2,'{"phase":"complete"}')`,
+    [waiting, complete]);
+  // Trusted context is bound to an ordinary owned conversation, and stays listed after deletion.
+  await pool.query(`INSERT INTO birbcrew_ts.trusted_sessions (conversation_id,owner_id,phase,scope,context_version,application_digest)
+    VALUES ($1,$2,'deleted','fixture','fixture-v1','fixture')`, [trusted, f.ownerId]);
+  const listed = (await (await f.api(`/v1/conversations?memberId=${memberId}`)).json()).conversations as { conversationId: string; phase: string }[];
+  assert.deepEqual(Object.fromEntries(listed.map(row => [row.conversationId, row.phase])),
+    { [f.conversationId]: "idle", [waiting]: "waiting", [complete]: "complete", [trusted]: "idle" });
+
+  const empty = await store.spawn({ ownerId: f.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture-v1" });
+  assert.deepEqual(await (await f.api(`/v1/conversations?memberId=${empty.memberId}`)).json(),
+    { apiVersion: "1", conversations: [], next: null }, "an owned member without conversations gives an empty page");
+
+  for (let i = 0; i < 49; i++) await store.spawn({ ownerId: f.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture-v1" });
+  await pool.query(`INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id)
+    SELECT $1,$2,gen_random_uuid() FROM generate_series(1,47)`, [f.ownerId, memberId]);
+  for (const key of ["members", "conversations"]) {
+    const first = await (await f.api(`/v1/${key}`)).json();
+    assert.equal(first[key].length, 50, `${key} default to 50 rows`);
+    assert.ok(first.next);
+    const rest = await (await f.api(`/v1/${key}?after=${first.next}`)).json();
+    assert.deepEqual([rest[key].length, rest.next], [1, null]);
+  }
 });
 
 test("v1 listings reject unknown, repeated, out-of-range and forged query parameters", async (t) => {

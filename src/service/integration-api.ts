@@ -24,9 +24,11 @@ type Listing = "member" | "conversation";
 // Opaque keyset position: the last returned identifier, tagged by listing. It is only
 // compared, never looked up, so another owner's identifier confirms nothing.
 const encodeAfter = (kind: Listing, id: string) => Buffer.from(kind + ":" + id).toString("base64url");
+// Cursors carry PostgreSQL's lowercase uuid output, so the same rule as memberId plus that case.
+const listedId = z.uuid().refine(id => id === id.toLowerCase());
 function decodeAfter(kind: Listing, value: string) {
   const id = Buffer.from(value, "base64url").toString("utf8").slice(kind.length + 1);
-  return /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id) && encodeAfter(kind, id) === value ? id : undefined;
+  return listedId.safeParse(id).success && encodeAfter(kind, id) === value ? id : undefined;
 }
 const after = (kind: Listing) => z.string().max(128).refine(value => decodeAfter(kind, value) !== undefined)
   .transform(value => decodeAfter(kind, value)!).optional();

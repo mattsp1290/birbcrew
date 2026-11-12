@@ -44,26 +44,31 @@ These routes exist only under `/v1`; `/health` and `GET /members` or
 `GET /v1/health` takes no parameters. It probes both dependencies concurrently, each
 bounded to 2 seconds: a PostgreSQL round trip that reads the highest applied schema
 version, and a Temporal frontend `GetSystemInfo` call on the gateway's connection. The
-probe never starts, signals or describes a workflow, and a ready Temporal frontend does
-not show that workers are polling. It returns `200` when every dependency is ready and
-`503` with the same body shape otherwise:
+probe never starts, signals or describes a workflow. A ready Temporal result proves only
+that the frontend answers: `GetSystemInfo` names no namespace, so it does not show that
+the namespace the gateway uses exists, or that workers are polling. Concurrent health
+requests share one database probe, and that probe never waits for a pooled connection
+or a lock past its bound. It returns `200` when every dependency is ready and `503`
+with the same body shape otherwise, for example:
 
 ```json
 {
   "apiVersion": "1",
-  "status": "ready",
+  "status": "not_ready",
   "dependencies": {
-    "database": { "status": "ready", "schemaVersion": 20 },
+    "database": { "status": "unavailable", "schemaVersion": null },
     "temporal": { "status": "ready" }
   }
 }
 ```
 
 The top-level `status` is `ready` or `not_ready`. Each dependency reports `ready` or
-`unavailable` (failed or exceeded its bound); `schemaVersion` is `null` when the
-database is unavailable. Driver errors, addresses and connection strings are never
-returned. The gateway applies its migrations at startup, so compare `schemaVersion`
-with the release you deployed.
+`unavailable` (failed or exceeded its bound). When the database is ready,
+`schemaVersion` is the highest migration version it has applied, which is the largest
+version in the migration list in `src/service/store.ts`; versions are not necessarily
+contiguous. It is `null` when the database is unavailable. Driver errors, addresses
+and connection strings are never returned. The gateway applies its migrations at
+startup, so compare `schemaVersion` with the release you deployed.
 
 `GET /v1/members` and `GET /v1/conversations` return only the authenticated owner's
 rows:
@@ -90,14 +95,21 @@ rows:
 
 Pages follow a stable ascending identifier order. Neither table records creation time,
 so the order is not chronological. `next` is `null` on the last page. Treat it as
-opaque: it is bound to its listing, and a malformed, altered or other-listing value
-fails `400`. A row that exists throughout pagination appears exactly once; a row
-created meanwhile appears only if it sorts after the current position.
+opaque and send it back with the same parameters that produced it. A cursor records
+only its resource (members or conversations) and a position. A malformed or altered
+value, or one from the other resource, fails `400`. Because it does not record the
+`memberId` filter, reusing it with a different `memberId`, or without one, is accepted
+and returns that other listing from after the cursor's identifier, skipping that
+listing's earlier rows. A row that exists throughout pagination appears exactly
+once; a row created meanwhile appears only if it sorts after the current position.
 
 `phase` uses the snapshot vocabulary (`idle`, `running`, `waiting`, `complete`,
 `cancelled`, `failed`). It is `null` for a conversation that predates the public event
 ledger, whose snapshot returns `409 history_unavailable`. Listings never include
-messages, prompts or results; read the snapshot or request receipts for those. A
+messages, prompts or results; read the snapshot or request receipts for those.
+Conversations used through operator-configured trusted context are ordinary owned
+conversations and are listed like any other, including after their trusted session is
+deleted. A
 `memberId` that is not the owner's, whether another owner's or nonexistent, returns an
 empty `200` page, exactly like an owned member without conversations.
 
