@@ -97,12 +97,15 @@ trigger keeps a firing's identity fixed.
 | `owner_unavailable` | `skipped` | yes |
 | `rejected` | `failed`: opening or admitting was refused for good | yes |
 | `approval_required` | `failed` (or `waiting` until then): a `fail_closed` request reached a human decision | yes |
+| `approval_expired` | `failed`: a card of the firing's request reached the routine's [approval deadline](approval-expiry.md) undecided | yes |
 | `turn_failed`, `turn_cancelled`, `turn_uncertain` | `failed`: the request's receipt ended `failed`, `cancelled` or `uncertain` | yes |
 
 An open refused with `409 memory_limit`, because the member's [memory](memories.md)
 with the project notes would not fit its engine, is such a refusal: the firing fails
-`rejected` and counts. It names no other reason, so check the member's entries when a
-Codex member's firings start failing `rejected`.
+`rejected` and counts. So is `409 instructions_limit`, when the member's
+[instructions](member-instructions.md) with the project notes would not fit. It names no
+other reason, so check the member's entries and instructions when a Codex member's
+firings start failing `rejected`.
 
 A success resets the consecutive-failure count. A failure adds one, and the tenth in
 a row disables the routine with reason `consecutive_failures`, in the transaction
@@ -157,7 +160,10 @@ A routine's request reaches a human decision like an owner's.
   `pendingQuestions`) and the firing shows `waiting`. Find it from the firing's
   `conversationId`, then decide it through `POST /v1/conversations/{id}/human`. Pi
   and Claude cards wait durably. A Codex card expires after its live-call deadline,
-  which leaves the turn `uncertain`, so the firing fails `turn_uncertain`.
+  which leaves the turn `uncertain`, so the firing fails `turn_uncertain`. A routine
+  created with `approvalDeadlineSeconds` bounds the wait: a Pi or Claude card still
+  undecided at the deadline cancels the request and fails the firing
+  `approval_expired` (see [approval expiry](approval-expiry.md)).
 - `fail_closed`: when the dispatcher sees the firing's request `waiting`, it records
   `approval_required` on the firing first and then requests cancellation through
   the v1 durable cancellation intent, the same path as
@@ -225,7 +231,7 @@ routine is `404 not_found`. Bodies are strict: an unknown field, including an
 
 | Route | Purpose |
 | --- | --- |
-| `POST /v1/routines` | Create `{ "requestId", "memberId", "schedule", "prompt", "approvalPolicy" }`; `201` with the routine |
+| `POST /v1/routines` | Create `{ "requestId", "memberId", "schedule", "prompt", "approvalPolicy" }`, optionally with `approvalDeadlineSeconds`; `201` with the routine |
 | `GET /v1/routines?after=&limit=` | The owner's routines in every state, including deleted ones, ordered by `routineId`; `{ apiVersion, routines, nextAfter, hasMore }` |
 | `GET /v1/routines/{routineId}` | One routine, including a deleted one |
 | `POST /v1/routines/{routineId}/enable` | Body `{}`; `200` with the routine |
