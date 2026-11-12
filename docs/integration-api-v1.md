@@ -11,8 +11,10 @@ trusted scopes, tool registries, or engine configuration in a turn request.
 `GET /v1/capabilities` returns `apiVersion: "1"`, request and cancellation contract
 identifiers, proxy protocol versions, conversation/generation limits, trusted-context
 transport availability, observation limits, receipt retention semantics, the
-request initiator kinds (`initiatorKinds`, today `["owner"]`), and the audit
-contract (event types, page limits, formats). Additive
+request initiator kinds (`initiatorKinds`, today `["owner"]`), the audit
+contract (event types, page limits, formats), and `standingGrants` (the standing
+choices, the card and state fields, the grantable tool, policy version and
+initiator kinds, the grants route and the inactive-list limit). Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
@@ -29,6 +31,8 @@ proof of the operator's provider access or configured profile availability.
 | `POST /v1/conversations/{conversationId}/events` | Independent, read-only AG-UI observation |
 | `POST /v1/conversations/{conversationId}/human` | Existing explicit human-decision contract |
 | `GET /v1/audit` | Owner-scoped, append-only audit events; keyset pages as JSON or CSV export |
+| `GET /v1/members/{memberId}/grants` | The member's active standing grants and up to 20 ended ones |
+| `POST /v1/members/{memberId}/grants/{grantId}/revoke` | Revoke a standing grant for later calls, body `{}`; repeating returns the same grant |
 
 Authentication is required even for capabilities. Other owners get `404`, not a
 confirmation of a request's existence. Versioned request bodies are strict: unknown
@@ -178,6 +182,17 @@ returns `410 CURSOR_EXPIRED`. A gap during streaming emits `CURSOR_EXPIRED`; rec
 without the old cursor for a fresh snapshot. Do not promise arbitrary historic token
 replay, including across rollover. Committed per-request results use the separate
 request lookup above, not the event cursor.
+
+## Standing grants
+
+A work-item card may carry `standingChoices: ["allow_conversation", "allow_always"]`
+beside its unchanged `choices`. Answering with one approves the call and creates a
+grant, and the human route reports that choice. Later top-level work-item calls of
+owner-started requests that the grant covers proceed without a card: their request
+reads `running`, not `waiting`, and the conversation state's `grantedCalls` names
+the grant. No route creates a grant. Revocation affects later calls only. Crew has
+one token per owner, so it cannot tell a person from an automated client holding
+it, and a grant covers both. See [standing grants](standing-grants.md).
 
 ## Audit trail
 
