@@ -1,0 +1,40 @@
+# check=skip=InvalidDefaultArgInFrom
+# TypeScript member gateway and worker. See docs/persistent-deployment.md.
+# NODE_IMAGE must be a digest-pinned Node 22.23.3 Debian bookworm image; there is no default.
+ARG NODE_IMAGE
+
+FROM ${NODE_IMAGE} AS build
+ARG NODE_IMAGE
+RUN case "$NODE_IMAGE" in *@sha256:*) ;; *) echo "Pin NODE_IMAGE by digest" >&2; exit 1 ;; esac \
+    && test "$(node --version)" = v22.23.3 \
+    && grep -q '^12\.' /etc/debian_version
+# The launcher must link against the runtime image's glibc, so it is compiled from the same base.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev linux-libc-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY vendor/ag-ui/*.tgz vendor/ag-ui/
+COPY packages/pi-subagents/birbcrew-pi-subagents-0.1.0.tgz packages/pi-subagents/
+RUN npm ci --omit=dev --no-audit --no-fund
+COPY scripts/build-native scripts/
+COPY native/member-launch.c native/
+RUN scripts/build-native
+COPY src/service src/service
+
+FROM ${NODE_IMAGE}
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini=0.19.0-1+b3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 crew \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin crew \
+    && install -d -o 10001 -g 10001 -m 0700 /var/lib/birbcrew/native
+COPY --from=build /app/package.json /app/package.json
+COPY --from=build /app/node_modules /app/node_modules
+# Source resolves the launcher at <repo>/.proof/bin/member-launch relative to src/service.
+COPY --from=build /app/.proof/bin/member-launch /app/.proof/bin/member-launch
+COPY --from=build /app/src/service /app/src/service
+ENV HOME=/tmp BIRBCREW_STATE_DIR=/var/lib/birbcrew/native
+WORKDIR /app
+USER 10001:10001
+ENTRYPOINT ["/usr/bin/tini", "--"]
