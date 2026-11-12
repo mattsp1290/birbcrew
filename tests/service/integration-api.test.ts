@@ -430,3 +430,90 @@ test("v1 health answers 503 with the same shape, bounded and without dependency 
     } finally { await gateway.stop(); }
   }
 });
+
+test("v1 listings page an owner's members and conversations without gaps, duplicates or text", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  const { memberId: first } = await store.getConversation({ ownerId: f.ownerId, conversationId: f.conversationId });
+  const second = await store.spawn({ ownerId: f.ownerId, requestId: randomUUID(), engine: "claude", profile: "fixture-claude" });
+  const owned = new Map<string, string>([[f.conversationId, first]]);
+  for (let i = 0; i < 4; i++) {
+    const conversationId = randomUUID(), memberId = i % 2 ? first : second.memberId;
+    await store.openConversation({ ownerId: f.ownerId, conversationId, memberId }); owned.set(conversationId, memberId);
+  }
+  const other = randomUUID(), otherMember = await store.spawn({ ownerId: other, requestId: randomUUID(), engine: "pi", profile: "fixture-v1" });
+  const otherConversation = randomUUID();
+  await store.openConversation({ ownerId: other, conversationId: otherConversation, memberId: otherMember.memberId });
+  const text = "listing must not expose " + randomUUID();
+  const turn = await store.beginTurn({ ownerId: f.ownerId, conversationId: f.conversationId, requestId: randomUUID(), text },
+    { workflowRunId: randomUUID(), activityId: "listing", attempt: 1 });
+  assert.equal(turn.kind, "start");
+
+  async function all(path: string, key: "members" | "conversations", credential?: string) {
+    const rows: Record<string, unknown>[] = [], sizes: number[] = [];
+    for (let next: string | null = null, pages = 0; pages === 0 || next; pages++) {
+      assert.ok(pages < 10, "pagination terminates");
+      const separator = path.includes("?") ? "&" : "?";
+      const response = await f.api(next ? `${path}${separator}after=${next}` : path, undefined, credential);
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.deepEqual(Object.keys(body).sort(), ["apiVersion", key, "next"].sort());
+      assert.equal(JSON.stringify(body).includes(text), false, "listings never carry message text");
+      rows.push(...body[key]); sizes.push(body[key].length); next = body.next;
+    }
+    return { rows, sizes };
+  }
+
+  const expectedMembers = [{ memberId: first, engine: "pi", profile: "fixture-v1" },
+    { memberId: second.memberId, engine: "claude", profile: "fixture-claude" }].sort((a, b) => a.memberId < b.memberId ? -1 : 1);
+  assert.deepEqual((await all("/v1/members", "members")).rows, expectedMembers);
+  const members = await all("/v1/members?limit=1", "members");
+  assert.deepEqual(members.sizes, [1, 1], "an exactly full final page reports no next cursor");
+  assert.deepEqual(members.rows, expectedMembers);
+
+  const conversations = await all("/v1/conversations?limit=2", "conversations");
+  assert.deepEqual(conversations.sizes, [2, 2, 1]);
+  assert.deepEqual(conversations.rows.map(row => row.conversationId), [...owned.keys()].sort(), "stable order, no gaps or duplicates");
+  for (const row of conversations.rows) {
+    const member = expectedMembers.find(m => m.memberId === owned.get(row.conversationId as string))!;
+    assert.deepEqual(row, { conversationId: row.conversationId, memberId: member.memberId, engine: member.engine, profile: member.profile,
+      phase: row.conversationId === f.conversationId ? "running" : "idle" });
+  }
+
+  const filtered = await all(`/v1/conversations?limit=1&memberId=${first.toUpperCase()}`, "conversations");
+  assert.deepEqual(filtered.rows.map(row => row.conversationId),
+    [...owned].filter(([, memberId]) => memberId === first).map(([id]) => id).sort());
+  assert.ok(filtered.rows.every(row => row.memberId === first));
+
+  // Another owner's rows never appear, and naming them is indistinguishable from naming nothing.
+  const listed = JSON.stringify([(await all("/v1/members", "members")).rows, conversations.rows]);
+  assert.ok(!listed.includes(other) && !listed.includes(otherMember.memberId) && !listed.includes(otherConversation));
+  for (const memberId of [otherMember.memberId, randomUUID()]) {
+    const response = await f.api(`/v1/conversations?memberId=${memberId}`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { apiVersion: "1", conversations: [], next: null });
+  }
+  assert.deepEqual((await all("/v1/members", "members", f.stranger)).rows, []);
+  assert.deepEqual((await all(`/v1/conversations?memberId=${first}`, "conversations", f.stranger)).rows, []);
+  assert.equal((await f.api("/v1/members", undefined, "invalid")).status, 401);
+});
+
+test("v1 listings reject unknown, repeated, out-of-range and forged query parameters", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  await store.spawn({ ownerId: f.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture-v1" });
+  const { memberId } = await store.getConversation({ ownerId: f.ownerId, conversationId: f.conversationId });
+  await store.openConversation({ ownerId: f.ownerId, conversationId: randomUUID(), memberId });
+  const memberCursor = (await (await f.api("/v1/members?limit=1")).json()).next;
+  const conversationCursor = (await (await f.api("/v1/conversations?limit=1")).json()).next;
+  assert.ok(memberCursor && conversationCursor);
+  assert.equal((await f.api("/v1/members?limit=100")).status, 200, "maximum limit is inclusive");
+  const forged = (value: string) => Buffer.from(value).toString("base64url");
+  const id = Buffer.from(memberCursor, "base64url").toString().slice("member:".length);
+  const invalid = ["limit=0", "limit=101", "limit=abc", "limit=1.5", "limit=01", "limit=", "limit=1&limit=2", "after=", "after=not-a-cursor",
+    `after=${conversationCursor}`, `after=${forged("member:" + id.toUpperCase())}`, `after=${forged("member:" + id + ":x")}`,
+    `ownerId=${f.ownerId}`, "unknown=1", `memberId=${randomUUID()}`];
+  for (const query of invalid) assert.equal((await f.api("/v1/members?" + query)).status, 400, query);
+  for (const query of [...invalid.filter(q => !q.startsWith("after=") && !q.startsWith("memberId=")), `after=${memberCursor}`, "memberId=not-a-uuid"]) {
+    assert.equal((await f.api("/v1/conversations?" + query)).status, 400, query);
+  }
+  for (const path of ["/members", "/conversations"]) assert.equal((await f.api(path)).status, 404, "listings are versioned-only");
+});

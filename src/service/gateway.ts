@@ -165,6 +165,10 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       const report = await health(store, members);
       return json(response, report.status === "ready" ? 200 : 503, report);
     }
+    if (versioned && path === "/members" && request.method === "GET") return json(response, 200, await integration.listMembers(ownerId, searchParams(url)));
+    if (versioned && path === "/conversations" && request.method === "GET") {
+      return json(response, 200, await integration.listConversations(ownerId, searchParams(url)));
+    }
     const requestRoute = versioned && /^\/conversations\/([^/]+)\/requests(?:\/([^/]+)(\/cancel)?)?$/.exec(path);
     if (requestRoute) {
       const conversationId = z.uuid().parse(requestRoute[1]);

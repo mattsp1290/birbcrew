@@ -1,8 +1,10 @@
 import { z } from "zod";
 import type { MemberClient } from "./client.ts";
-import { MemberStoreError, submitSchema, turnKey } from "./domain.ts";
+import { MemberStoreError, submitSchema, turnKey, type Engine } from "./domain.ts";
 import { conversationTurnLimit, workflowGenerationTurnLimit } from "./limits.ts";
 import type { MemberStore } from "./store.ts";
+
+const listDefaultLimit = 50, listMaximumLimit = 100;
 
 export const integrationCapabilities = {
   apiVersion: "1",
@@ -15,7 +17,28 @@ export const integrationCapabilities = {
   trustedContext: { version: 1, transport: "operator-configured-local-runtime", httpSubmission: false },
   observation: { version: 1, protocol: "AG-UI", mode: "snapshot-and-bounded-tail", cursorExpiry: "reconnect-for-snapshot" },
   health: { version: 1, dependencies: ["database", "temporal"] },
+  listing: { version: 1, resources: ["members", "conversations"], defaultLimit: listDefaultLimit, maximumLimit: listMaximumLimit },
 } as const;
+
+type Listing = "member" | "conversation";
+// Opaque keyset position: the last returned identifier, tagged by listing. It is only
+// compared, never looked up, so another owner's identifier confirms nothing.
+const encodeAfter = (kind: Listing, id: string) => Buffer.from(kind + ":" + id).toString("base64url");
+function decodeAfter(kind: Listing, value: string) {
+  const id = Buffer.from(value, "base64url").toString("utf8").slice(kind.length + 1);
+  return /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id) && encodeAfter(kind, id) === value ? id : undefined;
+}
+const after = (kind: Listing) => z.string().max(128).refine(value => decodeAfter(kind, value) !== undefined)
+  .transform(value => decodeAfter(kind, value)!).optional();
+const limit = z.string().regex(/^[1-9][0-9]{0,2}$/).transform(Number).pipe(z.number().max(listMaximumLimit)).default(listDefaultLimit);
+const memberListQuery = z.strictObject({ limit, after: after("member") });
+const conversationListQuery = memberListQuery.extend({
+  after: after("conversation"), memberId: z.uuid().transform(value => value.toLowerCase()).optional(),
+});
+
+function page<T>(kind: Listing, rows: T[], size: number, id: (row: T) => string) {
+  return { items: rows.slice(0, size), next: rows.length > size ? encodeAfter(kind, id(rows[size - 1])) : null };
+}
 
 const keySchema = turnKey;
 type Key = z.infer<typeof keySchema>;
@@ -104,6 +127,32 @@ export class IntegrationApi {
       WHERE c.owner_id=$1 AND a.conversation_id=$2 AND a.request_id=$3
       ON CONFLICT(conversation_id,request_id) DO NOTHING`, [key.ownerId,key.conversationId,key.requestId]);
     return this.status(key);
+  }
+
+  /** Owner-scoped keyset page in identifier order; backed by members UNIQUE (owner_id, member_id). */
+  async listMembers(ownerId: string, query: unknown) {
+    const { limit, after } = memberListQuery.parse(query);
+    const { rows } = await this.store.pool.query<{ memberId: string; engine: Engine; profile: string }>(
+      `SELECT member_id AS "memberId",engine,profile FROM birbcrew_ts.members
+       WHERE owner_id=$1 AND ($2::uuid IS NULL OR member_id>$2) ORDER BY member_id LIMIT $3`,
+      [ownerId, after ?? null, limit + 1]);
+    const { items, next } = page("member", rows, limit, row => row.memberId);
+    return { apiVersion: "1" as const, members: items, next };
+  }
+
+  /** Coarse snapshot phase only; never message text. Phase is null where the snapshot reports history_unavailable. */
+  async listConversations(ownerId: string, query: unknown) {
+    const { limit, after, memberId } = conversationListQuery.parse(query);
+    const { rows } = await this.store.pool.query<{ conversationId: string; memberId: string; engine: Engine; profile: string; phase: string | null }>(
+      `SELECT c.conversation_id AS "conversationId",c.member_id AS "memberId",m.engine,m.profile,
+         CASE WHEN s.conversation_id IS NULL THEN 'idle' WHEN s.history_complete THEN s.state->>'phase' END AS phase
+       FROM birbcrew_ts.conversations c JOIN birbcrew_ts.members m USING (owner_id,member_id)
+       LEFT JOIN birbcrew_ts.public_snapshots s USING (conversation_id)
+       WHERE c.owner_id=$1 AND ($2::uuid IS NULL OR c.member_id=$2) AND ($3::uuid IS NULL OR c.conversation_id>$3)
+       ORDER BY c.conversation_id LIMIT $4`,
+      [ownerId, memberId ?? null, after ?? null, limit + 1]);
+    const { items, next } = page("conversation", rows, limit, row => row.conversationId);
+    return { apiVersion: "1" as const, conversations: items, next };
   }
 
   /** Restart-safe delivery outbox. Reads never call this; gateway invokes it on a timer. */
