@@ -239,13 +239,23 @@ generation it came from, whatever the database clocks say. This holds while:
 - the installation makes fewer than 2^19 (524,288) transfers, so the last range
   ends at 2^63 - 1, the largest `bigint`.
 
-Acceptance refuses the restore when the restored identity has already drawn an
-ID at or past the new epoch's first ID, or when the epoch reaches 2^19. Either
-means a condition above was broken. The command fails with a message naming the ID
-and the epoch. Neither the source nor the target can resume then: the fence has
-moved to the target, whose database is still held. Find out how the fence lost its
-state before going further. A reset fence is caught only when its new epoch does
-not pass the restored identity, so never reset it.
+Before it transfers authority, acceptance computes from the restored database the
+lowest epoch whose range lies above every ID the restored identity has drawn, and
+passes it to the fence as `minimumEpoch`. The fence takes the larger of that and
+its own next epoch. So a restore whose identity is already past the fence's next
+epoch, because a timeline overran its range or the fence lost its epoch, still
+starts above every ID in the restored database. A fence that lost its epoch cannot
+see IDs that other timelines drew after this dump was taken, so never reset it.
+
+Two refusals leave authority with the held source, which can resume: the restored
+identity has already drawn an ID in the last epoch's range, or the fence's next
+epoch would reach 2^19. Acceptance checks the first, and the fence the second,
+before anything changes. One refusal comes after the transfer: a fence that
+ignores `minimumEpoch` or returns no epoch, such as one written for an earlier
+release. The target's database stays held and the source can no longer resume.
+Upgrade the fence as [the recovery guide](coordinated-recovery.md#source-fencing-and-restore)
+describes, then retry `accept-restore` with the same target instance UUID: the
+retried transfer raises the stored epoch to the minimum and returns it.
 
 Across a restore, a consumer sees this:
 
@@ -355,8 +365,14 @@ the target draw its whole range of 2^44 IDs, then restores the same generation
 again. The second target's IDs pass all of the first one's, which a clock-based
 jump would allow only if that target's clock were about 203 days ahead. A saved
 cursor returns each new event, every transfer raises the epoch by one, a retried
-acceptance does not, and each target starts at its epoch times 2^44. A third test
-refuses a restore whose identity already reaches its epoch and leaves it held.
+acceptance does not, and each target starts at its epoch times 2^44. Other tests
+restore an identity already past the fence's next epoch, with the fence's epoch
+file missing or behind, and check that new IDs start above both its committed rows
+and an ID drawn by a transaction that rolled back. They refuse an exhausted epoch
+before authority moves and resume the source, refuse a fence that returns no epoch
+and then accept the retry with an upgraded fence and the same target, and show
+that a transfer interrupted between its epoch and state writes never hands out
+an earlier epoch again.
 
 Not claimed: these suites call the store, approval and child-store functions the
 way Temporal activities do. They do not run a Temporal worker or native SDK. The

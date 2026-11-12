@@ -149,13 +149,28 @@ A filesystem copy local to each host is not a shared authority. For a multi-host
 installation, supply a real shared authority or enforce operator isolation before
 moving state. Independent restored databases cannot discover arbitrary clones.
 
-`RecoveryFence.transfer` returns the authority's epoch: a counter that each
-transfer to a new instance raises by one, that a retried transfer returns
-unchanged, and that is never lowered or reset. Restored audit event IDs are
-ordered by it, and acceptance refuses a fence that returns none. This changes the
-interface: a fence implemented before audit IDs existed must add the epoch.
-`FileRecoveryFence` keeps it in its state file, where state written without it
-starts at 0.
+`RecoveryFence.transfer(installation, source, target, generation, minimumEpoch)`
+returns the authority's epoch, which orders restored audit event IDs. Moving
+authority from the held source sets it to the larger of the stored epoch plus one
+and `minimumEpoch`. A retried transfer to the same target returns the stored
+epoch, raised to `minimumEpoch` if lower. Nothing lowers or resets it. When the
+result would reach 2^19 (524,288), `transfer` must throw before changing anything,
+so authority stays with the source. Acceptance computes `minimumEpoch` from the
+restored database and refuses before any transfer when it has already reached
+2^19. This changes the interface: a fence implemented before audit IDs existed
+must store the epoch, honour `minimumEpoch` and return the epoch. Acceptance
+refuses a fence that returns no epoch, or one below `minimumEpoch`, only after the
+transfer: upgrade the fence, then retry `accept-restore` with the same target
+instance UUID.
+
+`FileRecoveryFence` keeps the epoch in `epoch.json`, beside `state.json`, and
+reads a missing file as 0. `state.json` keeps the format of earlier releases, so
+after a rollback an earlier release still runs every recovery command against the
+fence and ignores `epoch.json`. Its transfers leave the epoch behind. That is
+harmless: they assign no audit range, and acceptance raises the epoch past every
+ID in the restored database. An earlier release does not move the audit identity
+when it accepts a restore, though, so accept restores with this release or later
+(see [the audit trail](audit-trail.md#retention-upgrade-and-recovery)).
 
 1. Stop/fence the source and keep it held. Disable source service auto-restart and
    ingress, and isolate it from effect destinations when relocating. A backup
@@ -199,10 +214,14 @@ starts at 0.
    earlier restore of this generation, whatever the database clocks say, so an
    audit consumer's saved cursor never skips a new event. This holds while the
    fence's state is never reset, replaced or rolled back, no timeline draws 2^44
-   IDs and fewer than 2^19 transfers are made. If the restored identity has already
-   reached the epoch's first ID, acceptance fails with a message saying so and the
-   installation stays held. See [the audit trail](audit-trail.md) for the details
-   and what consumers see.
+   IDs and fewer than 2^19 transfers are made. If the restored identity is already
+   past the fence's next epoch, acceptance starts above it instead. If no epoch is
+   left, acceptance refuses before the transfer, and the held source can resume. A
+   fence that returns no usable epoch is refused after the transfer, when the
+   source can no longer resume: upgrade the fence and retry with the same target
+   instance UUID. These checks run on every restore, whether or not anyone reads
+   `GET /v1/audit`. See [the audit trail](audit-trail.md) for the details and what
+   consumers see.
 5. Reconcile effects/decisions first, then explicitly resume:
 
    ```
@@ -263,9 +282,11 @@ npm run test:recovery:coordinated
 The database suite exercises actual dump/restore to a second database, preserved
 conversation/checkpoint/observation state, completed replay and held pending work,
 write/native fences, interrupted capture, checksums, version mismatch and source /
-clone overlap, and that audit event IDs are never reissued, even when one generation
-is restored twice and the first target drew its whole ID range, and that a restore
-whose identity already reaches its fence epoch is refused. The native fixture archives stopped Claude/Codex/Pi session state,
+clone overlap. It also checks that audit event IDs are never reissued, even when
+one generation is restored twice and the first target drew its whole ID range or
+the fence lost its epoch, that an exhausted epoch is refused before authority
+moves, and that a fence returning no epoch can be upgraded and the restore
+retried. The native fixture archives stopped Claude/Codex/Pi session state,
 restores it under a different host root mounted at `/native`, and performs actual
 SDK follow-ups with fresh synthetic proxy credentials. It makes no live requests.
 The coordinated proof additionally backs up and restores one actual generation

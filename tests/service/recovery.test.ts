@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
-import {mkdtemp,readFile,writeFile,rm,cp} from 'node:fs/promises';
+import {mkdir,mkdtemp,readFile,writeFile,rm,cp} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {after,test} from 'node:test';
+import {after,test,type TestContext} from 'node:test';
 import {Pool} from 'pg';
 import {MemberStore} from '../../src/service/store.ts';
 import {InstallationRecovery,readRecoveryManifest,RecoveryRefusedError,type RecoveryPins,type RecoveryHooks} from '../../src/service/recovery.ts';
-import {FileRecoveryFence} from '../../src/service/recovery-fence.ts';
+import {FileRecoveryFence,fenceEpochLimit} from '../../src/service/recovery-fence.ts';
 import {auditQuerySchema,readAudit} from '../../src/service/audit.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
@@ -17,86 +17,104 @@ if(!url) throw new Error('Set BIRBCREW_TEST_DATABASE_URL to disposable PostgreSQ
 const admin=new Pool({connectionString:url});
 after(()=>admin.end());
 const pins:RecoveryPins={applicationCommit:'a'.repeat(40),lockfileSha256:'b'.repeat(64),temporal:{mode:'development-fixture',serverVersion:'1.10.0',persistenceFormat:'dev-sqlite-fixture'},logicalNativeRoot:'/var/lib/birbcrew/native'};
-async function setup() {
+const teardowns=new WeakMap<TestContext,(()=>Promise<unknown>)[]>();
+/** Registers a cleanup step to run, last registered first, after the test. An after hook never
+ * replaces the test's own failure, as a throw from finally would; a failed assertion can leave
+ * a session open, so DROP DATABASE can fail too. Every step runs even when one fails. */
+function deferrer(context:TestContext) {
+ let steps=teardowns.get(context);
+ if(!steps) {
+  const registered:(()=>Promise<unknown>)[]=[];teardowns.set(context,steps=registered);
+  context.after(async()=>{
+   const errors:unknown[]=[];
+   for(const step of registered.reverse()) try{await step();}catch(error){errors.push(error);}
+   if(errors.length) throw new AggregateError(errors,'Teardown failed');
+  });
+ }
+ return (step:()=>Promise<unknown>)=>{steps.push(step);};
+}
+async function database(defer:ReturnType<typeof deferrer>) {
  const name='recovery_'+randomUUID().replaceAll('-','');
  await admin.query(`CREATE DATABASE ${name}`);
- const u=new URL(url!);u.pathname='/'+name;
- const pool=new Pool({connectionString:u.toString()});const store=new MemberStore(pool);await store.migrate();
- const directory=await mkdtemp(join(tmpdir(),'birbcrew-recovery-'));
- const fence=new FileRecoveryFence(join(directory,'external-fence'));
- const recovery=new InstallationRecovery(pool,fence);await recovery.initializeFence();
- const bundle=join(directory,'bundle');await import('node:fs/promises').then(fs=>fs.mkdir(bundle));
- const hooks:RecoveryHooks={quiesce:async()=>{},snapshot:async dir=>{const artifacts=[];for(const kind of ['application-postgres','temporal-persistence','native-volumes','configuration'] as const){const file=kind+'.fixture';await writeFile(join(dir,file),'private fixture '+kind);artifacts.push({kind,file});}return artifacts;},reconcile:async()=>{}};
  // Not FORCE: end() resolves before its connections close, and terminating one then is an unhandled pool
  // error. A plain DROP waits up to 5 s for those sessions to exit, and fails loudly on a real leak.
- return {name,pool,store,directory,fence,recovery,bundle,hooks,cleanup:async()=>{await pool.end();await admin.query(`DROP DATABASE ${name}`);await rm(directory,{recursive:true,force:true});}};
+ defer(()=>admin.query(`DROP DATABASE ${name}`));
+ const u=new URL(url!);u.pathname='/'+name;
+ const pool=new Pool({connectionString:u.toString()});defer(()=>pool.end());
+ return {name,url:u.toString(),pool};
 }
+async function setup(context:TestContext) {
+ const defer=deferrer(context);
+ const {name,pool}=await database(defer);const store=new MemberStore(pool);await store.migrate();
+ const directory=await mkdtemp(join(tmpdir(),'birbcrew-recovery-'));defer(()=>rm(directory,{recursive:true,force:true}));
+ const fence=new FileRecoveryFence(join(directory,'external-fence'));
+ const recovery=new InstallationRecovery(pool,fence);await recovery.initializeFence();
+ const bundle=join(directory,'bundle');await mkdir(bundle);
+ const hooks:RecoveryHooks={quiesce:async()=>{},snapshot:async dir=>{const artifacts=[];for(const kind of ['application-postgres','temporal-persistence','native-volumes','configuration'] as const){const file=kind+'.fixture';await writeFile(join(dir,file),'private fixture '+kind);artifacts.push({kind,file});}return artifacts;},reconcile:async()=>{}};
+ return {name,pool,store,directory,fence,recovery,bundle,hooks,defer};
+}
+type Fixture=Awaited<ReturnType<typeof setup>>;
 
-test('freeze blocks every domain writer including TRUNCATE, survives reconnect, and interrupted capture stays held',async()=>{
- const t=await setup();try {
-  const c=await t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'});
-  const generation=await t.recovery.freeze();
-  await assert.rejects(t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'}),{code:'55000'});
-  await assert.rejects(t.pool.query('TRUNCATE birbcrew_ts.public_events'),{code:'55000'});
-  assert.equal(await new InstallationRecovery(t.pool,t.fence).freeze(),generation);
-  await assert.rejects(t.recovery.capture(t.bundle,pins,{...t.hooks,quiesce:async()=>{throw new Error('native teardown failed');}}),/teardown failed/);
-  assert.equal((await t.recovery.status()).control.phase,'frozen');
-  assert.equal((await t.recovery.status()).latest,null);
-  assert.equal((await t.pool.query('SELECT member_id FROM birbcrew_ts.members')).rows[0].member_id,c.memberId);
-  await t.recovery.resume(t.hooks);
-  await t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'});
- } finally {await t.cleanup();}
+test('freeze blocks every domain writer including TRUNCATE, survives reconnect, and interrupted capture stays held',async context=>{
+ const t=await setup(context);
+ const c=await t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'});
+ const generation=await t.recovery.freeze();
+ await assert.rejects(t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'}),{code:'55000'});
+ await assert.rejects(t.pool.query('TRUNCATE birbcrew_ts.public_events'),{code:'55000'});
+ assert.equal(await new InstallationRecovery(t.pool,t.fence).freeze(),generation);
+ await assert.rejects(t.recovery.capture(t.bundle,pins,{...t.hooks,quiesce:async()=>{throw new Error('native teardown failed');}}),/teardown failed/);
+ assert.equal((await t.recovery.status()).control.phase,'frozen');
+ assert.equal((await t.recovery.status()).latest,null);
+ assert.equal((await t.pool.query('SELECT member_id FROM birbcrew_ts.members')).rows[0].member_id,c.memberId);
+ await t.recovery.resume(t.hooks);
+ await t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'});
 });
 
-test('freeze waits for an already admitted writer before claiming a stable boundary',async()=>{
- const t=await setup();const writer=await t.pool.connect();try {
-  await writer.query('BEGIN');await writer.query("INSERT INTO birbcrew_ts.members(owner_id,spawn_request_id,engine,profile) VALUES('owner',$1,'pi','fixture')",[randomUUID()]);
-  let completed=false;const frozen=t.recovery.freeze().then(()=>{completed=true;});
-  await new Promise(r=>setTimeout(r,75));assert.equal(completed,false);
-  await writer.query('COMMIT');await frozen;assert.equal(completed,true);
- } finally {writer.release();await t.cleanup();}
+test('freeze waits for an already admitted writer before claiming a stable boundary',async context=>{
+ const t=await setup(context);const writer=await t.pool.connect();t.defer(async()=>writer.release());
+ await writer.query('BEGIN');await writer.query("INSERT INTO birbcrew_ts.members(owner_id,spawn_request_id,engine,profile) VALUES('owner',$1,'pi','fixture')",[randomUUID()]);
+ let completed=false;const frozen=t.recovery.freeze().then(()=>{completed=true;});
+ await new Promise(r=>setTimeout(r,75));assert.equal(completed,false);
+ await writer.query('COMMIT');await frozen;assert.equal(completed,true);
 });
 
-test('capture produces checksummed generation and rejects tampering or an unfenced new table',async()=>{
- const t=await setup();try {
-  const receipt=await t.recovery.capture(t.bundle,pins,t.hooks);
-  const manifest=await readRecoveryManifest(t.bundle);
-  assert.equal(manifest.generation,receipt.generation);assert.equal((await t.recovery.status()).latest?.sha256,receipt.sha256);
-  assert.equal(JSON.stringify(manifest).includes('private fixture'),false);
-  await writeFile(join(t.bundle,manifest.artifacts[0].file),'tampered');
-  await assert.rejects(readRecoveryManifest(t.bundle),/mismatch/);
-  await t.pool.query('CREATE TABLE birbcrew_ts.unfenced_test(id int)');
-  await assert.rejects(t.recovery.capture(t.bundle,pins,t.hooks),/already captured/);
-  await t.recovery.resume(t.hooks);
-  await assert.rejects(t.recovery.capture(t.bundle,pins,t.hooks),/Unfenced/);
- } finally {await t.cleanup();}
+test('capture produces checksummed generation and rejects tampering or an unfenced new table',async context=>{
+ const t=await setup(context);
+ const receipt=await t.recovery.capture(t.bundle,pins,t.hooks);
+ const manifest=await readRecoveryManifest(t.bundle);
+ assert.equal(manifest.generation,receipt.generation);assert.equal((await t.recovery.status()).latest?.sha256,receipt.sha256);
+ assert.equal(JSON.stringify(manifest).includes('private fixture'),false);
+ await writeFile(join(t.bundle,manifest.artifacts[0].file),'tampered');
+ await assert.rejects(readRecoveryManifest(t.bundle),/mismatch/);
+ await t.pool.query('CREATE TABLE birbcrew_ts.unfenced_test(id int)');
+ await assert.rejects(t.recovery.capture(t.bundle,pins,t.hooks),/already captured/);
+ await t.recovery.resume(t.hooks);
+ await assert.rejects(t.recovery.capture(t.bundle,pins,t.hooks),/Unfenced/);
 });
 
-test('source cannot resume after authority transfers; arbitrary second clone is rejected',async()=>{
- const t=await setup();try {
-  const {generation}=await t.recovery.capture(t.bundle,pins,t.hooks);
-  const {control:c}=await t.recovery.status();const target=randomUUID();
-  await t.fence.transfer(c.installation,c.instance,target,generation);
-  await assert.rejects(t.recovery.resume(t.hooks),/fenced/);
-  await assert.rejects(t.fence.transfer(c.installation,c.instance,randomUUID(),generation),/overlap/);
-  await assert.rejects(t.fence.hold(c.installation,c.instance,generation),/fenced/);
-  assert.equal((await t.recovery.status()).control.phase,'frozen');
- } finally {await t.cleanup();}
+test('source cannot resume after authority transfers; arbitrary second clone is rejected',async context=>{
+ const t=await setup(context);
+ const {generation}=await t.recovery.capture(t.bundle,pins,t.hooks);
+ const {control:c}=await t.recovery.status();const target=randomUUID();
+ await t.fence.transfer(c.installation,c.instance,target,generation);
+ await assert.rejects(t.recovery.resume(t.hooks),/fenced/);
+ await assert.rejects(t.fence.transfer(c.installation,c.instance,randomUUID(),generation),/overlap/);
+ await assert.rejects(t.fence.hold(c.installation,c.instance,generation),/fenced/);
+ assert.equal((await t.recovery.status()).control.phase,'frozen');
 });
 
-test('restore rejects version mismatch and leaves matching restore held until explicit reconciliation',async()=>{
- const t=await setup();try {
-  await t.recovery.capture(t.bundle,pins,t.hooks);const target=randomUUID();
-  await assert.rejects(t.recovery.acceptRestore(t.bundle,{...pins,applicationCommit:'c'.repeat(40)},target),/version/);
-  await t.recovery.acceptRestore(t.bundle,pins,target);
-  assert.equal((await t.recovery.status()).control.phase,'restored');
-  await assert.rejects(t.recovery.resume(t.hooks),/manifest/);
-  const manifest=await readRecoveryManifest(t.bundle);
-  await assert.rejects(t.recovery.resume({reconcile:async()=>{throw new Error('possible post-RPO effect');}},manifest),/post-RPO/);
-  assert.equal((await t.recovery.status()).control.phase,'restored');
-  await t.recovery.resume(t.hooks,manifest);
-  assert.equal((await t.recovery.status()).control.phase,'active');
- } finally {await t.cleanup();}
+test('restore rejects version mismatch and leaves matching restore held until explicit reconciliation',async context=>{
+ const t=await setup(context);
+ await t.recovery.capture(t.bundle,pins,t.hooks);const target=randomUUID();
+ await assert.rejects(t.recovery.acceptRestore(t.bundle,{...pins,applicationCommit:'c'.repeat(40)},target),/version/);
+ await t.recovery.acceptRestore(t.bundle,pins,target);
+ assert.equal((await t.recovery.status()).control.phase,'restored');
+ await assert.rejects(t.recovery.resume(t.hooks),/manifest/);
+ const manifest=await readRecoveryManifest(t.bundle);
+ await assert.rejects(t.recovery.resume({reconcile:async()=>{throw new Error('possible post-RPO effect');}},manifest),/post-RPO/);
+ assert.equal((await t.recovery.status()).control.phase,'restored');
+ await t.recovery.resume(t.hooks,manifest);
+ assert.equal((await t.recovery.status()).control.phase,'active');
 });
 
 async function postgresTool(tool:string,args:string[],input?:Buffer) {
@@ -112,119 +130,89 @@ async function postgresTool(tool:string,args:string[],input?:Buffer) {
   });child.catch(reject);
  });
 }
+async function restoreBundle(t:Fixture,bundle=t.bundle) {
+ const restored=await database(t.defer);
+ await postgresTool('pg_restore',['--dbname',restored.url,'--no-owner'],await readFile(join(bundle,'application-postgres.fixture')));
+ return restored.pool;
+}
 
-test('real PostgreSQL archive restores mappings, checkpoint, committed replay and observation to isolated database; pending remains held',async()=>{
- const t=await setup();const restoredName='recovery_'+randomUUID().replaceAll('-','');let restored:Pool|undefined;
- try {
-  const member=await t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'});
-  const key={ownerId:'owner',conversationId:randomUUID()};await t.store.openConversation({...key,memberId:member.memberId});
-  const request={...key,requestId:randomUUID(),text:'remember fixture'};
-  const turn=await t.store.beginTurn(request);assert.equal(turn.kind,'start');
-  await t.store.commitTurn({...key,requestId:request.requestId,token:turn.token,reply:'recorded',checkpoint:{version:1,engine:'pi',state:{fixture:'retained'}}});
-  const pending={...key,requestId:randomUUID(),text:'pending fixture'};await t.store.beginTurn(pending);
-  const sourceUrl=new URL(url!);sourceUrl.pathname='/'+t.name;
-  await t.recovery.capture(t.bundle,pins,{...t.hooks,snapshot:async dir=>{
-   const artifacts=await t.hooks.snapshot(dir);
-   const dump=await postgresTool('pg_dump',['--dbname',sourceUrl.toString(),'--format=custom','--no-owner']);
-   await writeFile(join(dir,'application-postgres.fixture'),dump);return artifacts;
-  }});
-  const relocated=join(t.directory,'other-host-bundle');await cp(t.bundle,relocated,{recursive:true});
-  await admin.query(`CREATE DATABASE ${restoredName}`);
-  const restoredUrl=new URL(url!);restoredUrl.pathname='/'+restoredName;
-  await postgresTool('pg_restore',['--dbname',restoredUrl.toString(),'--no-owner'],await readFile(join(relocated,'application-postgres.fixture')));
-  restored=new Pool({connectionString:restoredUrl.toString()});
-  const recovery=new InstallationRecovery(restored,t.fence);const store=new MemberStore(restored);
-  await recovery.acceptRestore(relocated,pins,randomUUID());
-  assert.deepEqual(await store.getConversation(key),await t.store.getConversation(key));
-  assert.deepEqual((await restored.query('SELECT * FROM birbcrew_ts.turns ORDER BY position')).rows,(await t.pool.query('SELECT * FROM birbcrew_ts.turns ORDER BY position')).rows);
-  assert.deepEqual(await store.beginTurn(request),{kind:'replay',reply:'recorded'}); // read-only replay remains safe while held
-  await assert.rejects(store.beginTurn({...request,requestId:randomUUID()}));
-  assert.deepEqual((await restored.query('SELECT * FROM birbcrew_ts.public_events ORDER BY cursor')).rows,(await t.pool.query('SELECT * FROM birbcrew_ts.public_events ORDER BY cursor')).rows);
-  assert.ok((await restored.query('SELECT * FROM birbcrew_ts.public_events')).rowCount!>0);
-  // The append-only trigger is created after pg_restore loads rows, and still guards the copy.
-  const audit=(await t.pool.query('SELECT * FROM birbcrew_ts.audit_events ORDER BY event_id')).rows;
-  assert.deepEqual(audit.map(row=>row.event_type),['member.spawned','conversation.opened','request.finished']);
-  assert.deepEqual((await restored.query('SELECT * FROM birbcrew_ts.audit_events ORDER BY event_id')).rows,audit);
-  assert.deepEqual((await readAudit(restored,'owner',auditQuerySchema.parse({}))).events.map(event=>event.eventId),audit.map(row=>row.event_id));
-  await assert.rejects(restored.query('DELETE FROM birbcrew_ts.audit_events'),{code:'23514'});
-  await assert.rejects(t.recovery.resume(t.hooks),/fenced/);
-  const manifest=await readRecoveryManifest(relocated);
-  assert.equal(manifest.inventory.audit_events,audit.length);
-  await recovery.resume(t.hooks,manifest);
-  await store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'});
-  const {rows:[next]}=await restored.query("SELECT max(event_id)::text AS id FROM birbcrew_ts.audit_events WHERE event_type='member.spawned'");
-  assert.ok(BigInt(next.id)>BigInt(audit.at(-1)!.event_id),'restored identity continues after the restored rows');
-  assert.deepEqual(await store.beginTurn(request),{kind:'replay',reply:'recorded'});
-  assert.equal((await restored.query('SELECT phase FROM birbcrew_ts.turns WHERE request_id=$1',[pending.requestId])).rows[0].phase,'started');
- } finally {await restored?.end();await admin.query(`DROP DATABASE IF EXISTS ${restoredName}`);await t.cleanup();}
+test('real PostgreSQL archive restores mappings, checkpoint, committed replay and observation to isolated database; pending remains held',async context=>{
+ const t=await setup(context);
+ const member=await t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'});
+ const key={ownerId:'owner',conversationId:randomUUID()};await t.store.openConversation({...key,memberId:member.memberId});
+ const request={...key,requestId:randomUUID(),text:'remember fixture'};
+ const turn=await t.store.beginTurn(request);assert.equal(turn.kind,'start');
+ await t.store.commitTurn({...key,requestId:request.requestId,token:turn.token,reply:'recorded',checkpoint:{version:1,engine:'pi',state:{fixture:'retained'}}});
+ const pending={...key,requestId:randomUUID(),text:'pending fixture'};await t.store.beginTurn(pending);
+ const sourceUrl=new URL(url!);sourceUrl.pathname='/'+t.name;
+ await t.recovery.capture(t.bundle,pins,{...t.hooks,snapshot:async dir=>{
+  const artifacts=await t.hooks.snapshot(dir);
+  const dump=await postgresTool('pg_dump',['--dbname',sourceUrl.toString(),'--format=custom','--no-owner']);
+  await writeFile(join(dir,'application-postgres.fixture'),dump);return artifacts;
+ }});
+ const relocated=join(t.directory,'other-host-bundle');await cp(t.bundle,relocated,{recursive:true});
+ const restored=await restoreBundle(t,relocated);
+ const recovery=new InstallationRecovery(restored,t.fence);const store=new MemberStore(restored);
+ await recovery.acceptRestore(relocated,pins,randomUUID());
+ assert.deepEqual(await store.getConversation(key),await t.store.getConversation(key));
+ assert.deepEqual((await restored.query('SELECT * FROM birbcrew_ts.turns ORDER BY position')).rows,(await t.pool.query('SELECT * FROM birbcrew_ts.turns ORDER BY position')).rows);
+ assert.deepEqual(await store.beginTurn(request),{kind:'replay',reply:'recorded'}); // read-only replay remains safe while held
+ await assert.rejects(store.beginTurn({...request,requestId:randomUUID()}));
+ assert.deepEqual((await restored.query('SELECT * FROM birbcrew_ts.public_events ORDER BY cursor')).rows,(await t.pool.query('SELECT * FROM birbcrew_ts.public_events ORDER BY cursor')).rows);
+ assert.ok((await restored.query('SELECT * FROM birbcrew_ts.public_events')).rowCount!>0);
+ // The append-only trigger is created after pg_restore loads rows, and still guards the copy.
+ const audit=(await t.pool.query('SELECT * FROM birbcrew_ts.audit_events ORDER BY event_id')).rows;
+ assert.deepEqual(audit.map(row=>row.event_type),['member.spawned','conversation.opened','request.finished']);
+ assert.deepEqual((await restored.query('SELECT * FROM birbcrew_ts.audit_events ORDER BY event_id')).rows,audit);
+ assert.deepEqual((await readAudit(restored,'owner',auditQuerySchema.parse({}))).events.map(event=>event.eventId),audit.map(row=>row.event_id));
+ await assert.rejects(restored.query('DELETE FROM birbcrew_ts.audit_events'),{code:'23514'});
+ await assert.rejects(t.recovery.resume(t.hooks),/fenced/);
+ const manifest=await readRecoveryManifest(relocated);
+ assert.equal(manifest.inventory.audit_events,audit.length);
+ await recovery.resume(t.hooks,manifest);
+ await store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'});
+ const {rows:[next]}=await restored.query("SELECT max(event_id)::text AS id FROM birbcrew_ts.audit_events WHERE event_type='member.spawned'");
+ assert.ok(BigInt(next.id)>BigInt(audit.at(-1)!.event_id),'restored identity continues after the restored rows');
+ assert.deepEqual(await store.beginTurn(request),{kind:'replay',reply:'recorded'});
+ assert.equal((await restored.query('SELECT phase FROM birbcrew_ts.turns WHERE request_id=$1',[pending.requestId])).rows[0].phase,'started');
 });
 
-test('SIGKILL after external activation before database activation is safely retryable on restored instance',async()=>{
- const t=await setup();try {
-  await t.recovery.capture(t.bundle,pins,t.hooks);
-  await t.recovery.acceptRestore(t.bundle,pins,randomUUID());
-  const u=new URL(url!);u.pathname='/'+t.name;
-  await assert.rejects(exec(process.execPath,[new URL('./recovery-crash-child.ts',import.meta.url).pathname,u.toString(),join(t.directory,'external-fence'),t.bundle]),e=>{assert.equal((e as {signal?:string}).signal,'SIGKILL');return true;});
-  assert.equal((await t.recovery.status()).control.phase,'restored');
-  const fresh=new InstallationRecovery(t.pool,new FileRecoveryFence(join(t.directory,'external-fence')));
-  await fresh.resume(t.hooks,await readRecoveryManifest(t.bundle));
-  assert.equal((await fresh.status()).control.phase,'active');
- }finally{await t.cleanup();}
+test('SIGKILL after external activation before database activation is safely retryable on restored instance',async context=>{
+ const t=await setup(context);
+ await t.recovery.capture(t.bundle,pins,t.hooks);
+ await t.recovery.acceptRestore(t.bundle,pins,randomUUID());
+ const u=new URL(url!);u.pathname='/'+t.name;
+ await assert.rejects(exec(process.execPath,[new URL('./recovery-crash-child.ts',import.meta.url).pathname,u.toString(),join(t.directory,'external-fence'),t.bundle]),e=>{assert.equal((e as {signal?:string}).signal,'SIGKILL');return true;});
+ assert.equal((await t.recovery.status()).control.phase,'restored');
+ const fresh=new InstallationRecovery(t.pool,new FileRecoveryFence(join(t.directory,'external-fence')));
+ await fresh.resume(t.hooks,await readRecoveryManifest(t.bundle));
+ assert.equal((await fresh.status()).control.phase,'active');
 });
 
-test('native lifetime barrier waits for surviving lease and held state rejects new native admission',async()=>{
+test('native lifetime barrier waits for surviving lease and held state rejects new native admission',async context=>{
  const {acquireRecoveryNativeLease}=await import('../../src/service/recovery-admission.ts');
- const t=await setup();const native=await t.pool.connect();try {
-  await native.query('BEGIN');await acquireRecoveryNativeLease(native);
-  let captured=false;
-  const capture=t.recovery.capture(t.bundle,pins,t.hooks).then(()=>{captured=true;});
-  while((await t.recovery.status()).control.phase!=='frozen') await new Promise(r=>setTimeout(r,10));
-  await new Promise(r=>setTimeout(r,50));assert.equal(captured,false);
-  await native.query('ROLLBACK');await capture;
-  await native.query('BEGIN');await assert.rejects(acquireRecoveryNativeLease(native),/held/);await native.query('ROLLBACK');
- }finally{native.release();await t.cleanup();}
+ const t=await setup(context);const native=await t.pool.connect();t.defer(async()=>native.release());
+ await native.query('BEGIN');await acquireRecoveryNativeLease(native);
+ let captured=false;
+ const capture=t.recovery.capture(t.bundle,pins,t.hooks).then(()=>{captured=true;});
+ while((await t.recovery.status()).control.phase!=='frozen') await new Promise(r=>setTimeout(r,10));
+ await new Promise(r=>setTimeout(r,50));assert.equal(captured,false);
+ await native.query('ROLLBACK');await capture;
+ await native.query('BEGIN');await assert.rejects(acquireRecoveryNativeLease(native),/held/);await native.query('ROLLBACK');
 });
 
-test('external preparation before DB freeze cannot authorize restore overlap',async()=>{
- const t=await setup();try {
-  const {control:c}=await t.recovery.status();const generation=randomUUID();
-  await t.fence.hold(c.installation,c.instance,generation); // controller dies before freezing database
-  assert.equal((await t.recovery.status()).control.phase,'active');
-  await assert.rejects(t.fence.transfer(c.installation,c.instance,randomUUID(),generation),/overlap/);
-  await t.recovery.holdForRestore(generation,t.hooks);
-  assert.equal((await t.recovery.status()).control.phase,'frozen');
-  await t.fence.transfer(c.installation,c.instance,randomUUID(),generation);
- }finally{await t.cleanup();}
+test('external preparation before DB freeze cannot authorize restore overlap',async context=>{
+ const t=await setup(context);
+ const {control:c}=await t.recovery.status();const generation=randomUUID();
+ await t.fence.hold(c.installation,c.instance,generation); // controller dies before freezing database
+ assert.equal((await t.recovery.status()).control.phase,'active');
+ await assert.rejects(t.fence.transfer(c.installation,c.instance,randomUUID(),generation),/overlap/);
+ await t.recovery.holdForRestore(generation,t.hooks);
+ assert.equal((await t.recovery.status()).control.phase,'frozen');
+ await t.fence.transfer(c.installation,c.instance,randomUUID(),generation);
 });
 
-test('retained A backup restores to C after A→B, but only after current owner B is quiesced',async()=>{
- const t=await setup();const nameC='recovery_'+randomUUID().replaceAll('-','');let poolC:Pool|undefined;
- try {
-  const urlA=new URL(url!);urlA.pathname='/'+t.name;
-  await t.recovery.capture(t.bundle,pins,{...t.hooks,snapshot:async directory=>{
-   const artifacts=await t.hooks.snapshot(directory);
-   await writeFile(join(directory,'application-postgres.fixture'),await postgresTool('pg_dump',['--dbname',urlA.toString(),'--format=custom','--no-owner']));
-   return artifacts;
-  }});
-  const manifest=await readRecoveryManifest(t.bundle);const instanceB=randomUUID();const instanceC=randomUUID();
-  await t.recovery.acceptRestore(t.bundle,pins,instanceB);
-  await t.recovery.resume(t.hooks,manifest);
-  // Restore the retained A bytes, not a new B backup, into a third isolated DB.
-  await admin.query(`CREATE DATABASE ${nameC}`);const urlC=new URL(url!);urlC.pathname='/'+nameC;
-  await postgresTool('pg_restore',['--dbname',urlC.toString(),'--no-owner'],await readFile(join(t.bundle,'application-postgres.fixture')));
-  poolC=new Pool({connectionString:urlC.toString()});const c=new InstallationRecovery(poolC,t.fence);
-  await assert.rejects(c.acceptRestore(t.bundle,pins,instanceC,instanceB),/overlap/); // B is still active
-  await t.recovery.holdForRestore(manifest.generation,t.hooks);
-  await assert.rejects(c.acceptRestore(t.bundle,pins,instanceC),/overlap/); // provenance A isn't current B
-  await c.acceptRestore(t.bundle,pins,instanceC,instanceB);
-  await c.acceptRestore(t.bundle,pins,instanceC,instanceB); // transfer/update acknowledgement retry
-  await assert.rejects(t.recovery.resume(t.hooks),/fenced/);
-  await assert.rejects(t.fence.transfer(manifest.installation,instanceB,randomUUID(),manifest.generation),/overlap/);
-  await c.resume(t.hooks,manifest);assert.equal((await c.status()).control.phase,'active');
- }finally{await poolC?.end();await admin.query(`DROP DATABASE IF EXISTS ${nameC}`);await t.cleanup();}
-});
-
-async function dumpToBundle(t:Awaited<ReturnType<typeof setup>>) {
+async function dumpToBundle(t:Fixture) {
  const sourceUrl=new URL(url!);sourceUrl.pathname='/'+t.name;
  return t.recovery.capture(t.bundle,pins,{...t.hooks,snapshot:async directory=>{
   const artifacts=await t.hooks.snapshot(directory);
@@ -232,89 +220,176 @@ async function dumpToBundle(t:Awaited<ReturnType<typeof setup>>) {
   return artifacts;
  }});
 }
+
+test('retained A backup restores to C after A→B, but only after current owner B is quiesced',async context=>{
+ const t=await setup(context);
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);const instanceB=randomUUID();const instanceC=randomUUID();
+ await t.recovery.acceptRestore(t.bundle,pins,instanceB);
+ await t.recovery.resume(t.hooks,manifest);
+ // Restore the retained A bytes, not a new B backup, into a third isolated DB.
+ const poolC=await restoreBundle(t);const c=new InstallationRecovery(poolC,t.fence);
+ await assert.rejects(c.acceptRestore(t.bundle,pins,instanceC,instanceB),/overlap/); // B is still active
+ await t.recovery.holdForRestore(manifest.generation,t.hooks);
+ await assert.rejects(c.acceptRestore(t.bundle,pins,instanceC),/overlap/); // provenance A isn't current B
+ await c.acceptRestore(t.bundle,pins,instanceC,instanceB);
+ await c.acceptRestore(t.bundle,pins,instanceC,instanceB); // transfer/update acknowledgement retry
+ await assert.rejects(t.recovery.resume(t.hooks),/fenced/);
+ await assert.rejects(t.fence.transfer(manifest.installation,instanceB,randomUUID(),manifest.generation),/overlap/);
+ await c.resume(t.hooks,manifest);assert.equal((await c.status()).control.phase,'active');
+});
+
 const lastId=async(pool:Pool)=>(await pool.query<{id:string}>('SELECT max(event_id)::text AS id FROM birbcrew_ts.audit_events')).rows[0].id;
 const spawn=(store:MemberStore)=>store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture'});
-const epochOf=async(t:Awaited<ReturnType<typeof setup>>)=>JSON.parse(await readFile(join(t.directory,'external-fence','state.json'),'utf8')).epoch as number;
+const sequence=`pg_get_serial_sequence('birbcrew_ts.audit_events','event_id')`;
+const setSequence=(pool:Pool,id:bigint)=>pool.query(`SELECT setval(${sequence},$1::bigint,false)`,[id.toString()]);
+const epochIn=async(fence:string)=>JSON.parse(await readFile(join(fence,'epoch.json'),'utf8')).epoch as number;
+const fenceState=async(t:Fixture)=>{
+ const read=(file:string)=>readFile(join(t.directory,'external-fence',file),'utf8').catch((error:{code?:string})=>{if(error.code==='ENOENT')return null;throw error;});
+ return {state:await read('state.json'),epoch:await read('epoch.json')};
+};
 
-test('a restored audit trail never reissues an event ID, even when one generation is restored twice, whatever the clocks',async()=>{
- const t=await setup();const databases:string[]=[];const pools:Pool[]=[];
- try {
-  const page=async(pool:Pool,after:string)=>(await readAudit(pool,'owner',auditQuerySchema.parse({after}))).events.map(event=>event.eventId);
-  await spawn(t.store);
+test('a restored audit trail never reissues an event ID, even when one generation is restored twice, whatever the clocks',async context=>{
+ const t=await setup(context);
+ const page=async(pool:Pool,after:string)=>(await readAudit(pool,'owner',auditQuerySchema.parse({after}))).events.map(event=>event.eventId);
+ await spawn(t.store);
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);const recoveryPoint=await lastId(t.pool);
+ // The source runs on past the recovery point, and a consumer pages past what the restore keeps.
+ await t.recovery.resume(t.hooks);await spawn(t.store);const seenOnSource=await lastId(t.pool);
+ async function restore(currentSourceInstance?:string) {
+  const pool=await restoreBundle(t);
+  const recovery=new InstallationRecovery(pool,t.fence);const instance=randomUUID();
+  await recovery.acceptRestore(t.bundle,pins,instance,currentSourceInstance);
+  await recovery.acceptRestore(t.bundle,pins,instance,currentSourceInstance); // acknowledgement retry
+  assert.equal(await lastId(pool),recoveryPoint,'events after the recovery point are gone');
+  await recovery.resume(t.hooks,manifest);
+  return {pool,recovery,store:new MemberStore(pool),instance};
+ }
+ const epoch=()=>epochIn(join(t.directory,'external-fence'));
+ await t.recovery.holdForRestore(manifest.generation,t.hooks);
+ const b=await restore();const epochB=await epoch();
+ await spawn(b.store);const firstOnB=await lastId(b.pool);
+ assert.deepEqual(await page(b.pool,seenOnSource),[firstOnB],'a saved cursor never skips a new event');
+ // B draws 2^44 IDs. With a clock-based jump, C's clock would now have to be ahead of B's
+ // by 2^44 µs (about 203 days) to pass them. The fence epoch reads no clock.
+ await b.pool.query(`SELECT setval(${sequence},$1::bigint)`,[(BigInt(firstOnB)+(1n<<44n)-2n).toString()]);
+ await spawn(b.store);const onB=await lastId(b.pool);
+ // The retained bundle is restored again after B has run: C must pass all of B's IDs.
+ await b.recovery.holdForRestore(manifest.generation,t.hooks);
+ const c=await restore(b.instance);
+ await spawn(c.store);const onC=await lastId(c.pool);
+ assert.ok(BigInt(onC)>BigInt(onB),'a second restore of one generation never reissues the first one\'s IDs');
+ assert.deepEqual(await page(c.pool,onB),[onC]);
+ assert.deepEqual([epochB,await epoch()],[1,2],'every transfer advances the epoch once; an acknowledgement retry does not');
+ assert.deepEqual([firstOnB,onB,onC],[1n<<44n,(2n<<44n)-1n,2n<<44n].map(String),'each timeline starts at its epoch times 2^44');
+ // The previous release parses state.json strictly, so after a rollback it must still read it.
+ assert.deepEqual(Object.keys(JSON.parse((await fenceState(t)).state!)).sort(),['generation','installation','instance','phase']);
+});
+
+test('a restore past the fence epoch, its epoch file missing or behind, starts above every ID the restored identity drew',async context=>{
+ for(const {drawn,stale,epoch} of [
+  // The identity was last set by an acceptance at epoch 5 and has drawn nothing since: only the committed rows show epoch 3.
+  {drawn:false,stale:null,epoch:4},
+  // The epoch 5 timeline drew an ID that never committed: only the identity shows it, and that timeline may have committed more after the capture.
+  {drawn:true,stale:1,epoch:6},
+ ]) {
+  const t=await setup(context);
+  await setSequence(t.pool,3n<<44n);await spawn(t.store);await setSequence(t.pool,5n<<44n);
+  if(drawn) await t.pool.query(`SELECT nextval(${sequence})`);
   await dumpToBundle(t);
-  const manifest=await readRecoveryManifest(t.bundle);const recoveryPoint=await lastId(t.pool);
-  // The source runs on past the recovery point, and a consumer pages past what the restore keeps.
-  await t.recovery.resume(t.hooks);await spawn(t.store);const seenOnSource=await lastId(t.pool);
-  async function restore(currentSourceInstance?:string) {
-   const name='recovery_'+randomUUID().replaceAll('-','');databases.push(name);
-   await admin.query(`CREATE DATABASE ${name}`);const target=new URL(url!);target.pathname='/'+name;
-   await postgresTool('pg_restore',['--dbname',target.toString(),'--no-owner'],await readFile(join(t.bundle,'application-postgres.fixture')));
-   const pool=new Pool({connectionString:target.toString()});pools.push(pool);
-   const recovery=new InstallationRecovery(pool,t.fence);const instance=randomUUID();
-   await recovery.acceptRestore(t.bundle,pins,instance,currentSourceInstance);
-   await recovery.acceptRestore(t.bundle,pins,instance,currentSourceInstance); // acknowledgement retry
-   assert.equal(await lastId(pool),recoveryPoint,'events after the recovery point are gone');
-   await recovery.resume(t.hooks,manifest);
-   return {pool,recovery,store:new MemberStore(pool),instance};
-  }
-  await t.recovery.holdForRestore(manifest.generation,t.hooks);
-  const b=await restore();const epochB=await epochOf(t);
-  await spawn(b.store);const firstOnB=await lastId(b.pool);
-  assert.deepEqual(await page(b.pool,seenOnSource),[firstOnB],'a saved cursor never skips a new event');
-  // B draws 2^44 IDs. With a clock-based jump, C's clock would now have to be ahead of B's
-  // by 2^44 µs (about 203 days) to pass them. The fence epoch reads no clock.
-  await b.pool.query(`SELECT setval(pg_get_serial_sequence('birbcrew_ts.audit_events','event_id'),$1::bigint)`,[(BigInt(firstOnB)+(1n<<44n)-2n).toString()]);
-  await spawn(b.store);const onB=await lastId(b.pool);
-  // The retained bundle is restored again after B has run: C must pass all of B's IDs.
-  await b.recovery.holdForRestore(manifest.generation,t.hooks);
-  const c=await restore(b.instance);
-  await spawn(c.store);const onC=await lastId(c.pool);
-  assert.ok(BigInt(onC)>BigInt(onB),'a second restore of one generation never reissues the first one\'s IDs');
-  assert.deepEqual(await page(c.pool,onB),[onC]);
-  assert.deepEqual([epochB,await epochOf(t)],[1,2],'every transfer advances the epoch once; an acknowledgement retry does not');
-  assert.deepEqual([firstOnB,onB,onC],[1n<<44n,(2n<<44n)-1n,2n<<44n].map(String),'each timeline starts at its epoch times 2^44');
- } finally {
-  for(const pool of pools) await pool.end();
-  for(const name of databases) await admin.query(`DROP DATABASE IF EXISTS ${name}`);
-  await t.cleanup();
+  // A replaced fence: the same authority state, with no epoch file or one that transfers by an earlier release left behind.
+  const fence=join(t.directory,'replaced-fence');await mkdir(fence);
+  await cp(join(t.directory,'external-fence','state.json'),join(fence,'state.json'));
+  if(stale!==null) await writeFile(join(fence,'epoch.json'),JSON.stringify({epoch:stale}));
+  const pool=await restoreBundle(t);const recovery=new InstallationRecovery(pool,new FileRecoveryFence(fence));const instance=randomUUID();
+  await recovery.acceptRestore(t.bundle,pins,instance);
+  await recovery.acceptRestore(t.bundle,pins,instance); // acknowledgement retry
+  assert.equal(await epochIn(fence),epoch,'the lowest epoch above every ID the restored identity drew');
+  await recovery.resume(t.hooks,await readRecoveryManifest(t.bundle));
+  await spawn(new MemberStore(pool));
+  assert.equal(await lastId(pool),(BigInt(epoch)<<44n).toString(),'new IDs start above every ID the restored identity drew');
  }
 });
 
-test('a restore whose audit identity already reaches its fence epoch is refused and stays held',async()=>{
- const t=await setup();const name='recovery_'+randomUUID().replaceAll('-','');let pool:Pool|undefined;
- try {
-  // As if the fence had been replaced after a restored timeline ran: the source already drew epoch 1's first ID.
-  await t.pool.query(`SELECT setval(pg_get_serial_sequence('birbcrew_ts.audit_events','event_id'),$1::bigint,false)`,[(1n<<44n).toString()]);
-  await spawn(t.store);
-  await dumpToBundle(t);
-  await admin.query(`CREATE DATABASE ${name}`);const target=new URL(url!);target.pathname='/'+name;
-  await postgresTool('pg_restore',['--dbname',target.toString(),'--no-owner'],await readFile(join(t.bundle,'application-postgres.fixture')));
-  pool=new Pool({connectionString:target.toString()});const recovery=new InstallationRecovery(pool,t.fence);const instance=randomUUID();
-  const sequence=`SELECT pg_sequence_last_value(pg_get_serial_sequence('birbcrew_ts.audit_events','event_id')::regclass)::text AS id`;
-  const before=(await pool.query(sequence)).rows[0].id;
-  for(let attempt=0;attempt<2;attempt++) await assert.rejects(recovery.acceptRestore(t.bundle,pins,instance),
-   (error:unknown)=>error instanceof RecoveryRefusedError&&/drawn event ID 17592186044416, at or past 17592186044416, where fence epoch 1 must start/.test(error.message));
-  assert.equal((await recovery.status()).control.phase,'frozen','a refused restore never reaches restored, so resume cannot proceed');
-  assert.equal((await pool.query(sequence)).rows[0].id,before,'the identity is left where the dump put it');
-  await assert.rejects(recovery.resume(t.hooks,await readRecoveryManifest(t.bundle)),/fenced/);
- } finally {await pool?.end();await admin.query(`DROP DATABASE IF EXISTS ${name}`);await t.cleanup();}
+test('an audit epoch past the last is refused before authority moves, and the source can resume',async context=>{
+ // The restored trail already holds an ID in the last epoch's range.
+ const t=await setup(context);
+ await setSequence(t.pool,BigInt(fenceEpochLimit-1)<<44n);await spawn(t.store);
+ await t.recovery.capture(t.bundle,pins,t.hooks);
+ const before=await fenceState(t);
+ await assert.rejects(t.recovery.acceptRestore(t.bundle,pins,randomUUID()),(error:unknown)=>error instanceof RecoveryRefusedError
+  &&/has drawn event ID 9223354444668731392, so this restore needs audit identity epoch 524288, past the last, 524287\. Nothing was transferred/.test(error.message));
+ assert.deepEqual(await fenceState(t),before,'the fence is unchanged');
+ await t.recovery.resume(t.hooks);
+ assert.equal((await t.recovery.status()).control.phase,'active');
+ // A fence whose own next epoch is past the last refuses inside transfer, before it writes anything.
+ const s=await setup(context);
+ await s.recovery.capture(s.bundle,pins,s.hooks);
+ await writeFile(join(s.directory,'external-fence','epoch.json'),JSON.stringify({epoch:fenceEpochLimit-1}));
+ const held=await fenceState(s);
+ await assert.rejects(s.recovery.acceptRestore(s.bundle,pins,randomUUID()),(error:unknown)=>error instanceof RecoveryRefusedError
+  &&/needs recovery fence epoch 524288, past the last audit identity epoch, 524287, so the fence refused it and is unchanged\. Authority stays with the held source/.test(error.message));
+ assert.deepEqual(await fenceState(s),held,'the fence is unchanged');
+ await s.recovery.resume(s.hooks);
+ assert.equal((await s.recovery.status()).control.phase,'active');
 });
 
-test('bundle directory fsync failure cannot record a successful or transferable backup',async()=>{
+test('a fence that returns no epoch is refused, and a retry with an upgraded fence and the same target succeeds',async context=>{
+ const t=await setup(context);
+ await spawn(t.store);
+ await t.recovery.capture(t.bundle,pins,t.hooks);
+ // A fence written before transfer returned an epoch: it moves authority and stores no epoch.
+ class LegacyFence extends FileRecoveryFence {
+  override async transfer(installation:string,source:string,target:string,generation:string) {
+   await super.transfer(installation,source,target,generation);await rm(join(this.directory,'epoch.json'));
+   return undefined as unknown as number;
+  }
+ }
+ const target=randomUUID();
+ await assert.rejects(new InstallationRecovery(t.pool,new LegacyFence(t.fence.directory)).acceptRestore(t.bundle,pins,target),(error:unknown)=>error instanceof RecoveryRefusedError
+  &&error.message.includes(`returned no epoch for this transfer, but this restore needs at least epoch 1. Authority has moved to target ${target}`)
+  &&error.message.includes(`retry accept-restore with the same target instance, ${target}.`));
+ assert.equal((await t.recovery.status()).control.phase,'frozen');
+ await assert.rejects(t.recovery.resume(t.hooks),/fenced/,'authority has moved, so the source cannot resume');
+ await t.recovery.acceptRestore(t.bundle,pins,target);
+ assert.equal(await epochIn(t.fence.directory),1,'the retry raises the stored epoch to the minimum');
+ await t.recovery.resume(t.hooks,await readRecoveryManifest(t.bundle));
+ await spawn(t.store);
+ assert.equal(await lastId(t.pool),(1n<<44n).toString());
+});
+
+test('a transfer interrupted between its epoch and state writes leaves the epoch higher, never lower',async context=>{
  const fs=(await import('node:fs/promises')).default;
  const {syncBuiltinESMExports}=await import('node:module');
- const t=await setup();const originalOpen=fs.open;let bundleSyncAttempted=false;
- try {
-  fs.open=async(...args:Parameters<typeof originalOpen>)=>{
-   const handle=await originalOpen(...args);
-   if(args[0]===t.bundle) handle.sync=async()=>{bundleSyncAttempted=true;throw new Error('injected directory sync failure');};
-   return handle;
-  };
-  syncBuiltinESMExports();
-  await assert.rejects(t.recovery.capture(t.bundle,pins,t.hooks),/directory sync failure/);
-  assert.equal(bundleSyncAttempted,true);
-  assert.equal((await t.recovery.status()).latest,null);
-  const manifest=await readRecoveryManifest(t.bundle);
-  await assert.rejects(t.fence.transfer(manifest.installation,manifest.sourceInstance,randomUUID(),manifest.generation),/overlap/);
- }finally{fs.open=originalOpen;syncBuiltinESMExports();await t.cleanup();}
+ const t=await setup(context);
+ const {generation}=await t.recovery.capture(t.bundle,pins,t.hooks);const {control:c}=await t.recovery.status();
+ await writeFile(join(t.fence.directory,'epoch.json'),JSON.stringify({epoch:3}));
+ const originalRename=fs.rename;let renames=0;
+ const restore=()=>{fs.rename=originalRename;syncBuiltinESMExports();};t.defer(async()=>restore());
+ fs.rename=async(...args:Parameters<typeof originalRename>)=>{if(++renames===2) throw new Error('injected crash');return originalRename(...args);};
+ syncBuiltinESMExports();
+ const target=randomUUID();
+ await assert.rejects(t.fence.transfer(c.installation,c.instance,target,generation,1),/injected crash/);
+ restore();
+ // Whichever write landed first, a retry must never hand epoch 3 out again.
+ assert.ok(await t.fence.transfer(c.installation,c.instance,target,generation,1)>3);
+});
+
+test('bundle directory fsync failure cannot record a successful or transferable backup',async context=>{
+ const fs=(await import('node:fs/promises')).default;
+ const {syncBuiltinESMExports}=await import('node:module');
+ const t=await setup(context);const originalOpen=fs.open;let bundleSyncAttempted=false;
+ t.defer(async()=>{fs.open=originalOpen;syncBuiltinESMExports();});
+ fs.open=async(...args:Parameters<typeof originalOpen>)=>{
+  const handle=await originalOpen(...args);
+  if(args[0]===t.bundle) handle.sync=async()=>{bundleSyncAttempted=true;throw new Error('injected directory sync failure');};
+  return handle;
+ };
+ syncBuiltinESMExports();
+ await assert.rejects(t.recovery.capture(t.bundle,pins,t.hooks),/directory sync failure/);
+ assert.equal(bundleSyncAttempted,true);
+ assert.equal((await t.recovery.status()).latest,null);
+ const manifest=await readRecoveryManifest(t.bundle);
+ await assert.rejects(t.fence.transfer(manifest.installation,manifest.sourceInstance,randomUUID(),manifest.generation),/overlap/);
 });
