@@ -235,7 +235,7 @@ store calls its handler makes. It checks:
 - a routine's deadline: bounds, idempotent create, immutability, the audit payload, a
   firing's request carrying it, another deadline refused under the firing's identity,
   and an expired card failing the firing `approval_expired` and counting once;
-- migration 28 on a version-26 database: no table rewritten, the locks above, the
+- migration 28 on a version-27 database: no table rewritten, the locks above, the
   constraints `NOT VALID`, no lock queue while an admission holds `request_admissions`,
   completion while a native turn holds its admission, and an earlier receipt unchanged.
 

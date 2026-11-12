@@ -432,7 +432,7 @@ test("a routine's deadline applies to every firing, and an expired card fails th
 });
 
 test("migration 028 rewrites no table, adds only NOT VALID constraints, and never queues for a lock", async (t) => {
-  const upgraded = await databaseAt(t, 26);
+  const upgraded = await databaseAt(t, 27);
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID();
   const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
     (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi','fixture') RETURNING member_id`, [ownerId, randomUUID()]);
@@ -498,7 +498,7 @@ test("migration 028 rewrites no table, adds only NOT VALID constraints, and neve
 });
 
 test("migration 028 completes while a native turn holds its admission", async (t) => {
-  const upgraded = await databaseAt(t, 26);
+  const upgraded = await databaseAt(t, 27);
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
   const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
     (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi','fixture') RETURNING member_id`, [ownerId, randomUUID()]);
