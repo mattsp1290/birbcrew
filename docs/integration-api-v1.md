@@ -17,7 +17,7 @@ policies (`routines`), `standingGrants` (the standing
 choices, the card and state fields, the grantable tool, policy version and
 initiator kinds, the grants route and the inactive-list limit), `memories` (the
 member memory route, limits, injection and deletion semantics per engine), `usage`
-(the ledger states, what each engine reports, the budget period and refusal code), health
+(the ledger states, what each engine reports, the budget period and refusal codes), health
 dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
@@ -415,8 +415,8 @@ provider billed it; it never estimates one. The `/v1/usage` routes total an owne
 rows, per member and per conversation, and mark the part that routines started. An
 owner can set one daily token budget per member (`PUT /v1/usage/budgets/{memberId}`).
 While the member's input and output tokens for the UTC day are at or over it, a new
-request, the owner's or a routine's, fails `409 usage_limit` (or `409 usage_limit_closed`
-when the refusal also closed the conversation); a request already
+request fails `409 usage_limit` (or `409 usage_limit_closed` when the refusal also closed
+the conversation), and a routine's firing fails with reason `usage_limit`; a request already
 admitted is never refused or interrupted, so the cap can be passed by what running
 requests use. See [usage metering](usage-metering.md).
 

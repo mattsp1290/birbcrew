@@ -317,9 +317,8 @@ npm run test:usage:capture
 npm run test:recovery
 ```
 
-The integration API workflow's `consumer-contract` job runs `npm run test:usage`. The
-capture suite also needs the native launcher and the Claude and Codex CLIs, which only
-a full build host provides.
+The integration API workflow's `consumer-contract` job runs both after `npm run build`,
+which builds the native launcher the capture suite starts Claude and Codex through.
 
 `usage-capture.test.ts` runs the real drivers against the local fixture providers. It
 checks that Codex records each turn's share of the running total over three resumed

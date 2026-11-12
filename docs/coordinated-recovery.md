@@ -259,7 +259,10 @@ snapshot or copied from another fence, and never deleted. See
    recovery point are no longer in the ledger, so for the rest of that UTC day each
    member's budget counts less than it used, and a budget set, changed or cleared
    after the recovery point is back to its earlier state. Owners check each member's
-   budget after a restore. See [usage metering](usage-metering.md#upgrade-and-recovery).
+   budget after a restore. The ledger reissues the record IDs drawn after the recovery
+   point, so before resuming, read `SELECT max(usage_id) FROM birbcrew_ts.usage_ledger`
+   on the restored database and give it to consumers that mirror usage records. See
+   [usage metering](usage-metering.md#upgrade-and-recovery).
 
    After successful reconciliation and activation, restart matching Temporal
    services/workers **with consumer ingress still disabled**. Let recovery

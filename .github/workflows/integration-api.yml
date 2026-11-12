@@ -44,6 +44,7 @@ jobs:
       - run: npm run test:memories
       - run: npm run test:grants
       - run: npm run test:usage
+      - run: npm run test:usage:capture
       - run: node --test tests/service/store.test.ts tests/service/rollover-client.test.ts
       - run: node --test tests/service/approvals.test.ts tests/service/codex-calls.test.ts tests/service/codex-registration.test.ts
   actual-service:
