@@ -5,7 +5,6 @@ import type { MemberStore } from "./store.ts";
 import type { memberConversation } from "./workflow.ts";
 
 import { memberTaskQueue } from "./queues.ts";
-import { checkUsageAdmission } from "./usage.ts";
 
 /** The admission activity refused the request under its member's budget (ownerAdmissionActivity).
  * A refused admission closes the conversation's workflow, so the caller is told so. */
@@ -136,7 +135,7 @@ export class MemberClient {
     const conversation = await this.store.getConversation({ ownerId: request.ownerId, conversationId: request.conversationId });
     await this.reconcileAcceptance(request);
     if (await this.store.committedReply(request) === undefined) {
-      await checkUsageAdmission(this.store, request);
+      await this.store.checkUsageAdmission(request);
       try {
         await this.throughRollover(conversation, handle => handle.executeUpdate<string, [typeof request]>("acceptTurn", { args: [request] }));
       } catch (error) {
@@ -154,7 +153,7 @@ export class MemberClient {
     await this.reconcileAcceptance(request);
     const reply = await this.store.committedReply(request);
     if (reply !== undefined) return reply;
-    await checkUsageAdmission(this.store, request);
+    await this.store.checkUsageAdmission(request);
     try {
       return await this.throughRollover(conversation, handle => handle.executeUpdate<string, [typeof request]>("submitTurn", { args: [request] }));
     } catch (error) {

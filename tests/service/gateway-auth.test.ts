@@ -39,6 +39,8 @@ const routes: [string, string][] = [
   ["POST", `/v1/routines/${routine}/enable`], ["POST", `/v1/routines/${routine}/disable`], ["GET", `/v1/routines/${routine}/firings`],
   ["POST", "/v1/memories"], ["GET", "/v1/memories"], ["GET", `/v1/memories/${memory}`], ["DELETE", `/v1/memories/${memory}`],
   ["GET", `/v1/members/${member}/grants`], ["POST", `/v1/members/${member}/grants/${grant}/revoke`],
+  ["GET", "/v1/usage"], ["GET", "/v1/usage/members"], ["GET", "/v1/usage/conversations"], ["GET", "/v1/usage/records"],
+  ["GET", `/v1/usage/budgets/${member}`], ["PUT", `/v1/usage/budgets/${member}`], ["DELETE", `/v1/usage/budgets/${member}`],
   ["POST", "/v1/members"], ["POST", "/v1/conversations"],
   ["GET", `/v1/conversations/${conversation}`], ["POST", `/v1/conversations/${conversation}/requests`],
   ["GET", `/v1/conversations/${conversation}/requests/${request}`], ["POST", `/v1/conversations/${conversation}/requests/${request}/cancel`],

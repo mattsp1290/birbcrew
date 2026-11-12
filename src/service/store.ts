@@ -10,7 +10,7 @@ import { savedProposal, type Approval } from "./approvals.ts";
 import { appendAudit } from "./audit.ts";
 import { firingConversation, firingInitiator } from "./routines.ts";
 import { snapshotMemories } from "./memories.ts";
-import { refuseOverBudget } from "./usage.ts";
+import { checkUsageAdmission, refuseOverBudget } from "./usage.ts";
 import { ApplicationFailure } from "@temporalio/client";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -79,7 +79,7 @@ export function ownerAdmissionActivity(store: MemberStore) {
     try { await store.recordAcceptance(request, ownerInitiator); }
     catch (error) {
       // Retrying cannot change a budget refusal within the activity's deadline. MemberClient
-      // reads this failure type back as usage_limit.
+      // reads this failure type back as usage_limit_closed.
       if (error instanceof MemberStoreError && error.code === "usage_limit") throw ApplicationFailure.nonRetryable("usage_limit", "usage_limit");
       throw error;
     }
@@ -114,6 +114,8 @@ export class MemberStore {
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
       [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [22, "022-conversation-owner-index.sql"], [23, "023-request-initiator.sql"], [24, "024-standing-grants.sql"], [25, "025-routines.sql"], [26, "026-memories.sql"], [31, "031-usage.sql"]] as const;
+      // Number a new migration above every released one: once a release applies 31, a later
+      // release cannot use 27 to 30.
       const { rows: [{ latest }] } = await db.query<{ latest: number | null }>("SELECT max(version) AS latest FROM birbcrew_ts.schema_versions");
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
@@ -185,6 +187,11 @@ export class MemberStore {
     if(!row)return undefined;
     if(!row.prompt_digest.equals(createHash("sha256").update(key.text).digest()))throw new MemberStoreError("conflict");
     return {phase:row.phase,reason:row.reason};
+  }
+
+  /** The member's budget, checked before a request reaches its workflow (usage.ts). */
+  checkUsageAdmission(input: TurnRequest): Promise<void> {
+    return checkUsageAdmission(this, input);
   }
 
   /** A replay of an admitted request keeps the initiator its first admission recorded. A routine

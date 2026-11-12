@@ -9,7 +9,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { ActivityFailure, ApplicationFailure, WorkflowUpdateFailedError, type Client } from "@temporalio/client";
 import { Pool } from "pg";
 import { MemberClient } from "../../src/service/client.ts";
-import { ownerInitiator, type Engine, type TurnRequest } from "../../src/service/domain.ts";
+import { auditEvents } from "../../src/service/audit.ts";
+import { MemberStoreError, ownerInitiator, type Engine, type TurnRequest } from "../../src/service/domain.ts";
 import { createGateway } from "../../src/service/gateway.ts";
 import { IntegrationApi } from "../../src/service/integration-api.ts";
 import { withNativeAdmission } from "../../src/service/native-admission.ts";
@@ -244,7 +245,8 @@ test("the usage routes total an owner's usage by member and conversation, mark r
   assert.equal((await g.api("/v1/usage", undefined, "invalid")).status, 401);
   assert.equal((await g.api("/usage")).status, 404);
   const capabilities = (await g.api("/v1/capabilities")).body;
-  assert.deepEqual([capabilities.usage.route, capabilities.usage.budget.period, capabilities.usage.budget.refusal], ["/v1/usage", "utc_day", "usage_limit"]);
+  assert.deepEqual([capabilities.usage.route, capabilities.usage.budget.period, capabilities.usage.budget.refusal,
+    capabilities.usage.budget.refusalClosingConversation], ["/v1/usage", "utc_day", "usage_limit", "usage_limit_closed"]);
   assert.ok(capabilities.audit.eventTypes.includes("usage.request_refused"));
 });
 
@@ -325,7 +327,7 @@ test("a member at or over its budget is refused at admission; an admitted or run
   await store.recordAcceptance(running.request, ownerInitiator);
   await checkUsageAdmission(store, running.request);
   assert.equal(await running.commit(), "done");
-  // The workflow's own admission refusing in a race reaches the caller as the same 409 code.
+  // The workflow's own admission refusing in a race reaches the caller as 409 usage_limit_closed.
   await usage.setBudget(owner.ownerId, owner.memberId, { tokenLimit: 5000 });
   const raced = { workflow: { start: async () => {}, getHandle: () => ({ executeUpdate: async () => {
     throw new WorkflowUpdateFailedError("Workflow Update failed", new ActivityFailure("Activity task failed", "recordAcceptance", "1",
@@ -349,11 +351,16 @@ test("a routine firing refused by its member's budget fails with usage_limit and
   const db = await databaseAt(t);
   const isolated = new MemberStore(db);
   const owner = await member(isolated);
-  let now = new Date("2031-01-06T10:00:00.000Z");
+  let now = new Date("2031-01-06T10:00:00.000Z"), refused = 0;
   const clock: Clock = () => new Date(now);
   const members = {
     async open(input: Parameters<MemberStore["openConversation"]>[0]) { return isolated.openConversation(input); },
-    async accept(input: TurnRequest) { await isolated.recordAcceptance(input, ownerInitiator); return { requestId: input.requestId }; },
+    // The second firing is refused as MemberClient reports a refusal by the workflow's own admission.
+    async accept(input: TurnRequest) {
+      try { await isolated.recordAcceptance(input, ownerInitiator); }
+      catch (error) { throw ++refused === 2 ? new MemberStoreError("usage_limit_closed") : error; }
+      return { requestId: input.requestId };
+    },
     async requestStatus(input: Parameters<MemberStore["requestStatus"]>[0]) { return isolated.requestStatus(input); },
     async cancelPending() {},
   } as unknown as MemberClient;
@@ -474,6 +481,8 @@ test("every firing reason the dispatcher names is one the routine firing CHECK a
   const routine = await new RoutineApi(store, () => new Date("2031-01-06T10:00:00.000Z")).create(owner.ownerId, {
     requestId: randomUUID(), memberId: owner.memberId, schedule: "*/15 * * * *", prompt: "reasons", approvalPolicy: "wait" });
   const reasons = [...skipReasons.map(reason => ["skipped", reason]), ...failReasons.map(reason => ["failed", reason])];
+  assert.deepEqual([...auditEvents["routine.firing_settled"].payload.shape.reason.unwrap().options].sort(),
+    [...skipReasons, ...failReasons].sort(), "the audit payload names the same reasons");
   for (const [index, [status, reason]] of reasons.entries()) {
     const identity = status === "skipped" ? [null, null] : [randomUUID(), randomUUID()];
     await pool.query(`INSERT INTO birbcrew_ts.routine_firings (routine_id,scheduled_for,status,reason,conversation_id,request_id,recorded_at,settled_at)

@@ -12,7 +12,8 @@ function fixture(reply?: string) {
   const routes: unknown[][] = [];
   const calls: string[] = [];
   let failures = 0;
-  const store = {requestAdmission:async()=>undefined,getConversation:async () => conversation, workflowRunId:async () => "persisted-first-run", committedReply:async () => reply} as unknown as MemberStore;
+  const store = {requestAdmission:async()=>undefined,getConversation:async () => conversation, workflowRunId:async () => "persisted-first-run", committedReply:async () => reply,
+    checkUsageAdmission:async()=>{}} as unknown as MemberStore;
   const temporal = { workflow:{ getHandle:(...args:unknown[]) => {
     routes.push(args);
     return {executeUpdate: async (name:string) => {
@@ -48,7 +49,8 @@ test("earlier generation committed requests never address a workflow", async () 
 
 test("unknown accepted-update outcomes are not retried", async () => {
   const f=fixture();
-  const store = {requestAdmission:async()=>undefined,getConversation:async () => ({}), workflowRunId:async () => "run", committedReply:async () => undefined} as unknown as MemberStore;
+  const store = {requestAdmission:async()=>undefined,getConversation:async () => ({}), workflowRunId:async () => "run", committedReply:async () => undefined,
+    checkUsageAdmission:async()=>{}} as unknown as MemberStore;
   let calls=0;
   const error = new Error("transport lost after acceptance");
   const temporal={workflow:{getHandle:()=>({executeUpdate:async()=>{calls++;throw error;}})}} as unknown as Client;
