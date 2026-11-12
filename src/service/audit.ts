@@ -2,7 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { nextStep, standingChoice, toolNameSchema } from "./deferral.ts";
-import { engineSchema, type RequestInitiator } from "./domain.ts";
+import { engineSchema, instructionsBytes, type RequestInitiator } from "./domain.ts";
 
 const uuid = z.uuid();
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
@@ -19,7 +19,7 @@ const memoryFact = "((payload->>'memoryId'), event_type) WHERE event_type IN ('m
 
 type Actor = "owner" | "system";
 /** The closed audit vocabulary. 021-audit.sql repeats these types in a CHECK, widened by
- * 024-standing-grants.sql, 025-routines.sql and 026-memories.sql. Payloads are strict: identifiers, digests, choices and statuses only,
+ * 024-standing-grants.sql, 025-routines.sql, 026-memories.sql and 029-member-instructions.sql. Payloads are strict: identifiers, digests, choices and statuses only,
  * never prompt/reply text, tool arguments or secrets. An actor given as a function is
  * decided by the validated payload. A routine acts with its owner's authority, so rows its
  * firings cause name the owner; Crew's own decisions about a routine name the system. */
@@ -77,6 +77,10 @@ export const auditEvents = {
   // Crew suspends every active entry when a restored installation resumes.
   "memory.suspended": { actor: "system", key: memoryFact,
     payload: z.strictObject({ memoryId: uuid, reason: z.literal("recovery_restore") }) },
+  // Unlike memory, instructions are never erased, so as with promptDigest the digest confirms only
+  // text Crew keeps and returns to the owner.
+  "member.instructions_set": { actor: "owner", key: "(member_id) WHERE event_type = 'member.instructions_set'",
+    payload: z.strictObject({ digest: sha256, bytes: z.int().min(1).max(instructionsBytes) }) },
 } as const;
 export type AuditEventType = keyof typeof auditEvents;
 export const auditEventTypes = Object.keys(auditEvents) as AuditEventType[];

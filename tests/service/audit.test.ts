@@ -426,6 +426,7 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
       "memory.created": { payload: { memoryId } },
       "memory.deleted": { payload: { memoryId } },
       "memory.suspended": { payload: { memoryId, reason: "recovery_restore" } },
+      "member.instructions_set": { payload: { digest, bytes: 1 } },
     };
     for (const type of auditEventTypes) {
       const fact = { type, ownerId, memberId, ...samples[type] } as AuditFact<typeof type>;

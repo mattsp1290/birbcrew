@@ -16,6 +16,7 @@ import { AuditUnsettledError, auditCsv, auditParameterNames, auditQuerySchema, r
 import { MemberClient } from "./client.ts";
 import { listGrants, revokeGrant } from "./grants.ts";
 import { MemoryApi, memoryListParameterNames } from "./memories.ts";
+import { readInstructions } from "./instructions.ts";
 import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from "./domain.ts";
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
 import { MemberStore } from "./store.ts";
@@ -271,6 +272,12 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       }
       throw new HttpError(405, "method_not_allowed");
     }
+    const instructionsRoute = versioned && /^\/members\/([^/]+)\/instructions$/.exec(path);
+    if (instructionsRoute) {
+      if (url.search) throw new HttpError(400, "invalid_input");
+      if (request.method === "GET") return json(response, 200, await readInstructions(store.pool, ownerId, instructionsRoute[1]));
+      throw new HttpError(405, "method_not_allowed");
+    }
     const requestRoute = versioned && /^\/conversations\/([^/]+)\/requests(?:\/([^/]+)(\/cancel)?)?$/.exec(path);
     if (requestRoute) {
       const conversationId = z.uuid().parse(requestRoute[1]);
@@ -289,7 +296,7 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       throw new HttpError(405, "method_not_allowed");
     }
     if (path === "/members" && request.method === "POST") {
-      const input = spawnSchema.omit({ ownerId: true }).parse(await body(request));
+      const input = spawnSchema.omit({ ownerId: true }).parse(await body(request, true));
       const published = await store.pool.query("SELECT 1 FROM birbcrew_ts.profiles WHERE engine=$1 AND name=$2", [input.engine, input.profile]);
       if (!published.rowCount) throw new HttpError(409, "unknown_profile");
       return json(response, 201, await store.spawn({ ownerId, ...input }));
