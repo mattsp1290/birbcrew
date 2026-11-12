@@ -10,7 +10,8 @@ trusted scopes, tool registries, or engine configuration in a turn request.
 
 `GET /v1/capabilities` returns `apiVersion: "1"`, request and cancellation contract
 identifiers, proxy protocol versions, conversation/generation limits, trusted-context
-transport availability, observation limits, and receipt retention semantics. Additive
+transport availability, observation limits, health dependencies, listing limits, and
+receipt retention semantics. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
@@ -26,10 +27,78 @@ proof of the operator's provider access or configured profile availability.
 | `GET /v1/conversations/{conversationId}` | Current public snapshot |
 | `POST /v1/conversations/{conversationId}/events` | Independent, read-only AG-UI observation |
 | `POST /v1/conversations/{conversationId}/human` | Existing explicit human-decision contract |
+| `GET /v1/health` | Readiness of PostgreSQL and Temporal; `200` ready, `503` not ready |
+| `GET /v1/members` | The owner's members, keyset-paginated |
+| `GET /v1/conversations` | The owner's conversations with coarse phase, optional `memberId` filter, keyset-paginated |
 
-Authentication is required even for capabilities. Other owners get `404`, not a
+Authentication is required even for capabilities and health. Other owners get `404`, not a
 confirmation of a request's existence. Versioned request bodies are strict: unknown
-fields (including an attempted `ownerId` override) fail `400`.
+fields (including an attempted `ownerId` override) fail `400`. Query parameters on the
+health and listing routes are strict too: unknown or repeated parameters fail `400`.
+
+## Health and listing
+
+These routes exist only under `/v1`; `/health` and `GET /members` or
+`GET /conversations` without the prefix are not served.
+
+`GET /v1/health` takes no parameters. It probes both dependencies concurrently, each
+bounded to 2 seconds: a PostgreSQL round trip that reads the highest applied schema
+version, and a Temporal frontend `GetSystemInfo` call on the gateway's connection. The
+probe never starts, signals or describes a workflow. It returns `200` when every
+dependency is ready and `503` with the same body otherwise:
+
+```json
+{
+  "apiVersion": "1",
+  "status": "ready",
+  "dependencies": {
+    "database": { "status": "ready", "schemaVersion": 20 },
+    "temporal": { "status": "ready" }
+  }
+}
+```
+
+The top-level `status` is `ready` or `not_ready`. Each dependency reports `ready` or
+`unavailable` (failed or exceeded its bound); `schemaVersion` is `null` when the
+database is unavailable. Driver errors, addresses and connection strings are never
+returned. The gateway applies its migrations at startup, so compare `schemaVersion`
+with the release you deployed.
+
+`GET /v1/members` and `GET /v1/conversations` return only the authenticated owner's
+rows:
+
+```json
+{ "apiVersion": "1", "members": [{ "memberId": "UUID", "engine": "pi", "profile": "name" }], "next": "opaque" }
+```
+
+```json
+{
+  "apiVersion": "1",
+  "conversations": [
+    { "conversationId": "UUID", "memberId": "UUID", "engine": "claude", "profile": "name", "phase": "idle" }
+  ],
+  "next": null
+}
+```
+
+| Parameter | Routes | Meaning |
+| --- | --- | --- |
+| `limit` | both | Decimal page size from 1 to 100; default 50 |
+| `after` | both | The previous page's `next`, unchanged |
+| `memberId` | conversations | Only that member's conversations |
+
+Pages follow a stable ascending identifier order. Neither table records creation time,
+so the order is not chronological. `next` is `null` on the last page. Treat it as
+opaque: it is bound to its listing, and a malformed, altered or other-listing value
+fails `400`. A row that exists throughout pagination appears exactly once; a row
+created meanwhile appears only if it sorts after the current position.
+
+`phase` uses the snapshot vocabulary (`idle`, `running`, `waiting`, `complete`,
+`cancelled`, `failed`). It is `null` for a conversation that predates the public event
+ledger, whose snapshot returns `409 history_unavailable`. Listings never include
+messages, prompts or results; read the snapshot or request receipts for those. A
+`memberId` that is not the owner's, whether another owner's or nonexistent, returns an
+empty `200` page, exactly like an owned member without conversations.
 
 ### Identity and equivalence
 
