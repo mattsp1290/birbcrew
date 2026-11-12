@@ -11,7 +11,7 @@ Keep all of the following at the same quiesced boundary:
 
 | Artifact | Required contents |
 | --- | --- |
-| `application-postgres` | Entire Birbcrew application database: schema/version table, members/profiles, volume identities and account digests, conversation mappings, native checkpoints, admissions/turns, effect and delivery receipts, decisions, observation snapshots/events/cursors, trusted sessions/generations and historical receipt authority, and recovery control row. |
+| `application-postgres` | Entire Crew application database: schema/version table, members/profiles, volume identities and account digests, conversation mappings, native checkpoints, admissions/turns, effect and delivery receipts, decisions, observation snapshots/events/cursors, trusted sessions/generations and historical receipt authority, and recovery control row. |
 | `native-volumes` | Full private Claude and Codex native session trees, SQLite indexes and sidecars (after teardown), rollout/transcript bytes, identity markers, and any consumer-owned native stores. A checkpoint digest is not the underlying file. Pi context normally lives in application checkpoints. |
 | `temporal-persistence` | Supported consistent backup of the actual self-hosted Temporal persistence, visibility and required cluster/configuration state. Include all relevant stores in one opaque archive or provider snapshot export. A workflow-history export is insufficient to recreate the service's execution identities, queues and cluster persistence. |
 | `configuration` | Non-secret deployment configuration, application commit, lockfile, image/package/native pins, profile identities, models/tool schemas, logical native mount paths, PostgreSQL/Temporal server versions and store layout. |
@@ -82,7 +82,7 @@ export const operator = {
 This is a contract example, **not** a ready-to-run no-op deployment module. The
 hooks are trusted local operator code and must actually perform the indicated
 steps. They are deliberately not shell strings, request fields or AG-UI input.
-They must not emit secrets in their own logs. Birbcrew neither guesses systemd /
+They must not emit secrets in their own logs. Crew neither guesses systemd /
 Kubernetes service names nor fabricates database/provider backup success.
 
 ```
@@ -116,11 +116,11 @@ capture or explicit `hold-for-restore` seals that transfer permission.
    The transition waits for already admitted writer transactions to commit.
    All supported native admission lanes check the recovery phase, poll it to
    cancel, and retain a shared native lifetime lease. New native launches fail.
-4. The operator quiesces external writers and services. Birbcrew additionally waits
+4. The operator quiesces external writers and services. Crew additionally waits
    for its instrumented native lifetime leases before snapshotting. Running work
    that cannot finish after the barrier retains its started/pending/uncertain
    record; it is not silently marked successful or replayed. Consumer activity
-   outside Birbcrew must be stopped by the consumer hook.
+   outside Crew must be stopped by the consumer hook.
 5. Operator snapshots all state, including **stopped** Temporal persistence. The
    manifest pins the schema and version. Capture flushes artifacts and manifest files, fsyncs the bundle directory and its parent,
    and verifies checksums/the fence before recording success. New domain tables without the barrier are
@@ -216,7 +216,7 @@ image/version, SQL or Cassandra persistence, visibility store and namespace/clus
 configuration. Stop all Temporal writers and use the backing store's supported
 consistent backup/restore procedure. See the [Temporal self-hosted guide](https://docs.temporal.io/self-hosted-guide).
 Do not query or rewrite private Temporal tables or substitute exported workflow
-histories for a persistence backup. Birbcrew validates the operator's declared
+histories for a persistence backup. Crew validates the operator's declared
 pins and artifact checksums; the operator owns the service/store restore itself.
 
 The existing proxy restart proof uses Temporal CLI 1.10.0 development SQLite
