@@ -8,6 +8,7 @@ import { ApplicationFailure, WorkflowNotFoundError, WorkflowUpdateFailedError } 
 import { Pool } from "pg";
 import { z } from "zod";
 import { ApprovalStore } from "../../src/service/approvals.ts";
+import { appendAudit } from "../../src/service/audit.ts";
 import type { MemberClient } from "../../src/service/client.ts";
 import { MemberClient as RealMemberClient } from "../../src/service/client.ts";
 import { MemberStoreError, ownerInitiator, type Engine, type TurnRequest } from "../../src/service/domain.ts";
@@ -681,6 +682,99 @@ test("the public 16 KiB prompt limit still holds for every request but the reser
   // The same holds in any other conversation, and for a source handed off before it.
   const plain = await f.open(member);
   await assert.rejects(store.recordAcceptance({ ...internal, conversationId: plain }, ownerInitiator), z.ZodError);
+});
+
+/** Moves a card's approval deadline to now, as the passage of time would. */
+const pastDeadline = (approvalId: string) =>
+  pool.query("UPDATE birbcrew_ts.deferred_calls SET expires_at=clock_timestamp() WHERE approval_id=$1", [approvalId]);
+
+test("the reserved request takes no approval deadline; later requests in the target take one and expire like any other", async (t) => {
+  const f = await fixture(t);
+  const member = await f.spawn(), target = await f.spawn("pi", f.token, protectedProfile);
+  const source = await f.open(member);
+  await f.turn(source, "remember fir", "stored fir");
+  const handoffRequest = randomUUID();
+  f.control.lose = 1;
+  assert.equal((await f.handoff(source, target, handoffRequest)).status, 503);
+  const view = (await f.api(`/v1/conversations/${source}/handoff`)).body.outgoing as View;
+  const targetId = view.target.conversationId, transcript = await transcriptOf(view.handoffId);
+  const reserved = { ownerId: f.ownerId, conversationId: targetId, requestId: view.firstRequestId, text: transcript };
+  const requests = `/v1/conversations/${targetId}/requests`, conflict = { status: 409, body: { error: "conflict" } };
+
+  // Its terms are the handoff row's: the transcript and no deadline, refused before Temporal and at admission.
+  assert.deepEqual(await f.api(requests, { requestId: view.firstRequestId, text: transcript, approvalDeadlineSeconds: 60 }), conflict);
+  await assert.rejects(store.recordAcceptance({ ...reserved, approvalDeadlineSeconds: 60 }, ownerInitiator),
+    (error: unknown) => error instanceof MemberStoreError && error.code === "conflict");
+  assert.equal((await pool.query("SELECT count(*)::integer AS n FROM birbcrew_ts.request_admissions WHERE conversation_id=$1", [targetId])).rows[0].n, 0);
+  assert.equal((await f.created(source, target, handoffRequest)).firstRequestAdmitted, true);
+  const first = await f.status(targetId, view.firstRequestId);
+  assert.deepEqual([first.initiator, "approvalDeadlineSeconds" in first], [{ kind: "handoff", id: view.handoffId }, false]);
+  assert.deepEqual(await f.api(requests, { requestId: view.firstRequestId, text: transcript, approvalDeadlineSeconds: 60 }), conflict);
+  await f.deliver(view);
+
+  // The owner's next request in the target carries a deadline, and its card expires as anywhere else.
+  const requestId = randomUUID(), text = "record it";
+  const submitted = await f.api(requests, { requestId, text, approvalDeadlineSeconds: 60 });
+  assert.deepEqual([submitted.status, submitted.body.approvalDeadlineSeconds, submitted.body.initiator], [202, 60, { kind: "owner" }]);
+  const running = await f.begin({ ownerId: f.ownerId, conversationId: targetId, requestId, text, approvalDeadlineSeconds: 60 });
+  const card = await approvals.propose({ ownerId: f.ownerId, memberId: target, conversationId: targetId, requestId, token: running.token,
+    invocationId: requestId, nativeCallId: "call-" + randomUUID(), toolName: "record_work_item", arguments: { operation_id: requestId } });
+  assert.ok(card.expiresAt);
+  await pastDeadline(card.approvalId);
+  assert.deepEqual(await approvals.expireTurn(card), { kind: "expired" });
+  assert.equal((await f.status(targetId, requestId)).expiredApproval.approvalId, card.approvalId);
+  const { rows: expiry } = await pool.query(`SELECT actor_kind AS actor, initiator_kind AS initiator FROM birbcrew_ts.audit_events
+    WHERE event_type='approval.expired' AND request_id=$1`, [requestId]);
+  assert.deepEqual(expiry, [{ actor: "system", initiator: "owner" }]);
+
+  // No deadline reaches a handoff-initiated request, but an expiry row for one would still satisfy
+  // the type, actor and initiator CHECKs.
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    await appendAudit(db, { type: "approval.expired", ownerId: f.ownerId, memberId: target, conversationId: targetId,
+      requestId: view.firstRequestId, payload: { approvalId: randomUUID(), invocationId: view.firstRequestId, toolName: "record_work_item",
+        expiresAt: new Date().toISOString() } });
+    const { rows } = await db.query(`SELECT actor_kind AS actor, initiator_kind AS initiator, initiator_id AS id FROM birbcrew_ts.audit_events
+      WHERE event_type='approval.expired' AND request_id=$1`, [view.firstRequestId]);
+    assert.deepEqual(rows, [{ actor: "system", initiator: "handoff", id: view.handoffId }]);
+  } finally {
+    await db.query("ROLLBACK");
+    db.release();
+  }
+});
+
+test("a card waiting on its deadline keeps the source busy; once it expires and its turn ends, the source hands off", async (t) => {
+  const f = await fixture(t);
+  const member = await f.spawn("pi", f.token, protectedProfile), target = await f.spawn("claude");
+  const source = await f.open(member);
+  await f.turn(source, "first", "done");
+  const busy = { status: 409, body: { error: "busy" } };
+  const requestId = randomUUID(), text = "record before the deadline";
+  assert.equal((await f.api(`/v1/conversations/${source}/requests`, { requestId, text, approvalDeadlineSeconds: 60 })).status, 202);
+  const running = await f.begin({ ownerId: f.ownerId, conversationId: source, requestId, text, approvalDeadlineSeconds: 60 });
+  const card = await approvals.propose({ ownerId: f.ownerId, memberId: member, conversationId: source, requestId, token: running.token,
+    invocationId: requestId, nativeCallId: "call-" + randomUUID(), toolName: "record_work_item", arguments: { operation_id: requestId } });
+  const queued = randomUUID();
+  assert.equal((await f.api(`/v1/conversations/${source}/requests`, { requestId: queued, text: "queued" })).status, 202);
+  assert.deepEqual(await f.handoff(source, target), busy, "pending card");
+
+  await pastDeadline(card.approvalId);
+  assert.deepEqual(await approvals.expireTurn(card), { kind: "expired" });
+  // The expiry cancels the request; its turn goes on to its reply, so the source is busy until that ends.
+  assert.deepEqual(await f.handoff(source, target), busy, "the expired card's turn is still running");
+  assert.equal((await approvals.settle({ ownerId: f.ownerId, memberId: member, conversationId: source, requestId,
+    approvalId: card.approvalId, invocationId: card.invocationId, nativeCallId: card.nativeCallId, token: running.token })).kind, "cancelled");
+  await f.commit(running, "stopped at the deadline");
+  assert.deepEqual(await f.handoff(source, target), busy, "a request queued behind it");
+  // As after an owner's cancel, the workflow rejects what was queued behind the cancelled request.
+  await store.rejectAccepted({ ownerId: f.ownerId, conversationId: source, requestId: queued, text: "queued" }, "predecessor_cancelled");
+  const view = await f.created(source, target);
+  assert.deepEqual([view.carriedTurns, view.uncertainTurns], [2, 0]);
+  assert.deepEqual(parse(await transcriptOf(view.handoffId)).body.turns.at(-1), { ownerPrompt: text, modelReply: "stopped at the deadline" });
+  const { rows } = await pool.query(`SELECT event_type AS type, actor_kind AS actor FROM birbcrew_ts.audit_events
+    WHERE conversation_id=$1 AND event_type IN ('approval.expired','conversation.handed_off') ORDER BY event_id`, [source]);
+  assert.deepEqual(rows, [{ type: "approval.expired", actor: "system" }, { type: "conversation.handed_off", actor: "owner" }]);
 });
 
 test("a chained handoff never presents carried text as the owner's prompt", async (t) => {

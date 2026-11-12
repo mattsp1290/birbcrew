@@ -116,6 +116,10 @@ it covers proceed without a card and name the grant. Grants are listed and revok
 through `/v1/members/{memberId}/grants`. Crew cannot tell a person from an automated
 client holding the owner's token, so a grant covers both.
 
+An owner can give a request or a routine an [approval deadline](docs/approval-expiry.md)
+of one minute to seven days. A Claude or Pi card still undecided at its deadline is
+settled without a person: Crew cancels the request and records `approval.expired`.
+
 An owner can save [member memory](docs/memories.md) through `/v1/memories`: up to 32
 short facts per member. Each conversation of the member gets the facts that were
 active when it opened, as system context framed as reference data. Only the owner

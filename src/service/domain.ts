@@ -28,8 +28,12 @@ export const promptBytes = 16_384;
  * handoff's first request may use more than promptBytes: admission allows it only for the
  * request a handoff row reserved (handoffs.ts), never on a caller's say-so. */
 export const turnTextBytes = 65_536;
-export const submitSchema = turnKey.extend({ text: boundedText(promptBytes) });
-export const turnRequestSchema = turnKey.extend({ text: boundedText(turnTextBytes) });
+/** How long a Claude or Pi card of the request may wait for a decision (docs/approval-expiry.md).
+ * 028-approval-expiry.sql repeats the bounds. Absent, a card waits until someone answers it. */
+export const approvalDeadline = { minimumSeconds: 60, maximumSeconds: 604_800 } as const;
+export const approvalDeadlineSeconds = z.int().min(approvalDeadline.minimumSeconds).max(approvalDeadline.maximumSeconds);
+export const submitSchema = turnKey.extend({ text: boundedText(promptBytes), approvalDeadlineSeconds: approvalDeadlineSeconds.optional() });
+export const turnRequestSchema = submitSchema.extend({ text: boundedText(turnTextBytes) });
 export const executionSchema = z.strictObject({
   workflowRunId: boundedText(256),
   activityId: boundedText(256),

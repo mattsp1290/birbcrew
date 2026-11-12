@@ -2,7 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { nextStep, standingChoice, toolNameSchema } from "./deferral.ts";
-import { engineSchema, type RequestInitiator } from "./domain.ts";
+import { approvalDeadlineSeconds, engineSchema, type RequestInitiator } from "./domain.ts";
 
 const uuid = z.uuid();
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
@@ -19,7 +19,7 @@ const memoryFact = "((payload->>'memoryId'), event_type) WHERE event_type IN ('m
 
 type Actor = "owner" | "system";
 /** The closed audit vocabulary. 021-audit.sql repeats these types in a CHECK, widened by
- * 024-standing-grants.sql, 025-routines.sql, 026-memories.sql and 027-handoffs.sql. Payloads are strict: identifiers, digests, choices and statuses only,
+ * 024-standing-grants.sql, 025-routines.sql, 026-memories.sql, 027-handoffs.sql and 028-approval-expiry.sql. Payloads are strict: identifiers, digests, choices and statuses only,
  * never prompt/reply text, tool arguments or secrets. An actor given as a function is
  * decided by the validated payload. A routine acts with its owner's authority, so rows its
  * firings cause name the owner; Crew's own decisions about a routine name the system. */
@@ -38,6 +38,9 @@ export const auditEvents = {
   "approval.auto_approved": { actor: "system", key: grantFact, payload: z.strictObject({
     approvalId: uuid, invocationId: uuid, toolName: z.literal("record_work_item"), argumentDigest: sha256, grantId: uuid,
   }) },
+  // Nobody decided the card before the deadline its request carried; Crew cancelled the request.
+  "approval.expired": { actor: "system", key: "((payload->>'approvalId')) WHERE event_type = 'approval.expired'",
+    payload: z.strictObject({ approvalId: uuid, invocationId: uuid, toolName: toolNameSchema, expiresAt: z.iso.datetime() }) },
   "grant.created": { actor: "owner", key: grantFact,
     payload: z.strictObject({ grantId: uuid, approvalId: uuid, scope: z.enum(["conversation", "member"]) }) },
   // The owner revokes through the gateway; Crew revokes every grant when a restored installation resumes.
@@ -56,7 +59,7 @@ export const auditEvents = {
     payload: z.strictObject({ operationId: uuid, toolName: z.string().regex(trustedToolName) }) },
   "routine.created": { actor: "owner", key: routineFact, payload: z.strictObject({
     routineId: uuid, revision: z.literal(1), schedule: z.string().min(9).max(128),
-    approvalPolicy: z.enum(["wait", "fail_closed"]), promptDigest: sha256,
+    approvalPolicy: z.enum(["wait", "fail_closed"]), promptDigest: sha256, approvalDeadlineSeconds: approvalDeadlineSeconds.optional(),
   }) },
   "routine.enabled": { actor: "owner", key: routineFact, payload: z.strictObject(routineChange) },
   // The owner disables a routine; Crew does after its tenth consecutive failure.
@@ -67,8 +70,8 @@ export const auditEvents = {
     key: "((payload->>'routineId'), (payload->>'scheduledFor')) WHERE event_type = 'routine.firing_settled'",
     payload: z.strictObject({
       routineId: uuid, scheduledFor: z.iso.datetime(), status: z.enum(["succeeded", "failed", "skipped"]),
-      reason: z.enum(["missed", "overlap", "owner_unavailable", "rejected", "approval_required", "turn_failed",
-        "turn_cancelled", "turn_uncertain"]).optional(),
+      reason: z.enum(["missed", "overlap", "owner_unavailable", "rejected", "approval_required", "approval_expired",
+        "turn_failed", "turn_cancelled", "turn_uncertain"]).optional(),
     }) },
   // No digest of the text: an entry is deletable owner content, and an unsalted digest kept in
   // this append-only table would let an export holder confirm a guess of deleted text.

@@ -7,7 +7,7 @@ import { ChildStore } from "./children.ts";
 import { startSupervisor } from "./supervisor.ts";
 import { engineSchema } from "./domain.ts";
 import type { MemberProfile } from "./profiles.ts";
-import { memberActivities } from "./activities.ts";
+import { expiryActivity, memberActivities } from "./activities.ts";
 import { memberTaskQueue, activityQueue } from "./queues.ts";
 import { ownerAdmissionActivity, type MemberStore } from "./store.ts";
 import { temporalConnectionOptions, type TemporalSettings } from "./temporal-config.ts";
@@ -29,7 +29,8 @@ export async function runMemberWorker(store: MemberStore, temporal: TemporalSett
       connection, namespace, taskQueue: memberTaskQueue,
       activities: { rejectUnstartedAdmission:store.rejectUnstartedAdmission.bind(store), recordAcceptance:ownerAdmissionActivity(store), rejectAccepted:store.rejectAccepted.bind(store), conversationProgress:progressActivity(store), cancelGenerating:store.cancelGenerating.bind(store), decideLive:answerLive.bind(null,store.pool), cancelLive:cancelLive.bind(null,store.pool),
         reconcileTurn: store.reconcileTurn.bind(store), reconcileChild:children.reconcile.bind(children),
-        closeExitedChild: children.closeExitedChild.bind(children), quarantineDelegation: children.quarantineDelegation.bind(children) },
+        closeExitedChild: children.closeExitedChild.bind(children), quarantineDelegation: children.quarantineDelegation.bind(children),
+        expireApproval: expiryActivity(store) },
       workflowsPath: fileURLToPath(new URL("./workflow.ts", import.meta.url)),
     }));
     supervisor = await startSupervisor(configPath, stateDir);

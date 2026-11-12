@@ -108,7 +108,7 @@ target's first user message in its snapshot, and the reserved request's receipt 
 | `409` | `trusted_conversation` | the source is attached to the [trusted-context lane](trusted-application-context.md) |
 | `409` | `history_unavailable` | the source predates the public event ledger, or a committed prompt does not match its turn's digest |
 | `409` | `memory_limit` | the target member's notes and memory would not fit its engine, as for any open |
-| `409` | `conflict` | the `requestId` was used with another source or member; on the target's request routes, the reserved request's ID sent with other text |
+| `409` | `conflict` | the `requestId` was used with another source or member; on the target's request routes, the reserved request's ID sent with other text or with an approval deadline |
 | `409` | `handoff_pending` | on the target's request routes: its reserved request is not admitted yet |
 | `409` | `update_rejected` | after the commit: the target's workflow refused the reserved request's update, as a previous-release worker does with one over 16 KiB (see [Upgrade](#upgrade)); a retry with the same `requestId` succeeds only once that cause is removed |
 | `503` | `retry_same_request` | the outcome may be unknown; retry with the same `requestId` |
@@ -167,7 +167,8 @@ The handoff row is the only authority for the target's first request. At admissi
 `recordAcceptance` reads it under the target conversation's row lock:
 
 - The reserved `firstRequestId` is admitted only with text whose SHA-256 equals the
-  stored digest; any other text is `409 conflict`. Its admission records the initiator
+  stored digest and without an [approval deadline](approval-expiry.md); any other text,
+  or `approvalDeadlineSeconds`, is `409 conflict`. Its admission records the initiator
   `{ kind: "handoff", id: <handoffId> }`. No caller can attest that initiator; the
   activity accepts only an owner attestation and derives the rest from SQL.
 - Every other request to the target is `409 handoff_pending` until the reserved one is
@@ -188,6 +189,12 @@ admission names the owner, so a protected call the target model makes while
 acknowledging the transcript gets a card, without standing choices. Later requests the
 owner sends to the target are covered like those of any other conversation of the
 member.
+
+That card has no deadline: the server submits the reserved request without one, so the
+card waits for an answer. Later requests to the target may carry `approvalDeadlineSeconds`
+like any request. On the source, a card waiting on its deadline is `busy` like any
+pending card. Once it expires, its request is cancelled as by an owner's cancel and its
+turn goes on to its reply; the source can be handed off after that turn has ended.
 
 ## Sealing
 
@@ -383,8 +390,10 @@ snapshot, a prompt that no longer matches its digest, and a newest reply of exac
 bytes, each writing nothing, with such a reply left out whole when older; a transcript of
 exactly 65,536 bytes carried whole and one byte more leaving its oldest turn out; tail
 fitting by whole turns, uncertain turns counted, native call IDs redacted; the reserved
-request admitting only its digest, before every other request including a routine
-firing's, and never on a caller's attestation; the 16 KiB limit for every other request in
+request admitting only its digest and no approval deadline, before every other request
+including a routine firing's, and never on a caller's attestation, with later target
+requests taking a deadline that expires as anywhere; a source card that expires staying
+`busy` until its turn ends, then handed off; the 16 KiB limit for every other request in
 the target, through the routes and admission; `MemberClient` refusing before any workflow
 update and again before each rollover retry, and admission refusing a seal or a pending
 reservation without retrying; a chained handoff with `ownerPrompt: null`; C1 controls,

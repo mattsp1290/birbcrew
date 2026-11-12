@@ -52,6 +52,12 @@ async function conversationFor(
   return result.rows[0];
 }
 
+/** A request's identity is equivalent only with the same exact text and approval deadline. */
+function sameTerms(admission: { prompt_digest: Buffer; approval_deadline_seconds: number | null }, request: TurnRequest) {
+  return admission.prompt_digest.equals(createHash("sha256").update(request.text).digest())
+    && admission.approval_deadline_seconds === (request.approvalDeadlineSeconds ?? null);
+}
+
 /** The initiator a request's admission recorded, read inside the caller's open transaction,
  * which has already checked that the conversation is its owner's (as proposeLocked's lockTurn
  * does). The trigger in 023-request-initiator.sql keeps it from changing, so no row lock is needed.
@@ -118,7 +124,7 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [22, "022-conversation-owner-index.sql"], [23, "023-request-initiator.sql"], [24, "024-standing-grants.sql"], [25, "025-routines.sql"], [26, "026-memories.sql"], [27, "027-handoffs.sql"]] as const;
+      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [22, "022-conversation-owner-index.sql"], [23, "023-request-initiator.sql"], [24, "024-standing-grants.sql"], [25, "025-routines.sql"], [26, "026-memories.sql"], [27, "027-handoffs.sql"], [28, "028-approval-expiry.sql"]] as const;
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
@@ -183,12 +189,12 @@ export class MemberStore {
 
   async requestAdmission(input: z.input<typeof turnRequestSchema>): Promise<{phase:"accepted"|"rejected";reason:string|null}|undefined> {
     const key=turnRequestSchema.parse(input);
-    const {rows:[row]}=await this.pool.query<{phase:"accepted"|"rejected";reason:string|null;prompt_digest:Buffer}>(`
-      SELECT a.phase,a.reason,a.prompt_digest FROM birbcrew_ts.request_admissions a
+    const {rows:[row]}=await this.pool.query<{phase:"accepted"|"rejected";reason:string|null;prompt_digest:Buffer;approval_deadline_seconds:number|null}>(`
+      SELECT a.phase,a.reason,a.prompt_digest,a.approval_deadline_seconds FROM birbcrew_ts.request_admissions a
       JOIN birbcrew_ts.conversations c USING(conversation_id)
       WHERE c.owner_id=$1 AND a.conversation_id=$2 AND a.request_id=$3`,[key.ownerId,key.conversationId,key.requestId]);
     if(!row)return undefined;
-    if(!row.prompt_digest.equals(createHash("sha256").update(key.text).digest()))throw new MemberStoreError("conflict");
+    if(!sameTerms(row,key))throw new MemberStoreError("conflict");
     return {phase:row.phase,reason:row.reason};
   }
 
@@ -216,10 +222,10 @@ export class MemberStore {
     const digest=createHash("sha256").update(key.text).digest();
     return this.transaction(async db=>{
       const conversation=await conversationFor(db,key,true);
-      const {rows:[prior]}=await db.query<{phase:"accepted"|"rejected";reason:string|null;prompt_digest:Buffer}>(
-        "SELECT phase,reason,prompt_digest FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
+      const {rows:[prior]}=await db.query<{phase:"accepted"|"rejected";reason:string|null;prompt_digest:Buffer;approval_deadline_seconds:number|null}>(
+        "SELECT phase,reason,prompt_digest,approval_deadline_seconds FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
       if(prior){
-        if(!prior.prompt_digest.equals(digest))throw new MemberStoreError("conflict");
+        if(!sameTerms(prior,key))throw new MemberStoreError("conflict");
         if(prior.phase==="rejected")throw new MemberStoreError("request_rejected");
         return;
       }
@@ -238,8 +244,8 @@ export class MemberStore {
       const recorded=handoff??await firingInitiator(db,key,conversation)??attested;
       if(recorded.kind!=="handoff")submitSchema.parse(key);
       const [initiatorKind,initiatorId]=initiatorColumns(recorded);
-      await db.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest,initiator_kind,initiator_id)
-        VALUES($1,$2,$3,$4,$5)`,[key.conversationId,key.requestId,digest,initiatorKind,initiatorId]);
+      await db.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest,initiator_kind,initiator_id,approval_deadline_seconds)
+        VALUES($1,$2,$3,$4,$5,$6)`,[key.conversationId,key.requestId,digest,initiatorKind,initiatorId,key.approvalDeadlineSeconds??null]);
       await appendAudit(db,{type:"request.accepted",ownerId:key.ownerId,memberId:conversation.memberId,
         conversationId:key.conversationId,requestId:key.requestId,payload:{promptDigest:digest.toString("hex")}});
     });
