@@ -147,10 +147,28 @@ GRANT CONNECT, CREATE, TEMPORARY ON DATABASE crew TO crew_service;
 `CREATEROLE`: the first start created `birbcrew_ts` owned by `crew_service`.
 With only `CONNECT` and `CREATE`, the first start failed with
 `permission denied to create temporary tables` and created nothing (migration
-006 uses `pg_temp` functions); after `GRANT TEMPORARY` it applied all 20
-migrations. `CREATE SCHEMA IF NOT EXISTS` checks database `CREATE` even after
+006 uses `pg_temp` functions); after `GRANT TEMPORARY` it applied every
+migration. `CREATE SCHEMA IF NOT EXISTS` checks database `CREATE` even after
 the schema exists, so a role with only `CONNECT` cannot start. The current code
 therefore cannot run with separate migration and runtime roles.
+
+## Upgrades
+
+Stop every gateway, worker and CLI process of the previous release, including
+scheduled CLI jobs, before the first process of the new release starts. That
+first process applies the new migrations, and a previous-release process does not
+know about them. After migration 21, for example, it keeps committing spawns,
+admissions and decisions without the audit rows the new release writes, and
+nothing marks the gap (see [the audit trail](audit-trail.md#retention-upgrade-and-recovery)).
+Rolling back has the same effect for as long as the earlier release runs.
+
+A Kubernetes Deployment's default `RollingUpdate` strategy starts new pods while
+old ones still run, which is exactly what this forbids. Scale every Deployment
+that runs a Crew process to zero, wait for its pods to terminate and suspend
+CronJobs that run the CLI before you roll out the new image. `strategy: {type:
+Recreate}` stops old pods before new ones start only within one Deployment, so it
+is enough on its own only when one Deployment runs every Crew process
+(**unverified** on a cluster).
 
 ## Provider accounts
 
