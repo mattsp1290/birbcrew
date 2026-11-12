@@ -15,6 +15,7 @@ import { decisionSchema } from "./approvals.ts";
 import { AuditUnsettledError, auditCsv, auditParameterNames, auditQuerySchema, readAudit } from "./audit.ts";
 import { MemberClient } from "./client.ts";
 import { listGrants, revokeGrant } from "./grants.ts";
+import { HandoffApi } from "./handoffs.ts";
 import { MemoryApi, memoryListParameterNames } from "./memories.ts";
 import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from "./domain.ts";
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
@@ -194,6 +195,7 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
   const schemaVersion = () => databaseProbe ??= readSchemaVersion(store.pool.options).finally(() => { databaseProbe = undefined; });
   const routines = new RoutineApi(store, clock);
   const memories = new MemoryApi(store);
+  const handoffs = new HandoffApi(store, members);
   const dispatcher = new RoutineDispatcher({ store, members, integration, owners: accounts.map(({ actor }) => actor), clock });
   async function route(request: IncomingMessage, response: ServerResponse) {
     const auth = request.headers.authorization;
@@ -269,6 +271,16 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
         z.strictObject({}).parse(await body(request));
         return json(response, 200, await revokeGrant(store.pool, { ownerId, memberId, grantId: z.uuid().parse(grantRoute[2]) }));
       }
+      throw new HttpError(405, "method_not_allowed");
+    }
+    const handoffRoute = versioned && /^\/conversations\/([^/]+)\/(handoffs|handoff)$/.exec(path);
+    if (handoffRoute) {
+      if (url.search) throw new HttpError(400, "invalid_input");
+      const [, conversationId, resource] = handoffRoute;
+      if (resource === "handoffs" && request.method === "POST") {
+        return json(response, 201, await handoffs.create(ownerId, z.uuid().parse(conversationId), await body(request)));
+      }
+      if (resource === "handoff" && request.method === "GET") return json(response, 200, await handoffs.read(ownerId, z.uuid().parse(conversationId)));
       throw new HttpError(405, "method_not_allowed");
     }
     const requestRoute = versioned && /^\/conversations\/([^/]+)\/requests(?:\/([^/]+)(\/cancel)?)?$/.exec(path);

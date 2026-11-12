@@ -206,7 +206,7 @@ test("the routine routes are strict, bounded, idempotent and owner-scoped", asyn
   await assert.rejects(pool.query("DELETE FROM birbcrew_ts.routines WHERE routine_id=$1", [routineId]), { code: "23514", message: /tombstones/ });
 
   const capabilities = (await g.api("/v1/capabilities")).body;
-  assert.deepEqual(capabilities.initiatorKinds, ["owner", "routine"]);
+  assert.deepEqual(capabilities.initiatorKinds, ["owner", "routine", "handoff"]);
   assert.deepEqual([capabilities.routines.route, capabilities.routines.minimumIntervalMinutes, capabilities.routines.maximumEnabledPerOwner,
     capabilities.routines.promptBytes, capabilities.routines.approvalPolicies, capabilities.routines.timezone],
     ["/v1/routines", 15, 20, 16_384, ["wait", "fail_closed"], "UTC"]);
