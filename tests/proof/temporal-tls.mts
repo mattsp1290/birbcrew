@@ -141,9 +141,11 @@ try {
     console.log("Pi fixture turns completed through /v1 with gateway and worker on mTLS in namespace " + namespace);
     const beat = await until(async () => (await stat(heartbeat).catch(() => undefined))?.mtimeMs, "first worker heartbeat");
     await until(async () => (await stat(heartbeat)).mtimeMs > beat || undefined, "refreshed worker heartbeat", 15_000);
-    assert.equal((await fetch(endpoint + "/healthz")).status, 200);
-    assert.equal((await fetch(endpoint + "/v1/capabilities")).status, 401);
-    console.log("The worker refreshed its heartbeat file; the gateway answered /healthz and still required a token for /v1");
+    // The exec liveness probe from docs/persistent-deployment.md, aimed at this gateway's port.
+    await run(process.execPath, ["-e", `fetch('${endpoint}/v1/capabilities', { signal: AbortSignal.timeout(3000) })` +
+      ".then(r => process.exit(r.status === 401 ? 0 : 1), () => process.exit(1))"]);
+    assert.equal((await fetch(endpoint + "/healthz")).status, 401);
+    console.log("The worker refreshed its heartbeat file; the gateway liveness probe passed on 401 and /healthz needs a token");
 
     async function cli(operation: string, input: object) {
       const child = spawn(process.execPath, ["src/service/cli.ts", operation], { env, stdio: ["pipe", "pipe", "inherit"] });
