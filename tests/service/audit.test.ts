@@ -18,6 +18,7 @@ import { withNativeAdmission } from "../../src/service/native-admission.ts";
 import { RoutineApi, RoutineDispatcher } from "../../src/service/routines.ts";
 import { admittedInitiator, MemberStore } from "../../src/service/store.ts";
 import { recordSegmentUsage } from "../../src/service/usage.ts";
+import { WebhookApi } from "../../src/service/webhooks.ts";
 
 const url = process.env.BIRBCREW_TEST_DATABASE_URL;
 if (!url) throw new Error("Set BIRBCREW_TEST_DATABASE_URL to a disposable PostgreSQL database.");
@@ -33,7 +34,7 @@ before(async () => {
 after(() => pool.end());
 
 type Event = { eventId: string; occurredAt: string; type: string; actor: { kind: string; id: string | null };
-  initiator: { kind: string; id: string }; memberId: string; conversationId: string | null; requestId: string | null;
+  initiator: { kind: string; id: string }; memberId: string | null; conversationId: string | null; requestId: string | null;
   payload: Record<string, string> };
 type Page = { apiVersion: string; events: Event[]; nextAfter: string; hasMore: boolean };
 
@@ -1251,6 +1252,93 @@ test("usage rows answer every filter alike in JSON and CSV, and only to their ow
       assert.equal(csv.headers.get("audit-next-after"), page.nextAfter, query);
       assert.equal(await csv.text(), auditCsv(page.events as unknown as AuditEvent[]), query);
     }
+  }
+});
+
+test("pending-card and webhook rows answer every filter alike in JSON and CSV, webhook rows match no member, and only their owner sees them", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  async function created(response: Response, status: number) {
+    assert.equal(response.status, status, await response.clone().text());
+    return response.json();
+  }
+  // Insecure targets let the endpoint name a loopback port nothing serves. The fixture's gateways allow
+  // only https, so their dispatchers refuse that URL before connecting; nothing is sent anywhere.
+  const webhooks = new WebhookApi(store, () => new Date(), { allowInsecure: true });
+  /** One owner's trail: a member's card becomes pending, then one endpoint's whole life, and Crew's own disable of another. */
+  async function trail(ownerId: string, credential: string) {
+    const memberId = (await created(await f.api("/v1/members", { requestId: randomUUID(), engine: "pi", profile }, credential), 201)).memberId as string;
+    const conversationId = randomUUID(), request = { ownerId, conversationId, requestId: randomUUID(), text: "carded prompt" };
+    await created(await f.api("/v1/conversations", { conversationId, memberId }, credential), 201);
+    await created(await f.api(`/v1/conversations/${conversationId}/requests`, { requestId: request.requestId, text: request.text }, credential), 202);
+    const turn = await store.beginTurn(request);
+    assert.equal(turn.kind, "start"); if (turn.kind !== "start") throw new Error("unreachable");
+    await approvals.propose({ ownerId, memberId, conversationId, requestId: request.requestId, token: turn.token, invocationId: request.requestId,
+      nativeCallId: "webhook-filter-call", toolName: "choose_next_step", arguments: {} });
+    const endpoint = await webhooks.create(ownerId, { requestId: randomUUID(), url: "http://127.0.0.1:9/private-path", kinds: ["approval.pending"] });
+    const { secret } = endpoint as typeof endpoint & { secret: string };
+    assert.match(secret, /^[A-Za-z0-9_-]{43}$/);
+    for (const action of ["disable", "enable", "delete"] as const) await webhooks.change(ownerId, endpoint.webhookId, action);
+    // Crew's own disable after ten failed deliveries in a row, as the dispatcher records it.
+    const exhausted = randomUUID();
+    await store.transaction(db => appendAudit(db, { type: "webhook.disabled", ownerId, memberId: null,
+      payload: { webhookId: exhausted, revision: 2, host: "127.0.0.1:9", reason: "consecutive_failures" } }));
+    return { ownerId, credential, memberId, conversationId, webhookId: endpoint.webhookId, exhausted, secret };
+  }
+  const owners = [await trail(f.ownerId, f.token), await trail(f.strangerId, f.stranger)];
+  const webhookTypes = ["webhook.created", "webhook.enabled", "webhook.disabled", "webhook.deleted"];
+
+  for (const [mine, theirs] of [owners, [...owners].reverse()]) {
+    const all = (await f.audit("", mine.credential)).events;
+    const owner = { kind: "owner", id: mine.ownerId };
+    assert.deepEqual(all.map(event => [event.type, event.memberId, event.conversationId, event.actor.kind, event.initiator]), [
+      ["member.spawned", mine.memberId, null, "owner", owner],
+      ["conversation.opened", mine.memberId, mine.conversationId, "owner", owner],
+      ["request.accepted", mine.memberId, mine.conversationId, "owner", owner],
+      ["approval.requested", mine.memberId, mine.conversationId, "system", owner],
+      ["webhook.created", null, null, "owner", owner],
+      ["webhook.disabled", null, null, "owner", owner],
+      ["webhook.enabled", null, null, "owner", owner],
+      ["webhook.deleted", null, null, "owner", owner],
+      ["webhook.disabled", null, null, "system", owner],
+    ], mine.ownerId);
+    const cases: [string, (event: Event) => boolean][] = [
+      ["eventType=" + webhookTypes.join(","), event => webhookTypes.includes(event.type)],
+      // A member filter never matches a row that names no member.
+      ["memberId=" + mine.memberId, event => event.memberId === mine.memberId],
+      [`memberId=${mine.memberId}&eventType=${webhookTypes.join(",")}`, () => false],
+      ["memberId=" + mine.memberId.toUpperCase(), event => event.memberId !== null],
+      ["actorKind=system", event => event.actor.kind === "system"],
+      ["actorKind=system&eventType=webhook.disabled", event => event.type === "webhook.disabled" && event.actor.kind === "system"],
+      ["actorKind=owner&eventType=webhook.disabled", event => event.type === "webhook.disabled" && event.actor.kind === "owner"],
+      ["actorKind=system&eventType=approval.requested", event => event.type === "approval.requested"],
+      ["initiatorKind=owner&eventType=webhook.deleted", event => event.type === "webhook.deleted"],
+      ["initiatorKind=routine", () => false],
+      ["initiatorKind=handoff", () => false],
+      // A webhook ID is no initiator.
+      ["initiatorId=" + mine.webhookId, () => false],
+      [`conversationId=${mine.conversationId}`, event => event.conversationId === mine.conversationId],
+      [`conversationId=${mine.conversationId}&eventType=${webhookTypes.join(",")}`, () => false],
+      // The other owner's member and conversation are empty pages.
+      ["memberId=" + theirs.memberId, () => false],
+      ["conversationId=" + theirs.conversationId, () => false],
+      ...auditEventTypes.map((type): [string, (event: Event) => boolean] => ["eventType=" + type, event => event.type === type]),
+    ];
+    for (const [query, keep] of cases) {
+      const page = await f.audit("?" + query, mine.credential);
+      assert.deepEqual(page.events.map(event => event.eventId), all.filter(keep).map(event => event.eventId), query);
+      const csv = await f.api("/v1/audit?format=csv&" + query, undefined, mine.credential);
+      assert.equal(csv.status, 200, query);
+      assert.equal(csv.headers.get("audit-next-after"), page.nextAfter, query);
+      const text = await csv.text();
+      assert.equal(text, auditCsv(page.events as unknown as AuditEvent[]), query);
+      for (const secret of [mine.secret, theirs.secret]) assert.ok(!text.includes(secret) && !JSON.stringify(page).includes(secret), query);
+      assert.ok(!text.includes("private-path") && !JSON.stringify(page).includes("private-path"), query);
+    }
+    // A webhook row's member, conversation and request cells are empty.
+    const lines = (await (await f.api("/v1/audit?format=csv&eventType=" + webhookTypes.join(","), undefined, mine.credential)).text())
+      .split("\r\n").slice(1, -1);
+    assert.equal(lines.length, 5);
+    for (const line of lines) assert.match(line, new RegExp(`^\\d+,[^,]+,webhook\\.[a-z]+,(owner,${mine.ownerId}|system,),owner,${mine.ownerId},,,,`), line);
   }
 });
 
