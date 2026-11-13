@@ -9,7 +9,7 @@ export const codexSubscriptionEndpoint = "https://chatgpt.com/backend-api/codex"
 
 // A label the operator chooses for the account. Its digest binds registered profiles and native state to that account.
 // Trimmed and non-empty, exactly as the label was read before, so an existing registration keeps its digest.
-const account = z.string().trim().min(1).max(4096);
+const account = z.string().trim().min(1);
 const codexModel = z.string().regex(/^gpt-[a-z0-9.-]+$/).max(90);
 export const goAccount = z.strictObject({ provider: z.literal("opencode-go"), account });
 export const claudeAccount = z.strictObject({

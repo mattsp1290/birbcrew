@@ -93,7 +93,7 @@ missing statement has no effect.
 | `provider`, `model`, `account_id` | Explicit in `BIRBCREW_LIVE_PROFILES`. |
 | `account_path` | The `account` label. Use the same text to keep registered profiles. |
 | `extra_usage_disabled`, `eligible_coding_use`, `approved_sdk_use` | Not asserted by anyone. No code ever checked them against the provider. Keep overage billing off in the provider's console. |
-| `checked_at`, `evidence` | Removed. Nothing expires. |
+| `checked_at`, `evidence` | Removed. No statement expires. |
 
 The credential checks did not change: the API key variable or the Codex sign-in,
 the Go model list on each Pi turn, the returned Go model identity, and the
@@ -107,7 +107,7 @@ With the project's Node version and dependencies installed, run
 `node --test tests/service/providers.test.ts`. The suite uses synthetic keys and
 a loopback HTTP server. It checks that only the explicit setting selects
 profiles, that each engine needs its own credential, that a leftover attestation
-file in any state changes nothing, the model ID in both directions, redirect
+file that is absent, expired or invalid changes nothing, the model ID in both directions, redirect
 refusal, a refused key, and Pi's session headers across checkpoint restore.
 
 ## Approve a protected work item
