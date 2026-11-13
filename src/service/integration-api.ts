@@ -18,7 +18,8 @@ export const integrationCapabilities = {
   retention: "receipts-and-results-retained-with-database; no-automatic-TTL",
   rollover: { version: 1, maximumTurns: conversationTurnLimit, generationTurns: workflowGenerationTurnLimit },
   proxy: { version: 1, protocols: ["anthropic-messages", "openai-responses", "openai-chat-completions"] },
-  trustedContext: { version: 1, transport: "operator-configured-local-runtime", httpSubmission: false },
+  trustedContext: { version: 1, transport: "operator-configured-local-runtime", httpSubmission: false,
+    receiptObservation: {version:1,mode:"original-operation-metadata",maximumReceipts:16,maximumBytes:8192,readOnly:true,explicitRequest:true} },
   initiatorKinds,
   observation: { version: 1, protocol: "AG-UI", mode: "snapshot-and-bounded-tail", cursorExpiry: "reconnect-for-snapshot" },
   audit: {

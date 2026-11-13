@@ -2,7 +2,7 @@
 import {acquireRecoveryNativeLease,requireRecoveryActive} from "./recovery-admission.ts";
 import { appendAudit, trustedToolName } from "./audit.ts";
 import { createHash, randomUUID } from "node:crypto";
-import { Client, type Pool, type PoolClient } from "pg";
+import { Client, type Pool, type PoolClient, type QueryResultRow } from "pg";
 import { z } from "zod";
 import type { Engine } from "./domain.ts";
 
@@ -71,6 +71,16 @@ export interface TrustedStart {
   claim: TrustedClaim; engine: Engine; memberId:string; threadId: string; text: string; context: string;
   binding: string; checkpoint: unknown;
 }
+/** Observation only: admitted work is not classified, retried or stopped. */
+export interface TrustedReceiptObservation {
+  readonly requestId: string;
+  readonly phase: "queued" | "held" | "running" | "completed" | "cancelled" | "uncertain";
+  readonly receipts: readonly {
+    readonly operationId: string; readonly toolName: string;
+    readonly outcome: "admitted" | "completed" | "uncertain";
+    readonly released: boolean; readonly acknowledged: boolean;
+  }[];
+}
 
 export class TrustedContextStore {
   readonly pool: Pool;
@@ -105,9 +115,9 @@ export class TrustedContextStore {
   private authority(s: SessionRow, phase: AuthorizationPhase, requestId?: string, toolName?: string): Authorization {
     return { ownerId: s.owner_id, conversationId: s.conversation_id, scope:s.scope, version:s.context_version, phase, requestId, toolName };
   }
-  private async allowed(input: Authorization) {
+  private async allowed(input: Authorization, timeoutMs = 5_000) {
     // A policy service hanging must not hold a durable admission lock indefinitely.
-    const timeout = AbortSignal.timeout(5_000);
+    const timeout = AbortSignal.timeout(timeoutMs);
     const approved = await Promise.race([Promise.resolve().then(() => this.application.authorize(input)).catch(() => false), new Promise<boolean>((_,reject) => {
       timeout.addEventListener("abort", () => reject(new TrustedContextError("denied")), {once:true});
     })]);
@@ -340,6 +350,70 @@ export class TrustedContextStore {
       // Prior-generation output is never newly disclosed through this API.
       return {phase:r.phase,reply:r.generation === s.generation && s.phase === "active" ? r.reply : null};
     });
+  }
+  /** Original-operation metadata only; never classifies a request or advances a fence. */
+  async readReceipts(input: TrustedKey, explicitRequestId: string): Promise<TrustedReceiptObservation | null> {
+    const key = keySchema.parse(input), requestId = z.uuid().parse(explicitRequestId);
+    const deadline = performance.now() + 5_000;
+    const remaining = () => {
+      const ms = Math.floor(deadline - performance.now());
+      if (ms < 1) throw new TrustedContextError("denied");
+      return ms;
+    };
+    // As in admitted(), do not let a saturated caller Pool make admission control unbounded.
+    const db = new Client({...this.pool.options, password: this.pool.options.password, connectionTimeoutMillis: remaining()});
+    const connectionError = () => {}; db.on("error", connectionError);
+    let inTransaction = false;
+    const query = async <T extends QueryResultRow>(sql: string, values: unknown[] = []) => {
+      if (inTransaction) {
+        const setting = {text:"SELECT set_config('statement_timeout',$1,true)",values:[String(remaining())],query_timeout:remaining()};
+        await db.query(setting);
+      }
+      const options = {text: sql, values, query_timeout: remaining()};
+      const result = await db.query<T>(options); remaining(); return result;
+    };
+    const sessionSql = `SELECT s.owner_id,s.phase,s.application_digest FROM birbcrew_ts.trusted_sessions s
+      JOIN birbcrew_ts.conversations c USING(conversation_id) WHERE s.conversation_id=$1 AND c.owner_id=$2`;
+    const session = async (locked: boolean) => {
+      const {rows: [row]} = await query(sessionSql + (locked ? " FOR SHARE OF s" : ""), [key.conversationId,key.ownerId]);
+      if (!row || row.owner_id !== key.ownerId) throw new TrustedContextError("not_found");
+      if (row.phase === "deleted") throw new TrustedContextError("stale");
+      if (row.application_digest !== this.applicationDigest) throw new TrustedContextError("conflict");
+    };
+    try {
+      await db.connect(); remaining();
+      await query("BEGIN"); inTransaction = true;
+      await session(false); // Wrong owners cannot learn that another owner's native lease is busy.
+      const {rows: [lease]} = await query("SELECT pg_try_advisory_xact_lock(hashtextextended($1,71)) AS ok", [key.conversationId]);
+      if (!lease.ok) throw new TrustedContextError("busy");
+      await session(true);
+      const {rows: [request]} = await query("SELECT phase FROM birbcrew_ts.trusted_requests WHERE conversation_id=$1 AND request_id=$2", [key.conversationId,requestId]);
+      if (!request) throw new TrustedContextError("not_found");
+      const phase = z.enum(["queued","held","running","completed","cancelled","uncertain"]).safeParse(request.phase);
+      if (!phase.success) throw new TrustedContextError("denied");
+      const {rows} = await query(`SELECT operation_id AS "operationId",tool_name AS "toolName",outcome,released,acknowledged,
+        scope,context_version AS version FROM birbcrew_ts.trusted_tool_calls
+        WHERE conversation_id=$1 AND request_id=$2 ORDER BY operation_id LIMIT 17`, [key.conversationId,requestId]);
+      if (rows.length > 16) throw new TrustedContextError("limit");
+      const receipts: TrustedReceiptObservation["receipts"][number][] = [];
+      for (const row of rows) {
+        if (row.scope === null || row.version === null) throw new TrustedContextError("denied");
+        const parsed = z.strictObject({operationId:z.uuid(),toolName:text(64).regex(trustedToolName),
+          outcome:z.enum(["admitted","completed","uncertain"]),released:z.boolean(),acknowledged:z.boolean(),scope:text(256),version:text(256)}).safeParse(row);
+        if (!parsed.success) throw new TrustedContextError("denied");
+        const call = parsed.data;
+        if (call.acknowledged && !call.released) throw new TrustedContextError("denied");
+        await this.allowed({...key,phase:"receipt",requestId,toolName:call.toolName,operationId:call.operationId,
+          scope:call.scope,version:call.version}, remaining());
+        const {scope:_,version:__,...receipt} = call; receipts.push(Object.freeze(receipt));
+      }
+      const result = receipts.length ? Object.freeze({requestId,phase:phase.data,receipts:Object.freeze(receipts)}) : null;
+      if (Buffer.byteLength(JSON.stringify(result)) > 8192) throw new TrustedContextError("limit");
+      await query("COMMIT"); return result;
+    } catch (error) {
+      const rollback = {text:"ROLLBACK",query_timeout:1000};
+      await db.query(rollback).catch(() => {}); throw error;
+    } finally {await db.end(); db.off("error", connectionError);}
   }
   /** After a worker dies, classify rather than replay an unfinished native turn.
    * An active worker/effect lease makes this busy. Retained receipt IDs are safe to

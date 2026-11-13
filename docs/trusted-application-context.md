@@ -137,6 +137,44 @@ request cancellation does not imply its effect was rolled back. Receipt outcomes
 remain `completed` when known, or `uncertain` when admitted without a recorded
 outcome. Readback never re-executes a tool or revives a cancelled request.
 
+### Observation without recovery classification
+
+`readReceipts(key, explicitRequestId)` reads original-operation metadata without
+classifying the request. It can observe `phase: "running"` with a completed,
+unreleased effect after dispatch failed and its native lease drained. It never
+changes that phase, advances a generation, holds/releases work, invokes a handler
+or model, or returns a context, prompt, argument, result body or reply. Use
+`recover` only when the caller intentionally owns its separate classification and
+generation-barrier protocol.
+
+The return is `{requestId, phase, receipts}`. Each receipt contains only
+`operationId`, `toolName`, the actual stored `outcome` (`admitted`, `completed` or
+`uncertain`), `released` and `acknowledged`. Zero receipts returns `null`, without
+disclosing a phase or claiming a positive receipt proof. Missing requests fail
+`not_found`; erased sessions fail `stale`; an application archive mismatch fails
+`conflict`; historical operations without provable original authority fail
+`denied`. Do not infer rollback from an `admitted` or `uncertain` observation.
+
+The SDK checks current owner/session/archive identity before exposing busy state,
+takes the nonblocking exclusive conversation lease (namespace 71) before a session row-share
+lock, and authorizes EACH call with its ORIGINAL scope/version, explicit request,
+tool name and operation ID. There is no generic current-output check before
+historical operation checks. Any denied operation rejects the entire read.
+A maximum of 16 receipts and 8192 UTF-8 metadata bytes is returned; overflow fails,
+without truncation. The result and nested receipts are frozen.
+
+A separate short-lived Client uses the configured Pool connection parameters,
+including an explicit password or password callback hidden by pg from enumeration,
+with one monotonic 5000ms admission/query/policy budget. Remaining client and local
+server statement timeouts bound lock waits; the ordinary policy timeout remains
+5000ms for existing methods. Connection/rollback/end cleanup is awaited even on
+failure. OS/network termination is not a real-time guarantee. No Pool defaults
+or durable data change. Read exclusion can delay a new admitted turn briefly;
+`busy` is not a reason to classify/retry inference. Available DB leases are NOT
+physical process absence, a stopped-writer proof, readiness, or a lifecycle ACK.
+The trusted application separately owns fresh caller authentication and final
+scope checks; SDK keys or returned IDs cannot supply that authority.
+
 Recovery requires current `output` permission and a fresh `receipt` authorization
 for **each original operation**. The policy input contains the historical `scope`
 and `version`, `requestId`, `toolName` and `operationId`. Implement this phase

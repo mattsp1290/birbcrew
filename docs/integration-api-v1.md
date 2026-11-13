@@ -22,6 +22,14 @@ Trusted context is currently an operator-configured local runtime, **not** a pub
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
 proof of the operator's provider access or configured profile availability.
 
+The additive `trustedContext.receiptObservation` capability is version 1,
+`mode: "original-operation-metadata"`, `maximumReceipts: 16`,
+`maximumBytes: 8192`, `readOnly: true`, `explicitRequest: true`. It describes the
+documented local trusted-backend `TrustedContextStore.readReceipts` API, not a
+member HTTP route or request-selected tool/context mode. This observational read
+does not invoke recovery classification or establish native termination. Existing
+trusted-context version 1 and the `recover` generation-barrier contract are unchanged.
+
 | Route | Purpose |
 | --- | --- |
 | `POST /v1/members` | Existing member creation contract (`requestId`, `engine`, `profile`) |
