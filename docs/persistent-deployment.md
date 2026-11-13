@@ -206,12 +206,13 @@ taken the same way; after 27, 28 or 29 in one transaction it already holds that
 table. Audited writes wait for a time that grows with the audit table, and from
 version 29 a long autovacuum of that table can also make it fail after the 60 s
 (see [audit filters](audit-filters.md#upgrade-and-recovery)).
-Migration 31 (usage metering) does the same for `members`, `native_launches`,
-`audit_events` and `routine_firings`; after 27 to 30 in one transaction it retries while
-holding their locks (see [usage metering](usage-metering.md#upgrade-and-recovery)).
-From migration 27 on, every gateway, worker and CLI process refuses to start with
-`Migration N would apply after migration M` when the database already has a newer
-migration than one it would apply,
+Migration 31 (usage metering) takes `members` and `native_launches` in
+`SHARE ROW EXCLUSIVE` and `audit_events` and `routine_firings` in `ACCESS EXCLUSIVE`, with
+`NOWAIT` and retries like 25 to 30; after 27 to 30 in one transaction it retries while
+holding their locks, and a running native turn never delays it (see
+[usage metering](usage-metering.md#upgrade-and-recovery)). From migration 27 on, every
+gateway, worker and CLI process refuses to start with `Migration N would apply after
+migration M` when the database already has a newer migration than one it would apply,
 because applying the older one would silently narrow constraints the newer one widened.
 Nothing was applied, and the previous release still starts: keep running it. The usual
 cause is a release that numbered a migration below one an earlier release already

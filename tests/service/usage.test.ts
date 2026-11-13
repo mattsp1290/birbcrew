@@ -432,31 +432,78 @@ test("a handoff meets its target's budget before it commits; its reserved reques
   assert.equal((await usage.budget(source.ownerId, target.memberId)).usedTokens, 16_120);
 });
 
-test("segments that ran before a card expired stay metered after the expiry cancels their request", async () => {
+test("a request refused as handed off, pending its handoff or over the prompt bound records no budget refusal", async () => {
+  const source = await member(store);
+  const target = await member(store, source.ownerId);
+  const sourceConversation = await conversation(store, source);
+  const prior = await launched(store, source.ownerId, sourceConversation, "carried prompt");
+  await prior.commit();
+  // A handoff whose reserved request has not reached admission yet.
+  const pending = { async open(input: Parameters<MemberStore["openConversation"]>[0]) { return store.openConversation(input); },
+    async accept() { throw new MemberStoreError("busy"); } } as unknown as MemberClient;
+  const handoff = await new HandoffApi(store, pending).create(source.ownerId, sourceConversation, { requestId: randomUUID(), memberId: target.memberId });
+  assert.equal(handoff.firstRequestAdmitted, false);
+  // Both members then use up their budgets.
+  const usage = new UsageApi(store);
+  for (const owner of [source, target]) {
+    await spend(store, owner, reported(10));
+    await usage.setBudget(source.ownerId, owner.memberId, { tokenLimit: 10 });
+  }
+  const cases: [{ ownerId: string; conversationId: string; requestId: string; text: string }, (error: unknown) => boolean][] = [
+    [{ ownerId: source.ownerId, conversationId: sourceConversation, requestId: randomUUID(), text: "to the sealed source" },
+      error => error instanceof MemberStoreError && error.code === "handed_off"],
+    [{ ownerId: source.ownerId, conversationId: handoff.target.conversationId, requestId: randomUUID(), text: "before the reserved request" },
+      error => error instanceof MemberStoreError && error.code === "handoff_pending"],
+    [{ ownerId: source.ownerId, conversationId: await conversation(store, source), requestId: randomUUID(), text: "x".repeat(16_385) },
+      error => error instanceof Error && error.name === "ZodError"],
+  ];
+  for (const [request, refusal] of cases) {
+    await assert.rejects(store.checkAdmission(request), refusal, request.text.slice(0, 30));
+    await assert.rejects(store.recordAcceptance(request, ownerInitiator), refusal, request.text.slice(0, 30));
+  }
+  assert.equal((await audit(source.ownerId, "usage.request_refused")).length, 0);
+  // The budget itself still refuses an ordinary request of either member.
+  await assert.rejects(store.checkAdmission({ ownerId: source.ownerId, conversationId: await conversation(store, source), requestId: randomUUID(),
+    text: "ordinary" }), { code: "usage_limit" });
+});
+
+test("an expired card's request is metered for the segment that proposed it and the one that resumes with the cancelled result", async () => {
   const owner = await member(store);
   const usage = new UsageApi(store), approvals = new ApprovalStore(pool);
   const conversationId = await conversation(store, owner);
   const request = { ownerId: owner.ownerId, conversationId, requestId: randomUUID(), text: "record then wait", approvalDeadlineSeconds: 60 };
   await store.recordAcceptance(request, ownerInitiator);
+  const reserve = async (execution: { workflowRunId: string; activityId: string; attempt: number }, token: string) => {
+    await pool.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+      VALUES ($1,$2,$3,$4,$5,$6)`, [conversationId, request.requestId, token, execution.workflowRunId, execution.activityId, execution.attempt]);
+    return { ...request, token, execution };
+  };
   const execution = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
   const turn = await store.beginTurn(request, execution);
   assert.equal(turn.kind, "start"); if (turn.kind !== "start") return;
-  await pool.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
-    VALUES ($1,$2,$3,$4,$5,1)`, [conversationId, request.requestId, turn.token, execution.workflowRunId, execution.activityId]);
-  // The proposing segment returned: the supervisor records its usage before it commits the card.
-  await recordSegmentUsage(pool, { ...request, token: turn.token, execution }, reported(400, 40));
+  // The proposing segment returned: the supervisor records its usage, then commits the card and its checkpoint.
+  await recordSegmentUsage(pool, await reserve(execution, turn.token), reported(400, 40));
   const card = await approvals.propose({ ownerId: owner.ownerId, memberId: owner.memberId, conversationId, requestId: request.requestId,
     invocationId: request.requestId, nativeCallId: "expiring-call", token: turn.token, toolName: "record_work_item",
-    arguments: { operation_id: request.requestId } });
+    arguments: { operation_id: request.requestId } }, { version: 1, engine: "pi", state: {} });
   assert.ok(card.expiresAt);
   await pool.query("UPDATE birbcrew_ts.deferred_calls SET expires_at=clock_timestamp() WHERE approval_id=$1", [card.approvalId]);
   assert.deepEqual(await approvals.expireTurn(card), { kind: "expired" });
-  // Cancelled, and nothing resumes it, but the model work it did is still the member's.
+  // As the workflow does next: settle the card, which the expiry cancelled, and resume the native
+  // session with that result under a new launch generation. That segment writes the reply and is metered too.
+  assert.equal((await approvals.settleConfirmed(card)).kind, "cancelled");
+  const resumeExecution = { ...execution, activityId: "resume" };
+  const resumed = await store.beginResume(request, card, resumeExecution);
+  assert.equal(resumed.kind, "start"); if (resumed.kind !== "start") return;
+  assert.notEqual(resumed.token, turn.token);
+  await recordSegmentUsage(pool, await reserve(resumeExecution, resumed.token), reported(500, 60));
   const records = (await usage.records(owner.ownerId, { conversationId })).records;
   assert.deepEqual(records.map(record => [record.requestId, record.state, record.inputTokens, record.outputTokens]),
-    [[request.requestId, "reported", 400, 40]]);
-  await usage.setBudget(owner.ownerId, owner.memberId, { tokenLimit: 440 });
-  assert.deepEqual([(await usage.budget(owner.ownerId, owner.memberId)).usedTokens, (await usage.summary(owner.ownerId, {})).total.totalTokens], [440, 440]);
+    [[request.requestId, "reported", 500, 60], [request.requestId, "reported", 400, 40]]);
+  // Both count, and the request admitted before them was never refused for them.
+  await usage.setBudget(owner.ownerId, owner.memberId, { tokenLimit: 1000 });
+  assert.deepEqual([(await usage.budget(owner.ownerId, owner.memberId)).usedTokens, (await usage.summary(owner.ownerId, {})).total.totalTokens], [1000, 1000]);
+  assert.equal((await audit(owner.ownerId, "usage.request_refused")).length, 0);
   await assert.rejects(store.recordAcceptance({ ...request, requestId: randomUUID(), conversationId: await conversation(store, owner) }, ownerInitiator),
     { code: "usage_limit" });
 });
@@ -469,10 +516,13 @@ test("a routine firing refused by its member's budget fails with usage_limit and
   const clock: Clock = () => new Date(now);
   const members = {
     async open(input: Parameters<MemberStore["openConversation"]>[0]) { return isolated.openConversation(input); },
-    // The second firing is refused as MemberClient reports a refusal by the workflow's own admission.
+    // The first firing is refused by MemberClient's pre-check, which finds the routine itself. The
+    // second reaches the workflow's own admission, as in a race, and MemberClient reports that refusal.
     async accept(input: TurnRequest) {
-      try { await isolated.recordAcceptance(input, ownerInitiator); }
-      catch (error) { throw ++refused === 2 ? new MemberStoreError("usage_limit_closed") : error; }
+      try {
+        if (refused === 0) await isolated.checkAdmission(input);
+        await isolated.recordAcceptance(input, ownerInitiator);
+      } catch (error) { throw ++refused === 2 ? new MemberStoreError("usage_limit_closed") : error; }
       return { requestId: input.requestId };
     },
     async requestStatus(input: Parameters<MemberStore["requestStatus"]>[0]) { return isolated.requestStatus(input); },

@@ -96,7 +96,8 @@ export async function refuseOverBudget(db: Queryable, key: { ownerId: string; co
 
 /** Checked before a request reaches its workflow, so a refusal leaves the conversation open and
  * answers at once; recordAcceptance checks again in the admission transaction. A request that
- * already has an admission or a turn is never refused: a retry gets the answer it got before. */
+ * already has an admission or a turn is never refused: a retry gets the answer it got before.
+ * Callers exclude a handoff's reserved request, as MemberStore.checkAdmission does. */
 export async function checkUsageAdmission(store: MemberStore, request: TurnRequest) {
   // Most members have no budget. A trusted-context conversation is refused by admission itself.
   const budgeted = await store.pool.query(`SELECT 1 FROM birbcrew_ts.conversations c JOIN birbcrew_ts.usage_budgets b USING (member_id)

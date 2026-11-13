@@ -186,8 +186,9 @@ plus output tokens of the member's `reported` rows recorded in the window. Input
 includes cache reads and writes, so a long Codex or Claude conversation that rereads
 its context counts that context every time. That context includes the member's
 [instructions](member-instructions.md), project notes and memory, which every launch
-sends again; Crew counts them as input like the rest and enforces nothing about them
-apart from the budget. `unknown` rows count nothing. A budget applies to one member
+sends again. Crew meters them as input like the rest; no token limit applies to them
+apart from the member's budget, and their byte limits when a conversation opens are
+unchanged. `unknown` rows count nothing. A budget applies to one member
 across all its conversations, the owner's requests and its routines alike, and a
 handoff to the member is checked against it once (see
 [Conversation handoff](#conversation-handoff)). The limit is a whole number from 1 to
@@ -249,25 +250,31 @@ opened its conversation and started its idle workflow, as every firing does.
 ### Conversation handoff
 
 A [handoff's](handoffs.md) reserved first request is a model call on the target member,
-with a transcript of up to 64 KiB. Its segments are recorded under the target and count
-toward the target's budget, and their records name the initiator
+with a transcript of up to 64 KiB. Each of its segments that returns is recorded under
+the target and counts toward the target's budget, and their records name the initiator
 `{ kind: "handoff", id }`. The target's budget is checked once, inside the handoff's
 transaction before it commits: a target at or over its budget refuses the POST with
 `409 usage_limit`, and, like the handoff's other refusals, that writes nothing, not even
 a `usage.request_refused` row. After the commit, no budget check refuses the reserved
 request, even if the target's budget ran out in between. A refusal then would leave the
-source sealed and the target waiting for a request it could never admit. So the
+source sealed and the target `handoff_pending`: until the window or the budget allowed
+the request if `MemberClient`'s check refused it, and for good if the workflow's own
+admission did, because that refusal closes the target's workflow. So the
 reserved request can take the target past its limit by one turn, as any request
 admitted before the limit can. Every other request to the target meets the budget as
 usual.
 
 ### Approval expiry
 
-An [approval deadline](approval-expiry.md) that expires a card cancels its request. The
-segment that proposed the card had already returned, so its row is in the ledger and
-keeps counting toward the member's window and the owner's totals. Nothing resumes the
-request, so it adds no further row. A routine firing whose card expires fails
-`approval_expired`, not `usage_limit`.
+An [approval deadline](approval-expiry.md) that expires a Claude or Pi card cancels its
+request, as an owner's cancel does. The segment that proposed the card had already
+returned, so its row is in the ledger and keeps counting toward the member's window and
+the owner's totals. The workflow then resumes the native session with a cancelled tool
+result under a new launch generation, and that segment, which writes the turn's reply,
+is metered too. The budget never refuses it: the request was admitted before it ran. A
+Codex live card's deadline interrupts its running turn instead, which ends `uncertain`
+and, like any segment that does not return, records nothing. A routine firing whose
+card expires fails `approval_expired`, not `usage_limit`.
 
 ## Audit
 

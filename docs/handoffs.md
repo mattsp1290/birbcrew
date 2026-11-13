@@ -182,8 +182,8 @@ The handoff row is the only authority for the target's first request. At admissi
 - Every other request to the target is `409 handoff_pending` until the reserved one is
   admitted: the owner's, the CLI's, and a routine firing's. Routines cannot name an
   existing conversation in any case: each firing draws a new conversation UUID.
-- It is a model call on the target member. Its segments are recorded in the
-  [usage ledger](usage-metering.md) under the target, with the initiator
+- It is a model call on the target member. Each of its segments that returns is
+  recorded in the [usage ledger](usage-metering.md) under the target, with the initiator
   `{ kind: "handoff", id: <handoffId> }`, and count toward the target's budget. The
   POST checks that budget before the commit. After the commit no budget check refuses
   the reserved request, even when the target's budget ran out in between: that refusal
@@ -278,7 +278,8 @@ do not see it.
 ## Costs
 
 A handoff costs one model call, the acknowledgement, and one of the target's 128 turns.
-That call is metered on the target member and counts toward its usage budget.
+That call, when it returns, is metered on the target member and counts toward its usage
+budget.
 The transcript stays in the target's native history, so engines that resend history
 send up to 64 KiB of it again with every later turn. A model with a small context window
 may refuse a large transcript; the reserved request then fails like any provider
