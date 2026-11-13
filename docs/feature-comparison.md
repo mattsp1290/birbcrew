@@ -139,7 +139,7 @@ How much to trust each column:
 | 31 | Desktop app | No | Yes | Yes | Yes | No | Yes | No | No | No |
 | 32 | Mobile app | No | Part | Yes | Yes | Part | Yes | Part | Yes | Part |
 | 33 | Slack, Teams, SMS, or another chat surface | No | Yes | Yes | Yes | No | Yes | Yes | No | Yes |
-| 34 | Notifications when nobody is watching | Part | Yes | Yes | Part | Part | Part | No | Yes | Yes |
+| 34 | Notifications when nobody is watching | Yes | Yes | Yes | Part | Part | Part | No | Yes | Yes |
 | 35 | Voice | No | Yes | Yes | Yes | No | Part | Yes | Part | Yes |
 
 ### Operations
@@ -213,8 +213,8 @@ that names a later pull request describes Crew after that pull request instead.
 | 30 | No | Crew is a headless service. Besides the operator CLI, the only clients in the repository are two scripts in `clients/`. `observe.mjs` attaches an AG-UI observer, and `resolve.mjs` posts a decision. The original first-milestone brief assigns the eventual phone and browser interface to Birbforge. |
 | 31 | No | None. |
 | 32 | No | None. The original first-milestone brief assigns the eventual phone interface to Birbforge. |
-| 33 | No | None. No Slack, Teams, or SMS integration exists. [The original first-milestone brief](first-milestone.md) excluded sending to Slack. |
-| 34 | Part | An owner registers up to 10 HTTPS webhook endpoints (pull request #52). Crew posts a signed body of IDs and a status when a card or question becomes pending, a request finishes, a routine firing settles, or Crew disables a routine. Crew sends no push, email, or chat message itself. See [outbound webhooks](webhooks.md). |
+| 33 | No | None. No one can talk to a member or answer a card in Slack, Teams, SMS, or another chat. A webhook endpoint in the `slack` format (pull request #58) posts one-way notices into a Slack, Mattermost, or Discord channel through an incoming-webhook URL that the owner registers. Crew holds no chat account or app token, only that URL, and reads nothing from a chat. [The original first-milestone brief](first-milestone.md) excluded sending to Slack. |
+| 34 | Yes | An owner can keep up to 10 HTTPS webhook endpoints enabled. Crew posts to them when a card or question becomes pending, a request finishes, a routine firing settles, or Crew disables a routine. Each endpoint chooses a format (pull request #58): a signed body for a receiver that the owner runs, or a short message that a Slack, Mattermost, or Discord incoming webhook or an ntfy topic shows to a person, with no service of the owner's own in between. Each holds IDs, the time, and a status or the tool name. None holds prompt or reply text. A message cannot decide a card. Crew posts only to a URL that the owner registers, and sends no email or SMS and runs no push service itself. See [outbound webhooks](webhooks.md). |
 | 35 | No | None. |
 
 ### Operations
