@@ -28,12 +28,33 @@ const micro = (value: string) => {
   return BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, "0"));
 };
 /** `value` × 10^-scale as a decimal string without trailing zeros. */
-function decimal(value: bigint, scale: number) {
+function scaledDecimal(value: bigint, scale: number) {
   const digits = value.toString().padStart(scale + 1, "0");
   const fraction = digits.slice(-scale).replace(/0+$/, "");
   return digits.slice(0, -scale) + (fraction ? "." + fraction : "");
 }
-const canonical = (value: string) => decimal(micro(value), 6);
+const canonical = (value: string) => scaledDecimal(micro(value), 6);
+
+/** Every rate checked and made canonical, whether it came from the operator's file or from code: the
+ * estimate is exact only for rates of this form. `invalid` names the failing entry's position. */
+function checkedTable(models: readonly (readonly [string, unknown])[], invalid: (position: number) => Error): PriceTable {
+  const prices = new Map<string, Price>();
+  models.forEach(([name, value], index) => {
+    const price = entry.safeParse(value);
+    if (!modelName.safeParse(name).success || !price.success) throw invalid(index + 1);
+    const { input, output, cachedInput = input, cacheWrite = input } = price.data;
+    prices.set(name, { input: canonical(input), cachedInput: canonical(cachedInput), cacheWrite: canonical(cacheWrite), output: canonical(output) });
+  });
+  return prices;
+}
+
+/** A table built in code, such as one a trusted backend passes to runTrustedRequest, checked as
+ * strictly as the operator's file. Throws on any entry that file would refuse. */
+export function checkedPrices(prices: PriceTable | null): PriceTable | null {
+  if (prices === null) return null;
+  return checkedTable([...prices], position => new Error(`The price table has an invalid model entry at position ${position}; `
+    + "rates are decimal strings of at most six decimal places, USD per million tokens"));
+}
 
 /** Reads the table at `path`; null when no path is set. Errors name the setting and the failing
  * entry's position, never the file's contents. */
@@ -49,14 +70,7 @@ export function readPrices(path: string | undefined): PriceTable | null {
   if (!parsed.success) throw failure("names a file that is not a version 1 price table");
   const models = Object.entries(parsed.data.models);
   if (!models.length || models.length > priceTableLimit) throw failure(`must price between 1 and ${priceTableLimit} models`);
-  const prices = new Map<string, Price>();
-  models.forEach(([name, value], index) => {
-    const price = entry.safeParse(value);
-    if (!modelName.safeParse(name).success || !price.success) throw failure(`has an invalid model entry at position ${index + 1}`);
-    const { input, output, cachedInput = input, cacheWrite = input } = price.data;
-    prices.set(name, { input: canonical(input), cachedInput: canonical(cachedInput), cacheWrite: canonical(cacheWrite), output: canonical(output) });
-  });
-  return prices;
+  return checkedTable(models, position => failure(`has an invalid model entry at position ${position}`));
 }
 
 let loaded: PriceTable | null | undefined;
@@ -69,7 +83,7 @@ export function operatorPrices() {
 
 /** The estimated cost of a reported segment whose model the table prices, else null. A segment
  * with a provider-billed cost is never estimated, so billed and estimated segments never overlap.
- * Computed in integers: picodollars are exact for every rate the table accepts. */
+ * Computed in integers: picodollars are exact for every rate readPrices or checkedPrices accepts. */
 export function estimateCost(usage: SegmentUsage, prices: PriceTable | null): { costUsd: string; price: Price } | null {
   if (!prices || usage.state !== "reported" || usage.model === null || usage.costUsd !== null) return null;
   const price = prices.get(usage.model);
@@ -79,5 +93,6 @@ export function estimateCost(usage: SegmentUsage, prices: PriceTable | null): { 
   if (fresh < 0n) return null;
   const picodollars = fresh * micro(price.input) + cached * micro(price.cachedInput) + written * micro(price.cacheWrite)
     + BigInt(usage.outputTokens) * micro(price.output);
-  return { costUsd: decimal(picodollars, 12), price };
+  // Only a table that skipped checkedPrices can get here with a negative rate; it prices nothing.
+  return picodollars < 0n ? null : { costUsd: scaledDecimal(picodollars, 12), price };
 }

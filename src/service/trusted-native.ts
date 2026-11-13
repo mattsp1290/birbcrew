@@ -65,5 +65,7 @@ export async function runTrustedNativeTurn(input: TrustedNativeInput, profile: T
   input.signal.throwIfAborted();
   const checkpoint = envelope.parse({version:1,engine:input.engine,threadId:input.threadId,binding:input.binding,capabilities,state:result.checkpoint});
   if (Buffer.byteLength(JSON.stringify(checkpoint)) > 4 * 1024 * 1024) throw new Error("Trusted checkpoint exceeds 4 MiB");
-  return {text:result.text,checkpoint,usage:segmentUsage.parse(result.usage)};
+  // As on the member lane, metering never costs a finished turn its result: unusable usage is unknown.
+  const usage = segmentUsage.safeParse(result.usage);
+  return {text:result.text,checkpoint,usage:usage.success ? usage.data : {state:"unknown" as const,model:null}};
 }

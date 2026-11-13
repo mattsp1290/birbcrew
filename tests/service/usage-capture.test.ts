@@ -19,7 +19,7 @@ import { createProxyProfile } from "../../src/service/proxy-profiles.ts";
 import { MemberStore } from "../../src/service/store.ts";
 import { startSupervisor } from "../../src/service/supervisor.ts";
 import { claudeUsage, codexRolloutModel, codexRolloutTotal, codexUsage, combinedUsage, piUsage, type SegmentUsage } from "../../src/service/usage-capture.ts";
-import { estimateCost, readPrices } from "../../src/service/usage-prices.ts";
+import { checkedPrices, estimateCost, readPrices, type Price } from "../../src/service/usage-prices.ts";
 import { startClaudeFixtureProvider } from "../fixtures/engines/claude/index.mts";
 import { startProvider } from "../fixtures/engines/codex/provider.mts";
 import { createPiFixtureOptions } from "../fixtures/engines/pi/index.mts";
@@ -329,6 +329,8 @@ test("an estimate prices each part of the input at its own rate, exactly, and on
     assert.equal(estimateCost(segment as SegmentUsage, prices), null, why);
   }
   assert.equal(estimateCost(usage("gpt-5.4"), null), null, "no table");
+  const unchecked = new Map([["m", { input: "-1.5", cachedInput: "-1.5", cacheWrite: "-1.5", output: "0" }]]);
+  assert.equal(estimateCost(usage("m"), unchecked), null, "a negative total from a table that skipped checkedPrices");
 });
 
 test("the price table is the operator's file, refused whole when any entry is malformed, and names no content in its error", async t => {
@@ -363,4 +365,13 @@ test("the price table is the operator's file, refused whole when any entry is ma
   }
   assert.throws(() => readPrices("relative/prices.json"), /BIRBCREW_USAGE_PRICES_PATH must be an absolute path/);
   assert.throws(() => readPrices(join(dir, "missing.json")), /BIRBCREW_USAGE_PRICES_PATH must name a readable JSON file/);
+
+  // A table built in code meets the same rules, so its estimates are exact too.
+  const rates = (input: string) => ({ input, cachedInput: "0.30", cacheWrite: "3.750000", output: "15" });
+  assert.equal(checkedPrices(null), null);
+  assert.deepEqual(checkedPrices(new Map([["m", rates("3")]])), new Map([["m", { input: "3", cachedInput: "0.3", cacheWrite: "3.75", output: "15" }]]));
+  for (const input of ["0.0000005", "-0.5", "1e-6", "3,5", ""]) {
+    assert.throws(() => checkedPrices(new Map([["ok", rates("1")], ["m", rates(input)]])), /invalid model entry at position 2/, input);
+  }
+  assert.throws(() => checkedPrices(new Map([["m", { input: "1" } as Price]])), /position 1/, "a missing rate");
 });

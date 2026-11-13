@@ -17,19 +17,24 @@ export const usageLimits = {
   defaultPage: 100,
 } as const;
 
+// Values that were true before estimates and still are keep their wording: `cost` and each engine's
+// `cost` describe costUsd, which is still billed only. Estimates are described by the new keys.
 export const usageCapabilities = {
   version: 1, route: "/v1/usage", ledger: "one-row-per-native-segment", states: ["reported", "unknown"],
   tokens: "input-includes-cache; output-includes-reasoning",
-  cost: "provider-billed-or-operator-estimate; reported-apart; never-both-on-one-segment",
-  estimate: { source: "operator-price-table", setting: priceSetting, unit: priceUnit, keyedBy: "recorded-model",
-    computed: "at-write; never-recomputed", builtInPrices: false },
+  cost: "provider-billed-only; never-estimated",
+  estimate: { field: "estimatedCostUsd", source: "operator-price-table", setting: priceSetting, unit: priceUnit,
+    keyedBy: "recorded-model", computed: "at-write; never-recomputed", builtInPrices: false,
+    withBilledCost: "never-on-one-segment; totals-never-added" },
   lanes: ["member", "trusted"],
   engines: {
-    pi: { usage: "per-model-call", model: "answering-model", cost: "when-provider-billed; else estimated-when-priced" },
-    claude: { usage: "per-query", model: "reported", cost: "estimated-when-priced" },
-    codex: { usage: "per-turn-from-thread-total", model: "from-rollout-turn-context", cost: "estimated-when-priced" },
+    pi: { usage: "per-model-call", model: "reported", modelSource: "answering-model", cost: "when-provider-billed",
+      estimate: "when-priced-and-not-billed" },
+    claude: { usage: "per-query", model: "reported", cost: "never", estimate: "when-priced" },
+    codex: { usage: "per-turn-from-thread-total", model: "from-rollout-turn-context", cost: "never", estimate: "when-priced" },
   },
   budget: { route: "/v1/usage/budgets/{memberId}", period: "utc_day", counts: "input+output", scope: "member",
+    lanesCounted: ["member", "trusted"], lanesRefused: ["member"],
     enforcement: "admission-soft-cap", refusal: "usage_limit", refusalClosingConversation: "usage_limit_closed",
     tokenLimitMaximum: usageLimits.tokenLimitMaximum },
   recordPagination: "usage-id-keyset-newest-first", restore: "rewound-with-database; usage-ids-after-recovery-point-reissued",
@@ -56,27 +61,38 @@ export async function recordTrustedUsage(db: Pool, claim: TrustedClaim, usage?: 
 type Segment = { lane: "member"; launch: Launch } | { lane: "trusted"; claim: TrustedClaim };
 const unknownUsage: SegmentUsage = { state: "unknown", model: null };
 
+const refused = (error: unknown) => Boolean(error && typeof error === "object" && "code" in error && error.code === "23514");
+
 async function record(db: Pool, segment: Segment, usage: SegmentUsage = unknownUsage, prices: PriceTable | null) {
-  try { await insertUsage(db, segment, usage, prices); }
-  catch (error) {
-    // Metering must not cost a finished segment its result: a row the ledger's CHECKs refuse
-    // is kept as unknown instead. Callers pass the pool, so the failed insert left no
-    // transaction to abort.
-    if (usage.state === "unknown" || !(error && typeof error === "object" && "code" in error && error.code === "23514")) throw error;
-    await insertUsage(db, segment, unknownUsage, null);
+  // Metering must not cost a finished segment its result: a row the ledger's CHECKs refuse is kept
+  // without its estimate, and then as unknown, rather than failing the segment. Callers pass the
+  // pool, so a failed insert left no transaction to abort.
+  for (const [attempt, table] of [[usage, prices], [usage, null], [unknownUsage, null]] as const) {
+    try { return await insertUsage(db, segment, attempt, table); }
+    catch (error) { if (attempt.state === "unknown" || !refused(error)) throw error; }
   }
 }
 
-const usageColumns = `state,model,input_tokens,output_tokens,cached_input_tokens,cache_write_tokens,reasoning_tokens,cost_usd,
-  estimated_cost_usd,estimate_price`;
-const usageValues = (first: number) => Array.from({ length: 10 }, (_, i) => "$" + (first + i)).join(",") + "::jsonb";
+// One list, so the columns, their placeholders and the values cannot drift apart.
+const usageColumnList = ["state", "model", "input_tokens", "output_tokens", "cached_input_tokens", "cache_write_tokens",
+  "reasoning_tokens", "cost_usd", "estimated_cost_usd", "estimate_price"] as const;
+const usageColumns = usageColumnList.join(",");
+const usageValues = (first: number) => usageColumnList.map((column, i) => "$" + (first + i) + (column === "estimate_price" ? "::jsonb" : "")).join(",");
+
+/** The estimate, or none if the table cannot price this segment: an estimate never fails a write. */
+function estimateOf(usage: SegmentUsage, prices: PriceTable | null) {
+  try { return estimateCost(usage, prices); } catch { return null; }
+}
 
 async function insertUsage(db: Queryable, segment: Segment, usage: SegmentUsage, prices: PriceTable | null) {
   const counts = usage.state === "reported" ? usage : undefined;
-  const estimate = estimateCost(usage, prices);
-  const values = [usage.state, usage.model, counts?.inputTokens ?? null, counts?.outputTokens ?? null,
-    counts?.cachedInputTokens ?? null, counts?.cacheWriteTokens ?? null, counts?.reasoningTokens ?? null, counts?.costUsd ?? null,
-    estimate?.costUsd ?? null, estimate ? JSON.stringify(estimate.price) : null];
+  const estimate = estimateOf(usage, prices);
+  const byColumn: Record<typeof usageColumnList[number], unknown> = { state: usage.state, model: usage.model,
+    input_tokens: counts?.inputTokens ?? null, output_tokens: counts?.outputTokens ?? null,
+    cached_input_tokens: counts?.cachedInputTokens ?? null, cache_write_tokens: counts?.cacheWriteTokens ?? null,
+    reasoning_tokens: counts?.reasoningTokens ?? null, cost_usd: counts?.costUsd ?? null,
+    estimated_cost_usd: estimate?.costUsd ?? null, estimate_price: estimate ? JSON.stringify(estimate.price) : null };
+  const values = usageColumnList.map(column => byColumn[column]);
   if (segment.lane === "trusted") {
     const { claim } = segment;
     await db.query(`INSERT INTO birbcrew_ts.usage_ledger (owner_id,member_id,conversation_id,request_id,trusted_request_id,engine,${usageColumns})
@@ -185,7 +201,8 @@ const totalsColumns = (name: string, filter: string) => `
   count(u.cost_usd) FILTER (WHERE ${filter})::bigint AS ${name}_cost_segments,
   (sum(u.estimated_cost_usd) FILTER (WHERE ${filter}))::text AS ${name}_estimated_cost,
   count(u.estimated_cost_usd) FILTER (WHERE ${filter})::bigint AS ${name}_estimated_segments`;
-const allTotals = totalsColumns("total", "true") + "," + totalsColumns("routine", "a.initiator_kind='routine'") + ","
+const allTotals = totalsColumns("total", "true") + ","
+  + totalsColumns("routine", "u.trusted_request_id IS NULL AND a.initiator_kind='routine'") + ","
   + totalsColumns("trusted", "u.trusted_request_id IS NOT NULL");
 const admission = "LEFT JOIN birbcrew_ts.request_admissions a ON a.conversation_id=u.conversation_id AND a.request_id=u.request_id";
 const inRange = (from: string, to: string) => `(${from}::timestamptz IS NULL OR u.recorded_at>=${from}) AND (${to}::timestamptz IS NULL OR u.recorded_at<${to})`;
@@ -216,8 +233,9 @@ function recordView(row: LedgerRow) {
     inputTokens: row.input_tokens, outputTokens: row.output_tokens, cachedInputTokens: row.cached_input_tokens,
     cacheWriteTokens: row.cache_write_tokens, reasoningTokens: row.reasoning_tokens, costUsd: decimal(row.cost_usd),
     estimatedCostUsd: decimal(row.estimated_cost_usd), estimatePrice: row.estimate_price,
-    // A trusted request has no admission row, so it is the owner's, as its effects are in the audit trail.
-    initiator: row.initiator_kind === null ? { kind: "owner" as const } : initiatorFromColumns(row.initiator_kind, row.initiator_id),
+    // A trusted request is the owner's, as the lane's effects are in the audit trail; it has no admission row.
+    initiator: row.trusted || row.initiator_kind === null ? { kind: "owner" as const }
+      : initiatorFromColumns(row.initiator_kind, row.initiator_id),
   };
 }
 

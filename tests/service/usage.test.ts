@@ -22,6 +22,8 @@ import { failReasons, RoutineApi, RoutineDispatcher, skipReasons, type Clock } f
 import { MemberStore, ownerAdmissionActivity } from "../../src/service/store.ts";
 import type { Launch } from "../../src/service/supervisor.ts";
 import { TrustedContextStore } from "../../src/service/trusted-context.ts";
+import type { TrustedNativeProfile } from "../../src/service/trusted-native.ts";
+import { runTrustedRequest } from "../../src/service/trusted-runner.ts";
 import { recordSegmentUsage, recordTrustedUsage, UsageApi } from "../../src/service/usage.ts";
 import type { SegmentUsage } from "../../src/service/usage-capture.ts";
 import type { PriceTable } from "../../src/service/usage-prices.ts";
@@ -307,6 +309,17 @@ test("the usage routes total an owner's usage by member and conversation, mark r
   const capabilities = (await g.api("/v1/capabilities")).body;
   assert.deepEqual([capabilities.usage.route, capabilities.usage.budget.period, capabilities.usage.budget.refusal,
     capabilities.usage.budget.refusalClosingConversation], ["/v1/usage", "utc_day", "usage_limit", "usage_limit_closed"]);
+  // Pinned, so rewording a value consumers may match is a deliberate change. Values that were true
+  // before estimates still are, since costUsd is still billed only; only Codex's model changed.
+  assert.deepEqual([capabilities.usage.cost, capabilities.usage.engines, capabilities.usage.lanes, capabilities.usage.estimate,
+    capabilities.usage.budget.lanesCounted, capabilities.usage.budget.lanesRefused], ["provider-billed-only; never-estimated", {
+    pi: { usage: "per-model-call", model: "reported", modelSource: "answering-model", cost: "when-provider-billed",
+      estimate: "when-priced-and-not-billed" },
+    claude: { usage: "per-query", model: "reported", cost: "never", estimate: "when-priced" },
+    codex: { usage: "per-turn-from-thread-total", model: "from-rollout-turn-context", cost: "never", estimate: "when-priced" },
+  }, ["member", "trusted"], { field: "estimatedCostUsd", source: "operator-price-table", setting: "BIRBCREW_USAGE_PRICES_PATH",
+    unit: "usd-per-million-tokens", keyedBy: "recorded-model", computed: "at-write; never-recomputed", builtInPrices: false,
+    withBilledCost: "never-on-one-segment; totals-never-added" }, ["member", "trusted"], ["member"]]);
   assert.ok(capabilities.audit.eventTypes.includes("usage.request_refused"));
 });
 
@@ -342,17 +355,25 @@ test("an estimated cost is written once with the rates it used, kept apart from 
   assert.deepEqual(view(retried.request.requestId), [null, "0.0022", firstRates]);
   assert.deepEqual(view(billed.requestId), ["0.25", null, null], "a billed segment is never estimated");
   for (const unestimated of [unpriced, anonymous, silent]) assert.deepEqual(view(unestimated.requestId), [null, null, null]);
+  // A table that skipped checkedPrices, with a negative or unparsable rate, costs a segment its
+  // estimate, never its counts or its result.
+  const negative = await spend(store, owner, segment, priced("-1.5", "0"));
+  const unparsable = await spend(store, owner, segment, priced("1e-6", "8"));
+  const kept = (await pool.query(`SELECT request_id, state, input_tokens, estimated_cost_usd FROM birbcrew_ts.usage_ledger
+    WHERE request_id = ANY($1::uuid[]) ORDER BY usage_id`, [[negative.requestId, unparsable.requestId]])).rows;
+  assert.deepEqual(kept, [negative.requestId, unparsable.requestId].map(request_id => ({ request_id, state: "reported",
+    input_tokens: 1000, estimated_cost_usd: null })));
   // An append-only ledger: no later price, and no one, rewrites an estimate.
   await assert.rejects(pool.query("UPDATE birbcrew_ts.usage_ledger SET estimated_cost_usd=0 WHERE owner_id=$1", [owner.ownerId]), { code: "23514" });
 
   // Billed and estimated cost are totalled apart, each with the number of segments it covers.
   const total = (await g.api("/v1/usage")).body.total;
   assert.deepEqual([total.segments, total.costUsd, total.costReportedSegments, total.estimatedCostUsd, total.costEstimatedSegments],
-    [7, "0.25", 1, "0.0086", 3]);
+    [9, "0.25", 1, "0.0086", 3]);
   assert.deepEqual((await g.api("/v1/usage/members")).body.members[0].total, total);
   assert.deepEqual((await g.api("/v1/usage/conversations?memberId=" + owner.memberId)).body.conversations
     .map((c: { total: { estimatedCostUsd: string | null } }) => c.total.estimatedCostUsd).sort(),
-  ["0.0022", "0.0022", "0.0042", null, null, null, null]);
+  ["0.0022", "0.0022", "0.0042", null, null, null, null, null, null]);
 
   // Another owner's estimate is its own: neither owner's totals or records include the other's.
   const other = await member(store, undefined, "claude");
@@ -433,6 +454,16 @@ test("a trusted-context request is metered once in its own lane, as the owner's,
   // refused once they use it up, though the trusted lane itself is never refused by it.
   const budget = await g.api("/v1/usage/budgets/" + owner.memberId, { tokenLimit: 1111 }, undefined, "PUT");
   assert.deepEqual([budget.body.usedTokens, budget.body.admitting], [1111, false]);
+
+  // A table built in code that the operator's file would refuse stops runTrustedRequest before it
+  // claims a request, never after the request's tools have run.
+  const queued = { ownerId: owner.ownerId, conversationId: await conversation(store, owner) };
+  await trusted.open(queued, { scope: "scope", version: "v1", text: "context" });
+  const waiting = randomUUID();
+  await trusted.submit(queued, waiting, "prompt");
+  await assert.rejects(runTrustedRequest(trusted, queued, { engine: "claude" } as TrustedNativeProfile, t.signal,
+    priced("0.0000005", "15", "0.3", "claude-sonnet-4-6")), /invalid model entry at position 1/);
+  assert.deepEqual(await trusted.result(queued, waiting), { phase: "queued", reply: null });
 
   // Erasing the trusted conversation keeps its row: counts and a model, never content.
   await trusted.invalidate(key, 1, { scope: "scope", version: "v2", text: "context" });
