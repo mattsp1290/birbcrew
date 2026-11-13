@@ -73,7 +73,7 @@ In addition to the runtime files above, the Pi worker may use only these:
 | --- | --- |
 | Read and execute the Node binary and anything under `/usr/lib`, `/usr/lib64` and `/lib64` | Node and its dynamic loader start the worker. Executing a file only replaces the worker, which cannot start another process. |
 | Read `package.json`, `node_modules` and `src/service` in the checkout | The worker loads the Pi SDK and Crew's Pi session code. It cannot read the rest of the checkout, such as `tests`, `docs` or a local `.env`. Keep profile modules and secrets out of these directories. |
-| Read, write, create and remove in one private directory | The Pi session needs a scratch working directory. It is the worker's `HOME`, `TMPDIR` and working directory, the host creates a new one for each invocation, and removes it after the worker exits. |
+| Read, write, create and remove in one private directory | The Pi session needs a scratch working directory. It is the worker's `HOME`, `TMPDIR` and working directory, the host creates a new one for each invocation, and removes it after the worker exits, even when the worker left a directory it cannot list or a tree deeper than `PATH_MAX`. |
 | Keep descriptor 3 | Model requests, text, tool calls and the result cross it. The launcher refuses to start a Pi worker unless descriptor 3 is a socket, and closes every other inherited descriptor; 0 to 2 are `/dev/null`. |
 
 For Pi the seccomp filter also refuses:
@@ -91,7 +91,18 @@ For Pi the seccomp filter also refuses:
   same user;
 - `fcntl(F_SETOWN)`, `fcntl(F_SETOWN_EX)`, `ioctl(FIOSETOWN)` and
   `ioctl(SIOCSPGRP)`, which would make the kernel signal another process;
-- `shmget`, `msgget`, `semget` and `mq_open`, whose objects outlive the worker.
+- `shmget`, `msgget`, `semget` and `mq_open`, whose objects outlive the worker;
+- `chmod`, `fchmodat`, `fchmodat2`, `utime`, `utimes`, `futimesat`,
+  `utimensat`, `setxattr`, `lsetxattr`, `removexattr`, `lremovexattr`,
+  `setxattrat` and `removexattrat`, because Landlock does not mediate file
+  metadata: without them the worker could change the mode of any file its user
+  owns, such as the native state volume;
+- `ptrace`.
+
+Landlock also does not mediate `stat`, `access`, `chdir` or `flock`, so the
+worker can still learn whether a path exists and read its metadata. The policy
+assumes that the service runs as a user without capabilities, as the service
+image does; the launcher does not drop privileges itself.
 
 The worker's environment holds only `HOME` and `TMPDIR`: no database URL and no
 provider key. The host makes each model request for the worker with the
@@ -103,9 +114,12 @@ trusted application turn 17, one for each of at most 16 tool calls and one for
 the reply, never two at once. The host publishes the reply text and the
 argument previews itself, from the events it relays, and fails the turn past
 65,536 bytes of text; the worker reports neither. The host runs each trusted
-application tool only for a call that the model sent through it in a reply that
-asks for tools, with the model's arguments coerced against the tool's schema as
-the agent does, and a failed dispatch fails the turn, as it did in process. It
+application tool only for a call that the model sent through it, in a reply
+that neither failed nor hit its token limit, as the agent requires, with the
+model's arguments coerced against the tool's schema as the agent does. A failed
+dispatch fails the turn, as it did in process. The worker still builds the
+model's context, so a call "the model sent" is one the worker led the model
+to send. It
 reads the worker's frames with a limit of 16 Mi characters, fails the turn if
 the worker leaves 64 MiB unread, and stops acting on frames after the first
 failure.
@@ -146,8 +160,9 @@ code instead of the worker entry. The probe gets `EACCES` when it reads a file
 outside its allowed set: a sibling owner's file, a test file in the same
 checkout, and its host's `/proc/<pid>/environ`. It gets `EPERM` when it
 connects to a listening loopback port, which received no connection, when it
-starts a process, and when it signals its host. It can still read Crew's code
-and write its private directory. The same test runs a real Pi turn and checks
+starts a process, when it signals its host, and when it changes the mode or
+times of a file its user owns. It can still read Crew's code and write its
+private directory. The same test runs a real Pi turn and checks
 that its worker has `no_new_privs`, one more seccomp filter than the test
 process, and only `HOME` and `TMPDIR` in its environment, and that the launcher
 refuses a Pi worker started without descriptor 3.

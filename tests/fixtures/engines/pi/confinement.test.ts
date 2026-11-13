@@ -15,7 +15,7 @@ import { createPiFixtureOptions } from "./index.mts";
 
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
 
-test("the confined Pi worker cannot read outside its code, open a socket, start a process or signal its host", { timeout: 20_000 }, async (t) => {
+test("the confined Pi worker cannot read outside its code, change other files, open a socket, start a process or signal its host", { timeout: 20_000 }, async (t) => {
   const scope = await mkdtemp(join(tmpdir(), "birb-pi-scope-"));
   t.after(() => rm(scope, { recursive: true, force: true }));
   const directory = join(scope, "conversation");
@@ -37,6 +37,8 @@ test("the confined Pi worker cannot read outside its code, open a socket, start 
     const result = Object.fromEntries(Object.entries(paths).map(([name, path]) => [name, attempt(() => fs.readFileSync(path))]));
     result.private = attempt(() => fs.writeFileSync("scratch", "own state"));
     result.signal = attempt(() => process.kill(process.ppid, 0));
+    result.mode = attempt(() => fs.chmodSync(${JSON.stringify(scope)}, 0o700));
+    result.times = attempt(() => fs.utimesSync(${JSON.stringify(sibling)}, 0, 0));
     result.process = require("node:child_process").spawnSync(process.execPath, ["-e", "0"]).error?.code ?? "allowed";
     const done = (tcp) => { fs.writeSync(3, JSON.stringify({ ...result, tcp }) + "\\n"); process.exit(0); };
     require("node:net").connect(${address.port}, "127.0.0.1").once("connect", () => done("allowed")).once("error", (error) => done(error.code));
@@ -48,9 +50,9 @@ test("the confined Pi worker cannot read outside its code, open a socket, start 
   const [code] = await once(child, "close");
   assert.equal(code, 0);
   // Landlock denies reads outside the code and the private directory; seccomp denies the socket, the new
-  // process and the signal to the host.
+  // process, the signal to the host and metadata changes to files the same user owns.
   assert.deepEqual(JSON.parse(output), { sibling: "EACCES", checkout: "EACCES", host: "EACCES", code: "allowed", private: "allowed",
-    signal: "EPERM", process: "EPERM", tcp: "EPERM" });
+    signal: "EPERM", mode: "EPERM", times: "EPERM", process: "EPERM", tcp: "EPERM" });
   assert.equal(connections, 0);
 
   const unconfined = piLaunch(directory, ["-e", "0"]);
