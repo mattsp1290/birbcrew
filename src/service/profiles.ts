@@ -20,17 +20,18 @@ export function memberProfiles(config: ReadonlyMap<string, MemberProfile>, state
     const tool = protectedTool ?? humanTool;
     const drivers: Partial<Record<Engine, TurnDriver>> = {};
     if (pi) drivers.pi = async (input) => {
+      const member = { ...pi, invocationGroup };
       if (input.childProfile) {
         const child = input.childProfile;
         if (!delegateTask || child.model !== pi.model.id || (child.tools.length && !protectedTool)) {
           throw new Error("Child profile differs from member");
         }
-        const options = { ...pi, instructions: child.instructions };
+        const options = { ...member, instructions: child.instructions };
         return child.tools.includes("record_work_item") ? runPiSegment(input, options) :
           { kind: "complete", ...await runPiTurn(input, options) };
       }
-      if (delegateTask) return runPiDelegatingSegment(input, { ...pi, allowRecordWorkItem: !!protectedTool });
-      return tool ? runPiSegment(input, pi, tool) : { kind: "complete", ...await runPiTurn(input, pi) };
+      if (delegateTask) return runPiDelegatingSegment(input, { ...member, allowRecordWorkItem: !!protectedTool });
+      return tool ? runPiSegment(input, member, tool) : { kind: "complete", ...await runPiTurn(input, member) };
     };
     if (claude) drivers.claude = async (input, { ownerId, memberId }) => {
       const options = { ...claude, ownerId, memberId, stateDir, invocationGroup };

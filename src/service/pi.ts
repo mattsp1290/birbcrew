@@ -6,7 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTranslator, toAguiMessages, type HistoryEntry } from "@ag-ui/pi";
-import { createDelegationBatch, delegationToolName, delegationToolResults } from "@birbcrew/pi-subagents";
+import { createDelegationBatch, delegationToolName, delegationToolResults, type Delegation } from "@birbcrew/pi-subagents";
 import { contentText, type Api, type Model } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
@@ -21,6 +21,7 @@ import type { DriverInput, DriverResult } from "./activities.ts";
 import { nativeProposal, toolNameSchema, type DeferredTool } from "./deferral.ts";
 import { continueSession, nativeCall, proposalTool, toolResult } from "./pi-tools.ts";
 import { checkpointSchema } from "./domain.ts";
+import { runPiWorker } from "./pi-launch.ts";
 import { piUsage } from "./usage-capture.ts";
 
 const textPart = z.object({ type: z.literal("text"), text: z.string(), textSignature: z.string().optional() });
@@ -81,7 +82,10 @@ export interface PiProfile {
   modelRuntime: ModelRuntime;
   instructions?: string;
   allowRecordWorkItem?: boolean;
+  /** Runs on the host. Its extension may register only provider request hooks (pi-launch.ts). */
   prepare?: () => Promise<{ extension: ExtensionFactory; verify: () => void }>;
+  /** The supervised process group the confined worker joins; without it the worker gets its own group. */
+  invocationGroup?: number;
 }
 
 function onlyCall(pending: Pending) {
@@ -99,22 +103,57 @@ function privateCheckpoint(state: PiState) {
 }
 
 export function runPiDelegatingSegment(input: DriverInput, profile: PiProfile) {
-  return runSegment(input, profile, "delegating");
+  return confinedSegment(input, profile, "delegating");
 }
 
 export async function runPiSegment(input: DriverInput, profile: PiProfile, tool: DeferredTool = "record_work_item") {
-  const segment = await runSegment(input, profile, tool);
+  const segment = await confinedSegment(input, profile, tool);
   if (segment.kind === "delegated") throw new Error("Unexpected Pi delegation in a protected session");
   return segment;
 }
 
 export async function runPiTurn(input: DriverInput, profile: PiProfile) {
-  const segment = await runSegment(input, profile, "text");
+  const segment = await confinedSegment(input, profile, "text");
   if (segment.kind !== "complete") throw new Error("Unexpected Pi tool proposal on a text turn");
   return { text: segment.text, checkpoint: segment.checkpoint, usage: segment.usage };
 }
 
-async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" | DeferredTool | "delegating") {
+const piCheckpoint = z.strictObject({ version: z.literal(1), engine: z.literal("pi"), state: z.unknown() });
+const delegation = z.strictObject({
+  nativeCallId: z.string().min(1).max(256), task: z.string().min(1).max(4096),
+  profile: z.strictObject({ role: z.enum(["analyst", "recorder"]), version: z.literal(1), instructions: z.string().min(1),
+    model: z.string().min(1), tools: z.array(z.literal("record_work_item")).max(1) }),
+});
+const workerSegment = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("complete"), text: z.string().min(1).refine((s) => Buffer.byteLength(s) <= 65_536),
+    checkpoint: piCheckpoint, usage: z.unknown() }),
+  z.strictObject({ kind: z.literal("pending"), proposal: nativeProposal, checkpoint: piCheckpoint, usage: z.unknown() }),
+  z.strictObject({ kind: z.literal("delegated"), proposals: z.array(delegation).min(1).max(2), checkpoint: piCheckpoint, usage: z.unknown() }),
+]);
+
+// The worker repeats every check below; the host does not trust its answer. Usage comes from what the host relayed.
+async function confinedSegment(input: DriverInput, profile: PiProfile, mode: "text" | DeferredTool | "delegating") {
+  const { threadId, runId, text, projectContext, childResults, continuation } = input;
+  const { result, observed } = await runPiWorker({
+    kind: "member", mode, instructions: profile.instructions, allowRecordWorkItem: profile.allowRecordWorkItem,
+    input: { threadId, runId, text, checkpoint: input.checkpoint, projectContext, childResults, continuation },
+  }, { profile, signal: input.signal, modelRequests: 1, onText: input.onText, onToolArgs: input.onToolArgs });
+  const segment = workerSegment.parse(result);
+  const tool = mode === "delegating" ? (profile.allowRecordWorkItem ? "record_work_item" : undefined) : mode === "text" ? undefined : mode;
+  if (segment.kind === "delegated" ? mode !== "delegating" || segment.proposals.some((p) =>
+        p.profile.model !== profile.model.id || (p.profile.tools.length > 0 && !profile.allowRecordWorkItem)) :
+      segment.kind === "pending" && (segment.proposal.name !== tool ||
+        (segment.proposal.name === "record_work_item" && segment.proposal.arguments.operation_id !== runId))) {
+    throw new Error("Pi worker returned a result outside its segment");
+  }
+  const checkpoint = privateCheckpoint(segment.checkpoint.state as PiState), usage = piUsage(observed);
+  return segment.kind === "delegated"
+    ? { ...segment, proposals: segment.proposals as Delegation[], checkpoint, usage }
+    : { ...segment, checkpoint, usage };
+}
+
+/** Runs only inside the confined worker (pi-worker.ts); callers use the exported segment functions above. */
+export async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" | DeferredTool | "delegating") {
   input.signal.throwIfAborted();
   const prior = input.checkpoint;
   if (prior !== null) assertNativeJsonBudget(prior, nativeCheckpointBytes, "Pi checkpoint");

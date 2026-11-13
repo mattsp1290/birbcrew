@@ -5,10 +5,24 @@ import { join } from "node:path";
 import { createAgentSession,DefaultResourceLoader,SessionManager,SettingsManager,type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { z } from "zod";
 import type { PiProfile } from "./pi.ts";
+import { runPiWorker } from "./pi-launch.ts";
 import type { TrustedNativeInput } from "./trusted-native-types.ts";
 
 const stateSchema=z.strictObject({sessionId:z.uuid(),messages:z.array(z.json()).max(256)});
+const workerTurn=z.strictObject({text:z.string().min(1).refine(text=>Buffer.byteLength(text)<=65536),checkpoint:stateSchema});
+
+/** The SDK runs in a confined worker; registered tools still run here, through input.dispatch. */
 export async function runTrustedPi(input:TrustedNativeInput,profile:PiProfile) {
+  const {text,context,checkpoint,tools}=input;
+  // trusted-native.ts allows 16 tool calls; each result and the final reply need a model request.
+  const {result}=await runPiWorker({kind:"trusted",instructions:profile.instructions,input:{text,context,checkpoint,tools}},
+    {profile,signal:input.signal,modelRequests:17,onText:input.onText,dispatch:input.dispatch,onToolDelivered:input.onToolDelivered});
+  return workerTurn.parse(result);
+}
+
+type SessionInput=Pick<TrustedNativeInput,"text"|"context"|"checkpoint"|"tools"|"signal"|"dispatch"|"onText"|"onToolDelivered">;
+/** Runs only inside the confined worker (pi-worker.ts). */
+export async function runTrustedSession(input:SessionInput,profile:PiProfile) {
   const state=input.checkpoint === null ? {sessionId:randomUUID(),messages:[]} : stateSchema.parse(input.checkpoint);
   const cwd=await mkdtemp(join(tmpdir(),"birb-trusted-pi-"));
   const prepared=await profile.prepare?.();
