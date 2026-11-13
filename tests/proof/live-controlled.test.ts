@@ -33,7 +33,7 @@ test("live preflight requires a private owner decision for exactly one provider,
   await assert.rejects(authorizeLive(gate.args, { OPENAI_API_KEY: "ignored" }));
   // A dated account statement is not a proof approval: its fields are unknown here, whatever they say.
   for (const invalid of [{ approved_live_proof: false }, { endpoint: "https://example.invalid" }, { max_requests: 25 },
-    { model: "other" }, { account: " " }, { checked_at: new Date().toISOString() }, { evidence: "console check" },
+    { model: "other" }, { account: " " }, { checked_at: "2020-01-01T00:00:00Z" }, { evidence: "console check" },
     { extra_usage_disabled: true }, { eligible_coding_use: true }]) {
     await gate.write(invalid);
     await assert.rejects(authorizeLive(gate.args, gate.env, gate.claims));

@@ -9,9 +9,11 @@ new member to select a different model or engine.
 
 The worker reads one setting, `BIRBCREW_LIVE_PROFILES`. Its value is a JSON object
 with one entry for each engine this worker serves. Nothing else selects a live
-profile. Without the variable, with a value that is not valid, or without a
-configured engine's credential, the worker stops at startup. It never starts with
-fewer profiles than the setting names.
+profile. Without the variable, with a value that is not valid, or without the API
+key of a configured engine, the worker stops at startup. It never starts with
+fewer profiles than the setting names. A Codex subscription has no API key. The
+worker reads its sign-in on every turn, and a turn fails when the sign-in is
+missing, expired or belongs to another account.
 
 ```json
 {
@@ -21,7 +23,9 @@ fewer profiles than the setting names.
 }
 ```
 
-Unknown keys are refused. The setting carries no date and does not expire.
+Unknown keys are refused. The setting carries no date and does not expire. The
+credentials it points at are real ones and keep their own lifetimes: a provider
+can revoke a key, and a Codex sign-in must stay current.
 
 1. `account` is a label you choose for the account, without a secret. The worker
    stores its digest with each registered profile and refuses to start when a

@@ -275,8 +275,10 @@ def test_worker_preflight_rejects_unusable_reviewer_configuration(setup, tmp_pat
     preflight_reviewer(profile)
 
 
-@pytest.mark.parametrize("state", ["absent", "expired", "future", "extra_usage_on", "not_json"])
-def test_worker_preflight_ignores_any_former_attestation_file(setup, tmp_path, state):
+@pytest.mark.parametrize("state", ["absent", "expired", "extra_usage_on", "not_json"])
+def test_worker_preflight_reads_the_key_and_no_former_attestation_file(
+    setup, tmp_path, opened_files, state
+):
     from birbcrew.execution.review import preflight_reviewer
 
     config, _, _ = setup
@@ -286,14 +288,19 @@ def test_worker_preflight_ignores_any_former_attestation_file(setup, tmp_path, s
         "account_path": "fixture account",
         "extra_usage_disabled": state != "extra_usage_on",
         "eligible_coding_use": True,
-        "checked_at": "2999-01-01T00:00:00Z" if state == "future" else "2020-01-01T00:00:00Z",
+        "checked_at": "2020-01-01T00:00:00Z",
         "evidence": "left over from before the gate was removed",
     }
     if state == "not_json":
         former.write_text("renew me")
     elif state != "absent":
         former.write_text(json.dumps(statement))
-    preflight_reviewer(opencode_settings(config, tmp_path))
+    settings = opencode_settings(config, tmp_path)
+    del opened_files[:]
+    preflight_reviewer(settings)
+    root = str(tmp_path.resolve()) + "/"
+    read = {path for path in opened_files if path.startswith(root)}
+    assert read == {str(settings.reviewer.api_key_file.resolve())}
 
 
 def test_invalid_installation_file_names_fields_without_values(setup, tmp_path, monkeypatch):

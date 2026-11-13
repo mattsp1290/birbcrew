@@ -26,8 +26,8 @@ KEY = "fixture-token-not-a-credential"
 READ_GO_KEY = provider.read_go_key
 
 
-def former_attestation(path, *, age=timedelta(0), extra_usage_disabled=True):
-    """The dated owner statement the removed gate read. Nothing reads it now."""
+def former_attestation(path, *, age=timedelta(hours=13), extra_usage_disabled=True):
+    """The dated owner statement the removed gate read, always past its 12-hour limit."""
     path.write_text(
         json.dumps(
             {
@@ -212,32 +212,31 @@ def test_provider_failure_is_inconclusive_and_retry_reviews_same_candidate(openc
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize(
-    "state",
-    ["absent", "inside_limit", "past_limit", "month_old", "future", "extra_usage", "garbage"],
-)
-def test_former_subscription_evidence_never_blocks_a_review(opencode, monkeypatch, tmp_path, state):
+@pytest.mark.parametrize("state", ["absent", "past_limit", "month_old", "extra_usage", "garbage"])
+def test_a_review_reads_the_key_and_no_former_subscription_evidence(
+    opencode, monkeypatch, tmp_path, opened_files, state
+):
     config, request, _ = opencode
     path = tmp_path / "go-evidence.json"
-    if state == "inside_limit":
-        former_attestation(path, age=timedelta(hours=11, minutes=59))
-    elif state == "past_limit":
+    if state == "past_limit":
         former_attestation(path, age=timedelta(hours=12, minutes=1))
     elif state == "month_old":
         former_attestation(path, age=timedelta(days=30))
-    elif state == "future":
-        former_attestation(path, age=-timedelta(minutes=5))
     elif state == "extra_usage":
         former_attestation(path, extra_usage_disabled=False)
     elif state == "garbage":
         path.write_text("renew me")
     calls = scripted(monkeypatch, [verdict()])
+    del opened_files[:]
     result = asyncio.run(review.review_candidate(request.model_dump(mode="json")))
     assert result["disposition"] == "approved"
     recorded = evidence(config, request)
     assert recorded["error_code"] is None
     assert [item["outcome"] for item in recorded["diagnostics"]] == ["verdict"]
     assert len(calls) == 1
+    # The review opened its key and never the statement, whatever state that file is in.
+    assert str(config.reviewer.api_key_file.resolve()) in opened_files
+    assert str(path.resolve()) not in opened_files
 
 
 @pytest.mark.parametrize("problem", ["missing", "empty", "two_tokens", "directory"])

@@ -253,9 +253,10 @@ Claude is not covered here. The worker loads profiles from
 
 Set `BIRBCREW_LIVE_PROFILES` to one JSON object with an entry for each engine
 this worker serves. The worker stops at startup when the variable is unset or
-invalid, or when a configured engine's credential is missing. No file mount is
-needed and nothing in the setting expires. The value names accounts, so supply
-it from a Secret.
+invalid, or when a configured engine's API key is missing. The Codex sign-in is
+read on every turn instead, and a turn fails without a current sign-in for the
+configured account. The setting itself needs no file or volume and does not
+expire. The value names accounts, so supply it from a Secret.
 
 ```json
 {"pi": {"provider": "opencode-go", "account": "ACCOUNT LABEL"},

@@ -8,7 +8,8 @@ export const userAgent = "birbcrew-coding-proof/0.1.0";
 export const codexSubscriptionEndpoint = "https://chatgpt.com/backend-api/codex";
 
 // A label the operator chooses for the account. Its digest binds registered profiles and native state to that account.
-const account = z.string().trim().min(1).max(200);
+// Trimmed and non-empty, exactly as the label was read before, so an existing registration keeps its digest.
+const account = z.string().trim().min(1).max(4096);
 const codexModel = z.string().regex(/^gpt-[a-z0-9.-]+$/).max(90);
 export const goAccount = z.strictObject({ provider: z.literal("opencode-go"), account });
 export const claudeAccount = z.strictObject({
@@ -30,7 +31,7 @@ export const liveProfiles = z.strictObject({
 export type LiveProfiles = z.infer<typeof liveProfiles>;
 export const liveProfilesVariable = "BIRBCREW_LIVE_PROFILES";
 
-/** Reads the one explicit live setting. Nothing is inferred from other variables, and errors never quote a value. */
+/** Reads the one explicit live setting. Nothing is inferred from other variables. Errors name fields and unknown keys, never a value. */
 export function readLiveProfiles(env: NodeJS.ProcessEnv): LiveProfiles {
   const text = env[liveProfilesVariable];
   if (!text?.trim()) {

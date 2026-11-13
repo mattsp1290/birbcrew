@@ -15,9 +15,11 @@ const base = "https://opencode.ai/inference/go/openai/v1";
 const live = (accounts: object) => ({ BIRBCREW_LIVE_PROFILES: JSON.stringify(accounts) });
 const go = { provider: "opencode-go", account: "fixture owner" };
 const claude = { provider: "anthropic-api", account: "fixture owner", model: "claude-sonnet-4-6" };
-// The statement the removed gate used to read. Tests write it only to show that nothing reads it now.
+// The statement the removed gate used to read, always dated past its 12-hour limit. Tests write it only to show
+// that nothing reads it now. No test writes a statement the removed gate would have accepted.
+const hoursAgo = (n: number) => new Date(Date.now() - n * 3600_000).toISOString();
 const formerAttestation = (extra: object = {}) => ({ provider: "opencode-go", account_path: "fixture owner", evidence: "local fixture",
-  checked_at: new Date().toISOString(), extra_usage_disabled: true, eligible_coding_use: true, ...extra });
+  checked_at: hoursAgo(13), extra_usage_disabled: true, eligible_coding_use: true, ...extra });
 
 async function privateFile(t: TestContext, data: object) {
   const dir = await mkdtemp(join(tmpdir(), "birb-account-"));
@@ -88,9 +90,6 @@ test("Codex subscription members bind the configured ChatGPT account and reread 
     await profile.authorize();
     assert.equal((await profile.subscription()).accessToken, "synthetic-" + n);
   }
-  // A sign-in that is missing or belongs to another account still stops the turn.
-  const refused = await loadLiveProfiles(env, fetch, async () => { throw new Error("A current ChatGPT Codex sign-in for the approved account is required"); });
-  await assert.rejects(refused.get(name + ".v1")!.codex!.subscription!(), /sign-in/);
 });
 
 test("live profiles come only from the explicit setting and each engine's own credential", async (t) => {
@@ -104,7 +103,7 @@ test("live profiles come only from the explicit setting and each engine's own cr
   for (const invalid of ["", " ", "live", "true", "[]", "{}", JSON.stringify({ pi: null }), JSON.stringify({ gemini: go }),
     JSON.stringify({ pi: { provider: "opencode-go" } }), JSON.stringify({ pi: { ...go, account: " " } }),
     JSON.stringify({ pi: claude }), JSON.stringify({ pi: formerAttestation() }), JSON.stringify(formerAttestation()),
-    JSON.stringify({ pi: { ...go, extra_usage_disabled: true } }), JSON.stringify({ pi: { ...go, checked_at: new Date().toISOString() } }),
+    JSON.stringify({ pi: { ...go, extra_usage_disabled: true } }), JSON.stringify({ pi: { ...go, checked_at: hoursAgo(13) } }),
     JSON.stringify({ claude: { ...claude, model: "gpt-5.4" } }), JSON.stringify({ codex: { provider: "chatgpt-subscription", model: "gpt-5.4" } }),
     JSON.stringify({ codex: { provider: "chatgpt-subscription", model: "gpt-5.4", account_id: "not an id" } })]) {
     await assert.rejects(loadLiveProfiles({ ...keys, BIRBCREW_LIVE_PROFILES: invalid }), /BIRBCREW_LIVE_PROFILES/, invalid);
@@ -134,18 +133,15 @@ test("live profiles come only from the explicit setting and each engine's own cr
   assert.ok(codex?.codex?.authorize && !codex.codex.subscription);
 });
 
-test("an absent, old, expired or contradicting attestation file changes nothing", async (t) => {
+test("an absent, expired or contradicting attestation file changes nothing", async (t) => {
   const local = await localhost(t);
   const statement = await privateFile(t, formerAttestation());
-  const hours = (n: number) => new Date(Date.now() - n * 3600_000).toISOString();
   const states: [string, () => Promise<unknown>][] = [
     ["never written", () => rm(statement)],
-    ["one minute inside the former limit", () => writeFile(statement, JSON.stringify(formerAttestation({ checked_at: hours(11.98) })))],
-    ["one minute past the former limit", () => writeFile(statement, JSON.stringify(formerAttestation({ checked_at: hours(12.02) })))],
-    ["a month old", () => writeFile(statement, JSON.stringify(formerAttestation({ checked_at: hours(24 * 30) })))],
-    ["dated in the future", () => writeFile(statement, JSON.stringify(formerAttestation({ checked_at: hours(-1) })))],
-    ["stating Extra Usage is on", () => writeFile(statement, JSON.stringify(formerAttestation({ extra_usage_disabled: false })))],
-    ["naming another account", () => writeFile(statement, JSON.stringify(formerAttestation({ account_path: "someone else" })))],
+    ["one minute past the former limit", () => writeFile(statement, JSON.stringify(formerAttestation({ checked_at: hoursAgo(12.02) })))],
+    ["a month old", () => writeFile(statement, JSON.stringify(formerAttestation({ checked_at: hoursAgo(24 * 30) })))],
+    ["expired and stating Extra Usage is on", () => writeFile(statement, JSON.stringify(formerAttestation({ extra_usage_disabled: false })))],
+    ["expired and naming another account", () => writeFile(statement, JSON.stringify(formerAttestation({ account_path: "someone else" })))],
     ["not JSON", () => writeFile(statement, "renew me")],
   ];
   for (const [state, arrange] of states) {

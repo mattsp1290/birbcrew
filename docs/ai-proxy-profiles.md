@@ -2,7 +2,7 @@
 
 This is the supported **custom profile** path for the AI proxy request
 `birbcrew-r-ooha`. It is independent of the built-in direct-provider and ChatGPT
-subscription profiles in `providers.ts`. It does not read their
+subscription profiles that `providers.ts` exports. It does not read their
 `BIRBCREW_LIVE_PROFILES` setting, use their auth files, or fall back to them.
 
 ## Exact protocol contract

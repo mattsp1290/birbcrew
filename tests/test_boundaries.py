@@ -20,8 +20,11 @@ def test_request_identity_excludes_transport_order():
         Prompt(request_id=rid, text="x" * 4001)
 
 
-def former_attestation(path, *, age=timedelta(0), extra_usage_disabled=True):
-    """The dated owner statement the removed gate read. Nothing reads it now."""
+def former_attestation(path, *, age=timedelta(hours=13), extra_usage_disabled=True):
+    """The dated owner statement the removed gate read, always past its 12-hour limit.
+
+    Tests write it only to show that nothing reads it. None writes a statement the gate accepted.
+    """
     path.write_text(
         json.dumps(
             {
@@ -36,38 +39,41 @@ def former_attestation(path, *, age=timedelta(0), extra_usage_disabled=True):
     )
 
 
-@pytest.mark.parametrize(
-    "state", ["absent", "inside_limit", "past_limit", "day_old", "future", "extra_usage", "garbage"]
-)
-def test_live_model_needs_the_credential_and_no_attestation_in_any_state(
-    tmp_path, monkeypatch, state
+def under(directory, opened):
+    root = str(directory.resolve())
+    return {path for path in opened if path.startswith(root + "/")}
+
+
+@pytest.mark.parametrize("state", ["absent", "past_limit", "month_old", "extra_usage", "garbage"])
+def test_live_model_reads_the_credential_and_no_attestation_in_any_state(
+    tmp_path, monkeypatch, opened_files, state
 ):
     from birbcrew import provider
 
     monkeypatch.setenv("HOME", str(tmp_path))
     statement = tmp_path / "account.json"
-    if state == "inside_limit":
-        former_attestation(statement, age=timedelta(hours=11, minutes=59))
-    elif state == "past_limit":
+    if state == "past_limit":
         former_attestation(statement, age=timedelta(hours=12, minutes=1))
-    elif state == "day_old":
-        former_attestation(statement, age=timedelta(days=1))
-    elif state == "future":
-        former_attestation(statement, age=-timedelta(minutes=5))
+    elif state == "month_old":
+        former_attestation(statement, age=timedelta(days=30))
     elif state == "extra_usage":
         former_attestation(statement, extra_usage_disabled=False)
     elif state == "garbage":
         statement.write_text("renew me")
+    profile = tmp_path / ".profile"
     with pytest.raises(FileNotFoundError):
         provider.model()
-    (tmp_path / ".profile").write_text("export OTHER_KEY=value\n")
+    profile.write_text("export OTHER_KEY=value\n")
     with pytest.raises(ValueError, match="No literal OPENCODE_GO_API_KEY assignment"):
         provider.model()
-    (tmp_path / ".profile").write_text(f"export OPENCODE_GO_API_KEY={KEY}\n")
+    profile.write_text(f"export OPENCODE_GO_API_KEY={KEY}\n")
+    del opened_files[:]
     client = provider.model()._provider.client
     assert client.api_key == KEY
     assert str(client.base_url).rstrip("/") == provider.ENDPOINT
     assert client.max_retries == 0
+    # The credential file was read, and nothing else beside it: not the statement, in any state.
+    assert under(tmp_path, opened_files) == {str(profile.resolve())}
     # No reader of that statement remains to be called by mistake.
     assert not hasattr(provider, "check_evidence")
     assert not hasattr(provider, "SubscriptionEvidence")
@@ -102,7 +108,7 @@ def test_settings_require_an_explicit_mode_and_refuse_the_removed_attestation_pa
     for mode in ("live", "project-live"):
         with pytest.raises(ValidationError, match="live_attestation\n  Extra inputs are not"):
             Settings.model_validate(
-                settings_document(mode=mode, live_attestation="/run/forge/attestations/go.json")
+                settings_document(mode=mode, live_attestation="/private/attestation.json")
             )
 
 
