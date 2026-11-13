@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { contentText } from "@earendil-works/pi-ai";
 import { createAgentSession,DefaultResourceLoader,SessionManager,SettingsManager,type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { z } from "zod";
 import type { PiProfile } from "./pi.ts";
@@ -11,13 +13,19 @@ import type { TrustedNativeInput } from "./trusted-native-types.ts";
 const stateSchema=z.strictObject({sessionId:z.uuid(),messages:z.array(z.json()).max(256)});
 const workerTurn=z.strictObject({text:z.string().min(1).refine(text=>Buffer.byteLength(text)<=65536),checkpoint:stateSchema});
 
-/** The SDK runs in a confined worker; registered tools still run here, through input.dispatch. */
+/** The SDK runs in a confined worker; registered tools still run here, through input.dispatch. The reply
+ * must be the text the model sent through this host, and the checkpoint must extend the prior one. */
 export async function runTrustedPi(input:TrustedNativeInput,profile:PiProfile) {
   const {text,context,checkpoint,tools}=input;
   // trusted-native.ts allows 16 tool calls; each result and the final reply need a model request.
-  const {result}=await runPiWorker({kind:"trusted",instructions:profile.instructions,input:{text,context,checkpoint,tools}},
+  const {result,observed,streamed}=await runPiWorker({kind:"trusted",instructions:profile.instructions,input:{text,context,checkpoint,tools}},
     {profile,signal:input.signal,modelRequests:17,onText:input.onText,dispatch:input.dispatch,onToolDelivered:input.onToolDelivered});
-  return workerTurn.parse(result);
+  const turn=workerTurn.parse(result);
+  const prior=checkpoint === null ? undefined : stateSchema.parse(checkpoint);
+  if(turn.text!==streamed || turn.text!==observed.map(message=>contentText(message.content,"")).join("") ||
+     (prior && (turn.checkpoint.sessionId!==prior.sessionId || !isDeepStrictEqual(turn.checkpoint.messages.slice(0,prior.messages.length),prior.messages))))
+    throw new Error("Trusted Pi worker returned a turn outside its request");
+  return turn;
 }
 
 type SessionInput=Pick<TrustedNativeInput,"text"|"context"|"checkpoint"|"tools"|"signal"|"dispatch"|"onText"|"onToolDelivered">;
