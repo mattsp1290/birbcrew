@@ -136,7 +136,10 @@ enforce the rest whoever writes:
 - A member has each pack at most once and at most eight.
 
 The shared byte budget is checked by the API only, not by the database. A direct database
-writer that exceeds it still meets the open-time size check below.
+writer that exceeds it still meets the open-time size check below. Like the triggers of
+member instructions, memory and webhooks, these checks rely on PostgreSQL's default
+READ COMMITTED isolation: under a higher `default_transaction_isolation`, a delete could
+miss an attachment that committed while it waited for the pack's row.
 
 `GET /v1/members` lists each member's `instructionPacks` IDs, in order, beside its
 instructions summary; members without packs are listed exactly as before.

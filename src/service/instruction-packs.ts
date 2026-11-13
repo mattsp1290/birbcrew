@@ -67,8 +67,11 @@ type PackRow = {
   pack_id: string; owner_id: string; create_request_id: string; name: string | null; description: string | null; body: string | null;
   state: "active" | "deleted"; created_at: Date; deleted_at: Date | null; member_count: number; summary: InstructionsSummary | null;
 };
-// The members a pack is attached to, and its byte count and digest while it has text.
-const packSelection = `SELECT i.*, (SELECT count(*)::integer FROM birbcrew_ts.member_instruction_packs a WHERE a.pack_id=i.pack_id) AS member_count,
+// The members a pack is attached to, and its byte count and digest while it has text. A listing
+// leaves the text in the database: a page of 100 full packs would carry 1.6 MB the gateway drops.
+const packSelection = (withText: boolean) => `SELECT i.pack_id, i.owner_id, i.create_request_id, i.name, i.description,
+    ${withText ? "i.body" : "NULL::text AS body"}, i.state, i.created_at, i.deleted_at,
+    (SELECT count(*)::integer FROM birbcrew_ts.member_instruction_packs a WHERE a.pack_id=i.pack_id) AS member_count,
     CASE WHEN i.body IS NOT NULL THEN ${instructionsSummarySql} END AS summary
   FROM birbcrew_ts.instruction_packs i`;
 
@@ -100,7 +103,7 @@ export class PackApi {
   async create(ownerId: string, input: unknown) {
     const body = createSchema.parse(input);
     return this.store.transaction(async db => {
-      const existing = async () => (await db.query<PackRow>(`${packSelection} WHERE i.owner_id=$1 AND i.create_request_id=$2`,
+      const existing = async () => (await db.query<PackRow>(`${packSelection(true)} WHERE i.owner_id=$1 AND i.create_request_id=$2`,
         [ownerId, body.requestId])).rows[0];
       const replay = (row: PackRow) => {
         if (row.state === "deleted") throw new MemberStoreError("pack_deleted");
@@ -130,7 +133,7 @@ export class PackApi {
   async list(ownerId: string, input: unknown) {
     const query = listQuery.parse(input);
     const limit = query.limit ?? packLimits.pageSize;
-    const { rows } = await this.store.pool.query<PackRow>(`${packSelection}
+    const { rows } = await this.store.pool.query<PackRow>(`${packSelection(false)}
       WHERE i.owner_id=$1 AND ($2::uuid IS NULL OR i.pack_id>$2) ORDER BY i.pack_id LIMIT $3`, [ownerId, query.after ?? null, limit + 1]);
     const instructionPacks = rows.slice(0, limit).map(row => packView(row, false));
     return { apiVersion: "1" as const, instructionPacks, nextAfter: instructionPacks.at(-1)?.packId ?? query.after ?? null,
@@ -156,7 +159,7 @@ export class PackApi {
   }
 
   private async owned(db: Queryable, ownerId: string, packId: string, lock = false) {
-    const { rows: [row] } = await db.query<PackRow>(`${packSelection} WHERE i.owner_id=$1 AND i.pack_id=$2 ${lock ? "FOR UPDATE OF i" : ""}`,
+    const { rows: [row] } = await db.query<PackRow>(`${packSelection(true)} WHERE i.owner_id=$1 AND i.pack_id=$2 ${lock ? "FOR UPDATE OF i" : ""}`,
       [ownerId, lowerUuid.parse(packId)]);
     if (!row) throw new MemberStoreError("not_found");
     return row;

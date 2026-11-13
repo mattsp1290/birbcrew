@@ -201,8 +201,20 @@ test("pack fields follow memory's character rules, and an owner has at most 32 a
   assert.equal(await active(), 32);
   const kept = outcomes.find(outcome => outcome.status === 201)!.body;
   assert.equal((await g.api(`/v1/instruction-packs/${kept.packId}`, undefined, g.token, "DELETE")).status, 200);
-  assert.equal((await g.api("/v1/instruction-packs", fresh({}))).status, 201);
+  const last = fresh({});
+  const lastPack = await g.api("/v1/instruction-packs", last);
+  assert.equal(lastPack.status, 201);
   assert.deepEqual((await g.api("/v1/instruction-packs", fresh({}))).body, { error: "pack_limit" });
+  // The cap trigger skips the inserting request's own pack, so a duplicate at the cap meets its unique key, not the cap.
+  await assert.rejects(pool.query("INSERT INTO birbcrew_ts.instruction_packs (owner_id,create_request_id,name,body) VALUES ($1,$2,'n','t')",
+    [g.ownerId, last.requestId]), { code: "23505" });
+  // Concurrent duplicates of the create that reaches the cap: one pack, and every copy answers as it.
+  await g.api(`/v1/instruction-packs/${lastPack.body.packId}`, undefined, g.token, "DELETE");
+  const racing = fresh({});
+  const copies = await Promise.all(Array.from({ length: 8 }, () => g.api("/v1/instruction-packs", racing)));
+  assert.deepEqual(new Set(copies.map(copy => `${copy.status} ${copy.body.packId}`)).size, 1);
+  assert.equal(copies[0].status, 201);
+  assert.equal(await active(), 32);
   // Another owner's cap is their own.
   await g.pack("theirs", "theirs", g.stranger);
 });
@@ -309,9 +321,11 @@ test("the owner reads a member's packs with its instructions; listings carry IDs
   assert.deepEqual(strangerList.body.instructionPacks.map((pack: { packId: string }) => pack.packId), [theirs.packId]);
   assert.deepEqual((await g.api("/v1/instruction-packs")).body.instructionPacks.map((pack: { packId: string }) => pack.packId).sort(),
     [a.packId, b.packId].sort());
-  // Even with the other owner's position as the cursor.
-  assert.deepEqual((await g.api(`/v1/instruction-packs?after=${"0".repeat(8)}-0000-4000-8000-${"0".repeat(12)}`, undefined, g.stranger)).body
-    .instructionPacks.map((pack: { packId: string }) => pack.packId), [theirs.packId]);
+  // Even with the owner's own pack IDs as the stranger's cursor: only the stranger's packs after it.
+  for (const cursor of [a.packId, b.packId]) {
+    assert.deepEqual((await g.api(`/v1/instruction-packs?after=${cursor}`, undefined, g.stranger)).body.instructionPacks
+      .map((pack: { packId: string }) => pack.packId), theirs.packId > cursor ? [theirs.packId] : [], cursor);
+  }
   const strangerAudit = (await g.api("/v1/audit?limit=1000", undefined, g.stranger)).body.events;
   assert.deepEqual(strangerAudit.map((event: { type: string }) => event.type), ["instruction_pack.created"]);
   assert.deepEqual(strangerAudit[0].payload, { packId: theirs.packId });
