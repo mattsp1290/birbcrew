@@ -23,6 +23,7 @@ import { MemberStore, ownerAdmissionActivity } from "../../src/service/store.ts"
 import type { Launch } from "../../src/service/supervisor.ts";
 import { recordSegmentUsage, UsageApi } from "../../src/service/usage.ts";
 import type { SegmentUsage } from "../../src/service/usage-capture.ts";
+import type { PriceTable } from "../../src/service/usage-prices.ts";
 
 const url = process.env.BIRBCREW_TEST_DATABASE_URL;
 if (!url) throw new Error("Set BIRBCREW_TEST_DATABASE_URL to a disposable PostgreSQL database.");
@@ -137,10 +138,10 @@ async function launched(db: MemberStore, ownerId: string, conversationId: string
     checkpoint: { version: 1, engine: turn.conversation.engine, state: {} } }) };
 }
 /** One finished segment that reported `usage`, in a conversation of its own. */
-async function spend(db: MemberStore, owner: { ownerId: string; memberId: string }, usage?: SegmentUsage) {
+async function spend(db: MemberStore, owner: { ownerId: string; memberId: string }, usage?: SegmentUsage, prices: PriceTable | null = null) {
   const conversationId = await conversation(db, owner);
   const segment = await launched(db, owner.ownerId, conversationId);
-  await recordSegmentUsage(db.pool, segment.launch, usage);
+  await recordSegmentUsage(db.pool, segment.launch, usage, prices);
   await segment.commit();
   return { conversationId, requestId: segment.request.requestId };
 }
@@ -236,16 +237,17 @@ test("the usage routes total an owner's usage by member and conversation, mark r
   await spend(store, stranger, reported(7777, 7));
 
   const zero = { segments: 0, unknownSegments: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0,
-    cacheWriteTokens: 0, reasoningTokens: 0, costUsd: null, costReportedSegments: 0 };
+    cacheWriteTokens: 0, reasoningTokens: 0, costUsd: null, costReportedSegments: 0, estimatedCostUsd: null, costEstimatedSegments: 0 };
   const routineTotals = { ...zero, segments: 1, inputTokens: 50, outputTokens: 5, totalTokens: 55 };
   const summary = await g.api("/v1/usage");
   assert.deepEqual(summary, { status: 200, body: { apiVersion: "1", from: null, to: null,
     total: { segments: 4, unknownSegments: 1, inputTokens: 1350, outputTokens: 135, totalTokens: 1485, cachedInputTokens: 400,
-      cacheWriteTokens: 0, reasoningTokens: 10, costUsd: "0.25", costReportedSegments: 1 }, routine: routineTotals } });
+      cacheWriteTokens: 0, reasoningTokens: 10, costUsd: "0.25", costReportedSegments: 1, estimatedCostUsd: null, costEstimatedSegments: 0 },
+    routine: routineTotals } });
 
   const members = (await g.api("/v1/usage/members")).body;
   const piTotals = { segments: 3, unknownSegments: 1, inputTokens: 1050, outputTokens: 105, totalTokens: 1155, cachedInputTokens: 400,
-    cacheWriteTokens: 0, reasoningTokens: 0, costUsd: "0.25", costReportedSegments: 1 };
+    cacheWriteTokens: 0, reasoningTokens: 0, costUsd: "0.25", costReportedSegments: 1, estimatedCostUsd: null, costEstimatedSegments: 0 };
   const codexTotals = { ...zero, segments: 1, inputTokens: 300, outputTokens: 30, totalTokens: 330, reasoningTokens: 10 };
   assert.deepEqual(members.members, [
     { memberId: pi.memberId, engine: "pi", total: piTotals, routine: routineTotals, budget: null },
@@ -271,7 +273,7 @@ test("the usage routes total an owner's usage by member and conversation, mark r
   assert.deepEqual({ ...rest.records[0], usageId: undefined, recordedAt: undefined }, { usageId: undefined, recordedAt: undefined,
     memberId: pi.memberId, conversationId: first.conversationId, requestId: first.requestId, childId: null, engine: "pi",
     state: "reported", model: "fixture-model", inputTokens: 1000, outputTokens: 100, cachedInputTokens: 400, cacheWriteTokens: null,
-    reasoningTokens: null, costUsd: "0.25", initiator: { kind: "owner" } });
+    reasoningTokens: null, costUsd: "0.25", estimatedCostUsd: null, estimatePrice: null, initiator: { kind: "owner" } });
   assert.equal((await g.api("/v1/usage/records?conversationId=" + third.conversationId)).body.records.length, 1);
 
   // Time range: [from, to) on the database's record time.
@@ -305,6 +307,83 @@ test("the usage routes total an owner's usage by member and conversation, mark r
   assert.deepEqual([capabilities.usage.route, capabilities.usage.budget.period, capabilities.usage.budget.refusal,
     capabilities.usage.budget.refusalClosingConversation], ["/v1/usage", "utc_day", "usage_limit", "usage_limit_closed"]);
   assert.ok(capabilities.audit.eventTypes.includes("usage.request_refused"));
+});
+
+/** A table pricing `model` as the operator's file would, after readPrices made each rate canonical. */
+const priced = (input: string, output: string, cachedInput = input, model = "fixture-model"): PriceTable =>
+  new Map([[model, { input, cachedInput, cacheWrite: input, output }]]);
+
+test("an estimated cost is written once with the rates it used, kept apart from billed cost, and never rewritten by a later price", async (t) => {
+  const owner = await member(store, undefined, "claude");
+  const g = await gateway(t, {} as MemberClient, owner.ownerId);
+  const first = priced("2", "8", "0.5"), raised = priced("4", "16", "0.5");
+  const segment = reported(1000, 100, { cachedInputTokens: 400 });
+  // (600 fresh × $2 + 400 cached × $0.50 + 100 out × $8) per million tokens.
+  const before = await spend(store, owner, segment, first);
+  // The operator raises the price: only rows written from now on use it.
+  const after = await spend(store, owner, segment, raised);
+  const billed = await spend(store, owner, reported(1000, 100, { cachedInputTokens: 400, costUsd: 0.25 }), raised);
+  const unpriced = await spend(store, owner, { ...segment, model: "unpriced-model" }, raised);
+  const anonymous = await spend(store, owner, { ...segment, model: null }, raised);
+  const silent = await spend(store, owner, undefined, raised);
+  // A retried write for a launch already recorded adds nothing, whatever the table says by then.
+  const retried = await launched(store, owner.ownerId, await conversation(store, owner));
+  await recordSegmentUsage(pool, retried.launch, segment, first);
+  await recordSegmentUsage(pool, retried.launch, segment, raised);
+  await retried.commit();
+
+  const records = new Map<string, { estimatedCostUsd: string | null; estimatePrice: unknown; costUsd: string | null }>(
+    (await g.api("/v1/usage/records")).body.records.map((r: { requestId: string }) => [r.requestId, r]));
+  const firstRates = { input: "2", cachedInput: "0.5", cacheWrite: "2", output: "8" };
+  const view = (requestId: string) => { const r = records.get(requestId)!; return [r.costUsd, r.estimatedCostUsd, r.estimatePrice]; };
+  assert.deepEqual(view(before.requestId), [null, "0.0022", firstRates]);
+  assert.deepEqual(view(after.requestId), [null, "0.0042", { input: "4", cachedInput: "0.5", cacheWrite: "4", output: "16" }]);
+  assert.deepEqual(view(retried.request.requestId), [null, "0.0022", firstRates]);
+  assert.deepEqual(view(billed.requestId), ["0.25", null, null], "a billed segment is never estimated");
+  for (const unestimated of [unpriced, anonymous, silent]) assert.deepEqual(view(unestimated.requestId), [null, null, null]);
+  // An append-only ledger: no later price, and no one, rewrites an estimate.
+  await assert.rejects(pool.query("UPDATE birbcrew_ts.usage_ledger SET estimated_cost_usd=0 WHERE owner_id=$1", [owner.ownerId]), { code: "23514" });
+
+  // Billed and estimated cost are totalled apart, each with the number of segments it covers.
+  const total = (await g.api("/v1/usage")).body.total;
+  assert.deepEqual([total.segments, total.costUsd, total.costReportedSegments, total.estimatedCostUsd, total.costEstimatedSegments],
+    [7, "0.25", 1, "0.0086", 3]);
+  assert.deepEqual((await g.api("/v1/usage/members")).body.members[0].total, total);
+  assert.deepEqual((await g.api("/v1/usage/conversations?memberId=" + owner.memberId)).body.conversations
+    .map((c: { total: { estimatedCostUsd: string | null } }) => c.total.estimatedCostUsd).sort(),
+  ["0.0022", "0.0022", "0.0042", null, null, null, null]);
+
+  // Another owner's estimate is its own: neither owner's totals or records include the other's.
+  const other = await member(store, undefined, "claude");
+  const theirs = await spend(store, other, segment, raised);
+  assert.deepEqual((await g.api("/v1/usage")).body.total, total);
+  assert.equal(records.has(theirs.requestId), false);
+  assert.ok(!(await g.api("/v1/usage/records")).body.records.some((r: { requestId: string }) => r.requestId === theirs.requestId));
+  const api = new UsageApi(store);
+  assert.deepEqual([(await api.summary(other.ownerId, {})).total.estimatedCostUsd, (await api.records(other.ownerId, {})).records
+    .map(r => r.requestId)], ["0.0042", [theirs.requestId]]);
+
+  // The ledger's CHECKs hold whatever writes a row.
+  const target = await launched(store, owner.ownerId, await conversation(store, owner));
+  const direct = (columns: Record<string, unknown>) => {
+    const names = Object.keys(columns), values = Object.values(columns);
+    return pool.query(`INSERT INTO birbcrew_ts.usage_ledger (owner_id,member_id,conversation_id,request_id,token,engine,${names})
+      VALUES ($1,$2,$3,$4,$5,'claude',${names.map((_, i) => "$" + (i + 6))})`,
+    [owner.ownerId, owner.memberId, target.request.conversationId, target.request.requestId, target.launch.token, ...values]);
+  };
+  const counts = { state: "reported", model: "fixture-model", input_tokens: 10, output_tokens: 1 };
+  const rates = JSON.stringify(firstRates);
+  for (const [why, columns] of [
+    ["billed and estimated", { ...counts, cost_usd: 0.1, estimated_cost_usd: 0.1, estimate_price: rates }],
+    ["an estimate without its rates", { ...counts, estimated_cost_usd: 0.1 }],
+    ["rates without an estimate", { ...counts, estimate_price: rates }],
+    ["rates that are not an object", { ...counts, estimated_cost_usd: 0.1, estimate_price: '"2"' }],
+    ["a negative estimate", { ...counts, estimated_cost_usd: -0.1, estimate_price: rates }],
+    ["an estimate with no model", { ...counts, model: null, estimated_cost_usd: 0.1, estimate_price: rates }],
+    ["an estimate of nothing reported", { state: "unknown", estimated_cost_usd: 0.1, estimate_price: rates }],
+  ] as const) await assert.rejects(direct(columns), { code: "23514" }, why);
+  await direct({ ...counts, estimated_cost_usd: "0.000000000001", estimate_price: rates });
+  await target.commit();
 });
 
 test("an owner sets, changes and clears a member's budget; each change is audited once", async (t) => {
@@ -790,6 +869,66 @@ test("migration 031 completes while a native turn holds its admission", async (t
   });
   await recordSegmentUsage(upgraded, launch, reported(3, 4));
   assert.equal((await upgraded.query("SELECT count(*)::integer AS n FROM birbcrew_ts.usage_ledger")).rows[0].n, 1);
+});
+
+test("migration 036 adds the estimate without a rewrite or a scan, never queues for the ledger, and leaves earlier rows unestimated", async (t) => {
+  const upgraded = await databaseAt(t, 32);
+  const current = new MemberStore(upgraded);
+  const owner = await member(current, undefined, "claude");
+  const conversationId = await conversation(current, owner);
+  // A row recorded before the upgrade, as release 32 wrote it.
+  const earlier = await launched(current, owner.ownerId, conversationId, "before the upgrade");
+  await upgraded.query(`INSERT INTO birbcrew_ts.usage_ledger (owner_id,member_id,conversation_id,request_id,token,engine,state,model,input_tokens,output_tokens)
+    VALUES ($1,$2,$3,$4,$5,'claude','reported','fixture-model',1000,100)`,
+  [owner.ownerId, owner.memberId, conversationId, earlier.request.requestId, earlier.launch.token]);
+  await earlier.commit();
+  const db = await upgraded.connect();
+  try {
+    await db.query("BEGIN");
+    const file = "SELECT pg_relation_filenode('birbcrew_ts.usage_ledger') AS ledger";
+    const { rows: [before] } = await db.query(file);
+    await db.query(await readFile(new URL("036-usage-cost.sql", sql), "utf8"));
+    assert.deepEqual((await db.query(file)).rows[0], before, "no rewrite");
+    const { rows } = await db.query(`SELECT c.relname AS relation, l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
+      WHERE l.pid=pg_backend_pid() AND c.relkind='r' AND c.relnamespace='birbcrew_ts'::regnamespace ORDER BY 1,2`);
+    assert.deepEqual(rows, [{ relation: "usage_ledger", mode: "AccessExclusiveLock" }]);
+    const { rows: checks } = await db.query(`SELECT conname AS name, convalidated AS validated FROM pg_constraint
+      WHERE conrelid='birbcrew_ts.usage_ledger'::regclass AND conname LIKE 'usage_ledger_estimate%' ORDER BY 1`);
+    assert.deepEqual(checks, [{ name: "usage_ledger_estimate_check", validated: false },
+      { name: "usage_ledger_estimate_price_check", validated: false }], "NOT VALID: no row is scanned");
+  } finally {
+    await db.query("ROLLBACK");
+    db.release();
+  }
+
+  // A ledger write in flight holds the table; the migration retries instead of queueing behind it,
+  // where every later ledger write and usage read would queue behind the migration.
+  const holder = await upgraded.connect();
+  try {
+    await holder.query("BEGIN");
+    await holder.query("LOCK TABLE birbcrew_ts.usage_ledger IN ROW EXCLUSIVE MODE");
+    let migrated = false;
+    const migrating = current.migrate().then(() => { migrated = true; });
+    for (let i = 0; i < 10; i++) {
+      await delay(30);
+      const { rows: waiting } = await upgraded.query(`SELECT pid FROM pg_locks WHERE NOT granted
+        AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`);
+      assert.deepEqual(waiting, [], "the migration retries instead of queueing");
+    }
+    assert.equal(migrated, false);
+    await holder.query("COMMIT");
+    await migrating;
+  } finally { holder.release(); }
+  assert.deepEqual((await upgraded.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version>=32 ORDER BY 1")).rows
+    .map(row => row.version), (await migrationNumbers()).filter(version => version >= 32));
+
+  // The earlier row keeps no estimate: the price table never reaches back. A new segment is priced.
+  const later = await launched(current, owner.ownerId, conversationId, "after the upgrade");
+  await recordSegmentUsage(upgraded, later.launch, reported(1000, 100), priced("2", "8"));
+  await later.commit();
+  const records = (await new UsageApi(current).records(owner.ownerId, {})).records;
+  assert.deepEqual(records.map(r => [r.requestId, r.estimatedCostUsd]),
+    [[later.request.requestId, "0.0028"], [earlier.request.requestId, null]]);
 });
 
 test("a held installation refuses every usage write and still serves reads", async (t) => {

@@ -5,6 +5,7 @@ import { initiatorFromColumns, MemberStoreError } from "./domain.ts";
 import type { MemberStore } from "./store.ts";
 import type { Launch } from "./supervisor.ts";
 import type { SegmentUsage } from "./usage-capture.ts";
+import { estimateCost, priceSetting, priceUnit, type PriceTable } from "./usage-prices.ts";
 
 /** Usage metering (docs/usage-metering.md): a ledger row per native segment, owner-scoped totals,
  * and an optional per-member token budget that request admission enforces as a soft cap. */
@@ -18,11 +19,13 @@ export const usageLimits = {
 export const usageCapabilities = {
   version: 1, route: "/v1/usage", ledger: "one-row-per-native-segment", states: ["reported", "unknown"],
   tokens: "input-includes-cache; output-includes-reasoning",
-  cost: "provider-billed-only; never-estimated",
+  cost: "provider-billed-or-operator-estimate; reported-apart; never-both-on-one-segment",
+  estimate: { source: "operator-price-table", setting: priceSetting, unit: priceUnit, keyedBy: "recorded-model",
+    computed: "at-write; never-recomputed", builtInPrices: false },
   engines: {
-    pi: { usage: "per-model-call", model: "reported", cost: "when-provider-billed" },
-    claude: { usage: "per-query", model: "reported", cost: "never" },
-    codex: { usage: "per-turn-from-thread-total", model: "not-reported", cost: "never" },
+    pi: { usage: "per-model-call", model: "answering-model", cost: "when-provider-billed; else estimated-when-priced" },
+    claude: { usage: "per-query", model: "reported", cost: "estimated-when-priced" },
+    codex: { usage: "per-turn-from-thread-total", model: "from-rollout-turn-context", cost: "estimated-when-priced" },
   },
   budget: { route: "/v1/usage/budgets/{memberId}", period: "utc_day", counts: "input+output", scope: "member",
     enforcement: "admission-soft-cap", refusal: "usage_limit", refusalClosingConversation: "usage_limit_closed",
@@ -35,23 +38,27 @@ type Queryable = Pick<PoolClient, "query">;
 /** Records what a native segment's SDK reported, once per launch generation, before its outcome
  * commits: the model work happened whether or not the commit that follows succeeds. A segment
  * whose driver reported nothing is recorded as unknown. The launch's execution identity must
- * match the reserved native_launches row. */
-export async function recordSegmentUsage(db: Pool, launch: Launch, usage: SegmentUsage = { state: "unknown", model: null }) {
-  try { await insertUsage(db, launch, usage); }
+ * match the reserved native_launches row. With a price for the segment's model, the row keeps an
+ * estimated cost, computed now and never again. */
+export async function recordSegmentUsage(db: Pool, launch: Launch, usage: SegmentUsage = unknownUsage, prices: PriceTable | null = null) {
+  try { await insertUsage(db, launch, usage, prices); }
   catch (error) {
     // Metering must not cost a finished segment its result: a row the ledger's CHECKs refuse
     // is kept as unknown instead. Callers pass the pool, so the failed insert left no
     // transaction to abort.
     if (usage.state === "unknown" || !(error && typeof error === "object" && "code" in error && error.code === "23514")) throw error;
-    await insertUsage(db, launch, { state: "unknown", model: null });
+    await insertUsage(db, launch, unknownUsage, null);
   }
 }
 
-async function insertUsage(db: Queryable, launch: Launch, usage: SegmentUsage) {
+const unknownUsage: SegmentUsage = { state: "unknown", model: null };
+
+async function insertUsage(db: Queryable, launch: Launch, usage: SegmentUsage, prices: PriceTable | null) {
   const counts = usage.state === "reported" ? usage : undefined;
+  const estimate = estimateCost(usage, prices);
   await db.query(`INSERT INTO birbcrew_ts.usage_ledger (owner_id,member_id,conversation_id,request_id,token,child_id,engine,state,
-      model,input_tokens,output_tokens,cached_input_tokens,cache_write_tokens,reasoning_tokens,cost_usd)
-    SELECT c.owner_id,c.member_id,n.conversation_id,n.request_id,n.token,n.child_id,m.engine,$9,$10,$11,$12,$13,$14,$15,$16
+      model,input_tokens,output_tokens,cached_input_tokens,cache_write_tokens,reasoning_tokens,cost_usd,estimated_cost_usd,estimate_price)
+    SELECT c.owner_id,c.member_id,n.conversation_id,n.request_id,n.token,n.child_id,m.engine,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb
       FROM birbcrew_ts.native_launches n JOIN birbcrew_ts.conversations c USING (conversation_id)
       JOIN birbcrew_ts.members m USING (owner_id,member_id)
      WHERE c.owner_id=$1 AND n.conversation_id=$2 AND n.request_id=$3 AND n.token=$4 AND n.workflow_run_id=$5
@@ -60,7 +67,8 @@ async function insertUsage(db: Queryable, launch: Launch, usage: SegmentUsage) {
   [launch.ownerId, launch.conversationId, launch.requestId, launch.token, launch.execution.workflowRunId,
     launch.execution.activityId, launch.execution.attempt, launch.childId ?? null, usage.state, usage.model,
     counts?.inputTokens ?? null, counts?.outputTokens ?? null, counts?.cachedInputTokens ?? null,
-    counts?.cacheWriteTokens ?? null, counts?.reasoningTokens ?? null, counts?.costUsd ?? null]);
+    counts?.cacheWriteTokens ?? null, counts?.reasoningTokens ?? null, counts?.costUsd ?? null,
+    estimate?.costUsd ?? null, estimate ? JSON.stringify(estimate.price) : null]);
 }
 
 // The budget's window: the current UTC calendar day of the database clock.
@@ -143,7 +151,9 @@ const totalsColumns = (name: string, filter: string) => `
   coalesce(sum(u.cache_write_tokens) FILTER (WHERE ${filter}), 0)::bigint AS ${name}_cache_write,
   coalesce(sum(u.reasoning_tokens) FILTER (WHERE ${filter}), 0)::bigint AS ${name}_reasoning,
   (sum(u.cost_usd) FILTER (WHERE ${filter}))::text AS ${name}_cost,
-  count(u.cost_usd) FILTER (WHERE ${filter})::bigint AS ${name}_cost_segments`;
+  count(u.cost_usd) FILTER (WHERE ${filter})::bigint AS ${name}_cost_segments,
+  (sum(u.estimated_cost_usd) FILTER (WHERE ${filter}))::text AS ${name}_estimated_cost,
+  count(u.estimated_cost_usd) FILTER (WHERE ${filter})::bigint AS ${name}_estimated_segments`;
 const bothTotals = totalsColumns("total", "true") + "," + totalsColumns("routine", "a.initiator_kind='routine'");
 const admission = "LEFT JOIN birbcrew_ts.request_admissions a ON a.conversation_id=u.conversation_id AND a.request_id=u.request_id";
 const inRange = (from: string, to: string) => `(${from}::timestamptz IS NULL OR u.recorded_at>=${from}) AND (${to}::timestamptz IS NULL OR u.recorded_at<${to})`;
@@ -156,6 +166,8 @@ function totalsView(row: Row, name: string) {
     segments: n("segments"), unknownSegments: n("unknown"), inputTokens: n("input"), outputTokens: n("output"),
     totalTokens: n("input") + n("output"), cachedInputTokens: n("cached"), cacheWriteTokens: n("cache_write"),
     reasoningTokens: n("reasoning"), costUsd: decimal(row[`${name}_cost`] as string | null), costReportedSegments: n("cost_segments"),
+    // Never added to costUsd: an estimate is not a bill. The two count disjoint segments.
+    estimatedCostUsd: decimal(row[`${name}_estimated_cost`] as string | null), costEstimatedSegments: n("estimated_segments"),
   };
 }
 const totals = (row: Row) => ({ total: totalsView(row, "total"), routine: totalsView(row, "routine") });
@@ -163,13 +175,14 @@ const totals = (row: Row) => ({ total: totalsView(row, "total"), routine: totals
 type LedgerRow = { usage_id: string; recorded_at: Date; member_id: string; conversation_id: string; request_id: string;
   child_id: string | null; engine: string; state: string; model: string | null; input_tokens: number | null; output_tokens: number | null;
   cached_input_tokens: number | null; cache_write_tokens: number | null; reasoning_tokens: number | null; cost_usd: string | null;
-  initiator_kind: string | null; initiator_id: string | null };
+  estimated_cost_usd: string | null; estimate_price: Record<string, string> | null; initiator_kind: string | null; initiator_id: string | null };
 function recordView(row: LedgerRow) {
   return {
     usageId: row.usage_id, recordedAt: row.recorded_at.toISOString(), memberId: row.member_id, conversationId: row.conversation_id,
     requestId: row.request_id, childId: row.child_id, engine: row.engine, state: row.state, model: row.model,
     inputTokens: row.input_tokens, outputTokens: row.output_tokens, cachedInputTokens: row.cached_input_tokens,
     cacheWriteTokens: row.cache_write_tokens, reasoningTokens: row.reasoning_tokens, costUsd: decimal(row.cost_usd),
+    estimatedCostUsd: decimal(row.estimated_cost_usd), estimatePrice: row.estimate_price,
     initiator: row.initiator_kind === null ? { kind: "owner" as const } : initiatorFromColumns(row.initiator_kind, row.initiator_id),
   };
 }
@@ -238,7 +251,8 @@ export class UsageApi {
       [ownerId, query.conversationId])).rowCount) throw new MemberStoreError("not_found");
     const { rows } = await this.store.pool.query<LedgerRow>(`SELECT u.usage_id::text AS usage_id, u.recorded_at, u.member_id,
         u.conversation_id, u.request_id, u.child_id, u.engine, u.state, u.model, u.input_tokens, u.output_tokens,
-        u.cached_input_tokens, u.cache_write_tokens, u.reasoning_tokens, u.cost_usd::text AS cost_usd, a.initiator_kind, a.initiator_id
+        u.cached_input_tokens, u.cache_write_tokens, u.reasoning_tokens, u.cost_usd::text AS cost_usd,
+        u.estimated_cost_usd::text AS estimated_cost_usd, u.estimate_price, a.initiator_kind, a.initiator_id
       FROM birbcrew_ts.usage_ledger u ${admission}
       WHERE u.owner_id=$1 AND ${inRange("$2", "$3")} AND ($4::uuid IS NULL OR u.member_id=$4)
         AND ($5::uuid IS NULL OR u.conversation_id=$5) AND ($6::bigint IS NULL OR u.usage_id<$6)

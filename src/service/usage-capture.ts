@@ -7,7 +7,8 @@ import { z } from "zod";
 // costUsd is only a provider-billed cost; SDK and catalog estimates are never kept.
 const count = z.int().min(0).max(2_147_483_647);
 // 256 UTF-8 bytes, as the ledger's CHECK counts them.
-const model = z.string().min(1).refine(text => Buffer.byteLength(text) <= 256 && !/[\p{Cc}]/u.test(text)).nullable();
+export const modelName = z.string().min(1).refine(text => Buffer.byteLength(text) <= 256 && !/[\p{Cc}]/u.test(text));
+const model = modelName.nullable();
 export const segmentUsage = z.discriminatedUnion("state", [
   z.strictObject({
     state: z.literal("reported"), model,

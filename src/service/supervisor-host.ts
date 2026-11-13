@@ -16,7 +16,10 @@ import { MemberStore } from "./store.ts";
 import { commandSchema, type Launch } from "./supervisor.ts";
 import { recordSegmentUsage } from "./usage.ts";
 import { segmentUsage } from "./usage-capture.ts";
+import { operatorPrices } from "./usage-prices.ts";
 
+// Read before "ready": a table the worker accepted cannot fail here later, mid-segment.
+const prices = operatorPrices();
 const pool = new Pool({ connectionString: process.env.BIRBCREW_DATABASE_URL });
 const store = new MemberStore(pool);
 const ledger = new ApprovalStore(pool);
@@ -213,7 +216,7 @@ async function start(launch: Launch): Promise<SegmentResult> {
         proposal: nativeProposal, usage }),
     ]).parse(reply);
     // Before the outcome commits: the model work happened even if that commit then fails.
-    await recordSegmentUsage(pool, launch, result.usage);
+    await recordSegmentUsage(pool, launch, result.usage, prices);
     if (result.kind === "delegated") {
       if (childKey || continuation || member.childResults || member.conversation.engine !== "pi") throw new Error("Unexpected delegation");
       return {kind:"delegated",children:await children.delegate(member.conversation,requestId,token,result.proposals,result.checkpoint)};
