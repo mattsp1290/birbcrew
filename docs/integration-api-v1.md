@@ -12,8 +12,8 @@ trusted scopes, tool registries, or engine configuration in a turn request.
 identifiers, proxy protocol versions, conversation/generation limits, trusted-context
 transport availability, observation limits, receipt retention semantics, the
 request initiator kinds (`initiatorKinds`, today `["owner", "routine", "handoff"]`), the audit
-contract (event types, page limits, formats) and the scheduled-routine limits and
-policies (`routines`), `standingGrants` (the standing
+contract (event types, page limits, formats, filter names and actor kinds) and the
+scheduled-routine limits and policies (`routines`), `standingGrants` (the standing
 choices, the card and state fields, the grantable tool, policy version and
 initiator kinds, the grants route and the inactive-list limit), `memories` (the
 member memory route, limits, injection and deletion semantics per engine), `handoffs`
@@ -39,7 +39,7 @@ proof of the operator's provider access or configured profile availability.
 | `GET /v1/health` | Readiness of PostgreSQL and Temporal; `200` ready, `503` not ready |
 | `GET /v1/members` | The owner's members, keyset-paginated |
 | `GET /v1/conversations` | The owner's conversations with coarse phase, optional `memberId` filter, keyset-paginated |
-| `GET /v1/audit` | Owner-scoped, append-only audit events; keyset pages as JSON or CSV export |
+| `GET /v1/audit` | Owner-scoped, append-only audit events; keyset pages as JSON or CSV export, with optional filters |
 | `POST /v1/routines`, `GET /v1/routines` | Create (`requestId`, `memberId`, `schedule`, `prompt`, `approvalPolicy`) and list scheduled routines |
 | `GET`/`DELETE /v1/routines/{routineId}`, `POST .../enable`, `POST .../disable` | Read, tombstone, enable or disable one routine |
 | `GET /v1/routines/{routineId}/firings` | Firing history, newest first, with each firing's conversation and request |
@@ -373,7 +373,15 @@ upgrade without them.
 | `after` | Decimal event ID; return later events only. Default `0`. |
 | `limit` | Default 100 in both formats. At most 1000 for JSON and 10000 for CSV (the hard row cap). |
 | `conversationId` | Restrict to one conversation. Another owner's ID yields an empty page. |
+| `memberId` | Restrict to one member. Another owner's ID yields an empty page. |
+| `eventType` | Comma-separated registered event types. |
+| `actorKind`, `initiatorKind` | `owner` or `system`; one of `initiatorKinds`. |
+| `initiatorId` | Requests a routine or a handoff started, by routine or handoff ID. Another owner's ID yields an empty page. |
+| `from`, `to` | RFC 3339 timestamps with an offset, at most six fractional digits, no leap second, offsets within ±15:59; `occurredAt` at or after `from` and before `to`. Encode `+` as `%2B`. |
 | `format` | `json` (default) or `csv`. |
+
+Filters combine with AND, work in both formats and leave paging unchanged; see
+[audit filters](audit-filters.md).
 
 Unknown, repeated or malformed parameters fail `400`, as strict bodies do. JSON
 responses are `{ apiVersion, events, nextAfter, hasMore }`. CSV responses carry the

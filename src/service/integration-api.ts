@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { appendAudit, auditEventTypes, auditLimits } from "./audit.ts";
+import { actorKinds, appendAudit, auditEventTypes, auditFilterNames, auditLimits } from "./audit.ts";
 import type { MemberClient } from "./client.ts";
 import { approvalDeadline, initiatorColumns, initiatorFromColumns, initiatorKinds, MemberStoreError, ownerInitiator, submitSchema,
   turnKey, type Engine, type RequestInitiator } from "./domain.ts";
@@ -30,6 +30,7 @@ export const integrationCapabilities = {
   audit: {
     version: 1, route: "/v1/audit", eventTypes: auditEventTypes, pagination: "event-id-keyset-no-skipped-commits",
     formats: ["json", "csv"], limits: auditLimits, retention: "append-only-with-database; no-automatic-TTL",
+    filters: auditFilterNames, actorKinds,
   },
   routines: routineCapabilities,
   standingGrants: {

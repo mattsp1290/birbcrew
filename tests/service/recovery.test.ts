@@ -173,6 +173,11 @@ test('real PostgreSQL archive restores mappings, checkpoint, committed replay an
  assert.deepEqual(audit.map(row=>row.event_type),['member.spawned','conversation.opened','request.finished']);
  assert.deepEqual((await restored.query('SELECT * FROM birbcrew_ts.audit_events ORDER BY event_id')).rows,audit);
  assert.deepEqual((await readAudit(restored,'owner',auditQuerySchema.parse({}))).events.map(event=>event.eventId),audit.map(row=>row.event_id));
+ // Filtered reads return the same rows from the restored copy, which pg_restore gives the same indexes.
+ const filtered=auditQuerySchema.parse({memberId:member.memberId.toUpperCase(),eventType:'conversation.opened,request.finished',from:'2000-01-01T00:00:00Z'});
+ assert.deepEqual((await readAudit(restored,'owner',filtered)).events.map(event=>event.eventId),audit.filter(row=>row.event_type!=='member.spawned').map(row=>row.event_id));
+ const indexes="SELECT indexdef FROM pg_indexes WHERE schemaname='birbcrew_ts' AND tablename='audit_events' ORDER BY indexname";
+ assert.deepEqual((await restored.query(indexes)).rows,(await t.pool.query(indexes)).rows);
  await assert.rejects(restored.query('DELETE FROM birbcrew_ts.audit_events'),{code:'23514'});
  await assert.rejects(t.recovery.resume(t.hooks),/fenced/);
  const manifest=await readRecoveryManifest(relocated);

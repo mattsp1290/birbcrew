@@ -365,8 +365,10 @@ expired, never under a new one. The gateway is consumer ingress: see
 - Changing a routine's definition, or a prompt that varies between firings.
 - Retention or cleanup of firing conversations, workflows and session directories.
 - An explicit owner action to retry or abandon a stuck `claimed` firing.
-- A routine-level view in the audit trail beyond `routineId` in payloads, and
-  per-routine audit filters.
+- A routine-level view in the audit trail. `initiatorId` selects the rows of a
+  routine's requests ([audit filters](audit-filters.md)), but the routine's own
+  lifecycle and firing rows carry `routineId` only in their payloads, which no
+  filter reads.
 - A gateway that should serve requests but not fire routines: every gateway runs the
   dispatcher.
 

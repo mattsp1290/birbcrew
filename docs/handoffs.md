@@ -293,6 +293,12 @@ from all of these is not supported.
 The target's `conversation.opened` row has an empty payload. The reserved request's
 `request.accepted` and `request.finished` rows carry the initiator
 `{ kind: "handoff", id: <handoffId> }`. No row carries transcript text.
+[Audit filters](audit-filters.md) select the reserved request's rows with
+`initiatorId=<handoffId>`, and every handoff's reserved requests with
+`initiatorKind=handoff`. The `conversation.handed_off` row names the source
+conversation and its member with the owner as initiator, so neither of those
+filters returns it, and the target's `memberId` returns it only when the target is
+the source's own member.
 `transcriptDigest` is an unsalted SHA-256 of text that quotes prompts and replies, so,
 as with prompt digests, anyone holding an export can confirm a guess of a whole
 transcript.

@@ -2,7 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { nextStep, standingChoice, toolNameSchema } from "./deferral.ts";
-import { approvalDeadlineSeconds, engineSchema, instructionsBytes, type RequestInitiator } from "./domain.ts";
+import { approvalDeadlineSeconds, engineSchema, initiatorKinds, instructionsBytes, type RequestInitiator } from "./domain.ts";
 
 const uuid = z.uuid();
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
@@ -17,7 +17,9 @@ const routineChange = { routineId: uuid, revision: z.int().min(2).max(2_147_483_
 const grantFact = "(event_type, (payload->>'grantId'), (payload->>'approvalId')) WHERE event_type IN ('approval.auto_approved', 'grant.created', 'grant.revoked')";
 const memoryFact = "((payload->>'memoryId'), event_type) WHERE event_type IN ('memory.created', 'memory.deleted', 'memory.suspended')";
 
-type Actor = "owner" | "system";
+/** The actors audit_events_actor_check in 021-audit.sql allows. */
+export const actorKinds = ["owner", "system"] as const;
+type Actor = (typeof actorKinds)[number];
 /** The closed audit vocabulary. 021-audit.sql repeats these types in a CHECK, widened by
  * 024-standing-grants.sql, 025-routines.sql, 026-memories.sql, 027-handoffs.sql, 028-approval-expiry.sql and 029-member-instructions.sql. Payloads are strict: identifiers, digests, choices and statuses only,
  * never prompt/reply text, tool arguments or secrets. An actor given as a function is
@@ -130,21 +132,83 @@ export async function appendAudit<T extends AuditEventType>(db: Pick<PoolClient,
 // Same default for both formats, so a format change never changes which rows return.
 export const auditLimits = { default: 100, json: 1000, csv: 10_000 } as const;
 
+const lowerUuid = z.uuid().transform(value => value.toLowerCase());
+// RFC 3339 with its offset required, narrowed to what PostgreSQL reads exactly, so a valid value never
+// fails in SQL: at most microseconds (the trail's own precision, so a bound is never rounded), no
+// leap second (read as the next minute), no year 0000 and no offset beyond 15:59.
+const rfc3339 = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(?:[Zz]|[+-](\d{2}):(\d{2}))$/;
+function isRfc3339(value: string) {
+  const parts = rfc3339.exec(value);
+  if (!parts) return false;
+  const [year, month, day, hour, minute, second, offsetHour, offsetMinute] = parts.slice(1).map(part => Number(part ?? 0));
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return year >= 1 && day >= 1 && day <= (days ?? 0) && hour <= 23 && minute <= 59 && second <= 59
+    && offsetHour <= 15 && offsetMinute <= 59;
+}
+const instant = z.string().refine(isRfc3339).transform(value => value.toUpperCase());
+
+/** Every filter GET /v1/audit accepts: how its value is validated, and the predicate it adds after the
+ * owner and the cursor. Filters combine with AND. A value is only ever bound; `where` gets its placeholder
+ * and the validated value, which may choose the predicate's shape but never appears in it.
+ * 030-audit-filters.sql says which filters have an index and why the others need none. */
+const auditFilters = {
+  conversationId: { value: lowerUuid, where: (p: string) => `conversation_id = ${p}::uuid` },
+  memberId: { value: lowerUuid, where: (p: string) => `member_id = ${p}::uuid` },
+  // Comma-separated; each a registered type, once. A type outside the registry would match nothing silently.
+  // One type is an equality, which reads audit_events_type_page in page order; ANY would sort every match left.
+  eventType: {
+    value: z.string().transform(value => value.split(","))
+      .pipe(z.array(z.enum(auditEventTypes)).refine(types => new Set(types).size === types.length)),
+    where: (p: string, types: readonly string[]) => types.length === 1 ? `event_type = (${p}::text[])[1]` : `event_type = ANY(${p}::text[])`,
+  },
+  actorKind: { value: z.enum(actorKinds), where: (p: string) => `actor_kind = ${p}` },
+  initiatorKind: { value: z.enum(initiatorKinds), where: (p: string) => `initiator_kind = ${p}` },
+  // An owner row stores the owner ID here, so this names the other initiators: a routine or a handoff, by
+  // its ID, and combines with initiatorKind like any filter. The kind test is also what lets the planner use
+  // the partial audit_events_initiator_page.
+  initiatorId: { value: lowerUuid, where: (p: string) => `initiator_kind <> 'owner' AND initiator_id = ${p}` },
+  // A half-open window on occurred_at: from inclusive, to exclusive.
+  from: { value: instant, where: (p: string) => `occurred_at >= ${p}::timestamptz` },
+  to: { value: instant, where: (p: string) => `occurred_at < ${p}::timestamptz` },
+} as const;
+type AuditFilterName = keyof typeof auditFilters;
+// Each predicate takes what its own schema outputs; the call in filterClause erases that link.
+auditFilters satisfies { [K in AuditFilterName]: { where: (p: string, value: z.output<(typeof auditFilters)[K]["value"]>) => string } };
+export const auditFilterNames: readonly AuditFilterName[] = Object.freeze(Object.keys(auditFilters) as AuditFilterName[]);
+const optionalFilters = Object.fromEntries(auditFilterNames.map(name => [name, auditFilters[name].value.optional()])) as
+  { [K in AuditFilterName]: z.ZodOptional<(typeof auditFilters)[K]["value"]> };
+
 // Zod runs refinements even after a failed regex, so they must accept any input.
 const auditParameters = {
   after: z.string().regex(/^(0|[1-9][0-9]{0,18})$/)
     .refine(value => value.length < 19 || value <= "9223372036854775807").optional(),
   limit: z.string().regex(/^[1-9][0-9]{0,4}$/).optional(),
-  conversationId: z.uuid().transform(value => value.toLowerCase()).optional(),
   format: z.enum(["json", "csv"]).optional(),
+  ...optionalFilters,
 };
 // A strict object still accepts inherited names such as __proto__; callers check names too.
 export const auditParameterNames: readonly string[] = Object.keys(auditParameters);
 export const auditQuerySchema = z.strictObject(auditParameters)
   .refine(query => Number(query.limit ?? 1) <= auditLimits[query.format === "csv" ? "csv" : "json"], { path: ["limit"] })
-  .transform(query => ({ after: query.after ?? "0", limit: query.limit ? Number(query.limit) : auditLimits.default,
-    conversationId: query.conversationId ?? null, format: query.format ?? "json" }));
+  .transform(({ after, limit, format, ...filters }) => ({ after: after ?? "0", limit: limit ? Number(limit) : auditLimits.default,
+    format: format ?? "json", filters }));
 export type AuditQuery = z.output<typeof auditQuerySchema>;
+export type AuditFilters = AuditQuery["filters"];
+
+/** The filter predicates in table order, numbered from `first`, and the values they bind. */
+function filterClause(filters: AuditFilters, first: number) {
+  const values: unknown[] = [];
+  const where = auditFilterNames.flatMap(name => {
+    const value = filters[name];
+    if (value === undefined) return [];
+    values.push(value);
+    const filter: { where: (p: string, value: never) => string } = auditFilters[name];
+    // Parenthesised, so a predicate with an OR could never escape the owner and cursor terms.
+    return [" AND (" + filter.where("$" + (first + values.length - 1), value as never) + ")"];
+  });
+  return { where: where.join(""), values };
+}
 
 export interface AuditEvent {
   eventId: string; occurredAt: string; type: AuditEventType;
@@ -180,17 +244,20 @@ async function stableHorizon(pool: Pool): Promise<string> {
   }
 }
 
-/** Owner comes from authentication only. Another owner's conversation filter matches nothing. */
+/** Owner comes from authentication only, and filters narrow that owner's rows: another owner's
+ * conversation, member, routine or handoff matches nothing. */
 export async function readAudit(pool: Pool, ownerId: string, query: AuditQuery) {
   const horizon = await stableHorizon(pool);
+  const filters = filterClause(query.filters, 4);
+  const values = [ownerId, query.after, horizon, ...filters.values, query.limit + 1];
   const { rows } = await pool.query<AuditEvent>(`SELECT event_id::text AS "eventId",
       to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt", event_type AS type,
       json_build_object('kind', actor_kind, 'id', actor_id) AS actor,
       json_build_object('kind', initiator_kind, 'id', initiator_id) AS initiator,
       member_id AS "memberId", conversation_id AS "conversationId", request_id AS "requestId", payload
     FROM birbcrew_ts.audit_events
-    WHERE owner_id=$1 AND event_id>$2 AND event_id<=$3 AND ($4::uuid IS NULL OR conversation_id=$4)
-    ORDER BY event_id LIMIT $5`, [ownerId, query.after, horizon, query.conversationId, query.limit + 1]);
+    WHERE owner_id=$1 AND event_id>$2 AND event_id<=$3${filters.where}
+    ORDER BY event_id LIMIT $${values.length}`, values);
   const events = rows.slice(0, query.limit);
   return { events, nextAfter: events.at(-1)?.eventId ?? query.after, hasMore: rows.length > query.limit };
 }

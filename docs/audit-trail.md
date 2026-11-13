@@ -99,7 +99,7 @@ audit version may switch to a keyed per-owner digest.
 The registry is the `auditEvents` object in `src/service/audit.ts`.
 `audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
 `024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql`, `027-handoffs.sql`, `028-approval-expiry.sql` and then `029-member-instructions.sql`, lists the same types.
-Each widening replaces the whole constraint, so the latest migration lists every type.
+Each widening replaces the whole constraint, so the last widening lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
 
@@ -146,8 +146,10 @@ filter for another owner's conversation returns an empty page, not `404`.
 | `after` | Return events with a larger `eventId`. Decimal, default `0`. |
 | `limit` | Default 100 in both formats. At most 1000 for JSON and 10000 for CSV (the hard row cap). |
 | `conversationId` | Only events for this conversation. |
+| `memberId`, `eventType`, `actorKind`, `initiatorKind`, `initiatorId`, `from`, `to` | Only events that match: see [audit filters](audit-filters.md). |
 | `format` | `json` (default) or `csv`. |
 
+Filters combine with AND and never change the cursor rules below.
 Query validation is strict. An unknown or repeated parameter, or a malformed or
 out-of-range value, returns `400 invalid_input`. Other methods return `405`.
 
@@ -326,6 +328,11 @@ Migration 29 replaces `audit_events_type_check` the same way, with every type 28
 `member.instructions_set`, and adds one partial unique index for it. It takes
 `audit_events` together with `members` without queueing;
 [member instructions](member-instructions.md#upgrade) lists its locks.
+
+Migration 30 adds three indexes for the filters and changes no constraint or
+trigger. It holds `SHARE` on `audit_events`, taken the same way, so audited writes
+wait for the index builds; applied alone, from version 29, reads continue.
+[Audit filters](audit-filters.md#upgrade-and-recovery) lists its locks.
 
 The audit table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest
