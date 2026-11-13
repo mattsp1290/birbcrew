@@ -3,8 +3,7 @@ import { z } from "zod";
 import { runTrustedPi } from "./trusted-pi.ts";
 import { runTrustedClaude } from "./trusted-claude.ts";
 import { runTrustedCodex } from "./trusted-codex.ts";
-import type { TrustedNativeInput, TrustedNativeProfile } from "./trusted-native-types.ts";
-import { segmentUsage } from "./usage-capture.ts";
+import type { TrustedNativeInput, TrustedNativeProfile, TrustedNativeResult } from "./trusted-native-types.ts";
 export type { TrustedNativeInput, TrustedNativeTool, TrustedNativeProfile } from "./trusted-native-types.ts";
 
 const envelope = z.strictObject({version:z.literal(1),engine:z.enum(["pi","claude","codex"]),
@@ -60,12 +59,10 @@ export async function runTrustedNativeTurn(input: TrustedNativeInput, profile: T
       await input.onToolDelivered?.(call);
     },
   };
-  const result = profile.engine === "pi" ? await runTrustedPi(bounded,profile.profile) :
+  const result: TrustedNativeResult = profile.engine === "pi" ? await runTrustedPi(bounded,profile.profile) :
     profile.engine === "claude" ? await runTrustedClaude(bounded,profile.profile) : await runTrustedCodex(bounded,profile.profile);
   input.signal.throwIfAborted();
   const checkpoint = envelope.parse({version:1,engine:input.engine,threadId:input.threadId,binding:input.binding,capabilities,state:result.checkpoint});
   if (Buffer.byteLength(JSON.stringify(checkpoint)) > 4 * 1024 * 1024) throw new Error("Trusted checkpoint exceeds 4 MiB");
-  // As on the member lane, metering never costs a finished turn its result: unusable usage is unknown.
-  const usage = segmentUsage.safeParse(result.usage);
-  return {text:result.text,checkpoint,usage:usage.success ? usage.data : {state:"unknown" as const,model:null}};
+  return {text:result.text,checkpoint,usage:result.usage};
 }

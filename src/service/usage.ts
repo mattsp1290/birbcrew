@@ -6,7 +6,7 @@ import type { MemberStore } from "./store.ts";
 import type { Launch } from "./supervisor.ts";
 import type { TrustedClaim } from "./trusted-context.ts";
 import type { SegmentUsage } from "./usage-capture.ts";
-import { estimateCost, priceSetting, priceUnit, type PriceTable } from "./usage-prices.ts";
+import { estimateCost, priceSetting, priceUnit, type Price, type PriceTable } from "./usage-prices.ts";
 
 /** Usage metering (docs/usage-metering.md): a ledger row per native segment, owner-scoped totals,
  * and an optional per-member token budget that request admission enforces as a soft cap. */
@@ -54,7 +54,7 @@ export async function recordSegmentUsage(db: Pool, launch: Launch, usage?: Segme
 /** The same record for a trusted-context request, which has no launch generation: one row per
  * trusted request, bound to the generation and token its start claimed. A trusted request runs
  * at most once, so its ID identifies the model work as a launch generation does. */
-export async function recordTrustedUsage(db: Pool, claim: TrustedClaim, usage?: SegmentUsage, prices: PriceTable | null = null) {
+export async function recordTrustedUsage(db: Pool, claim: TrustedClaim, usage: SegmentUsage, prices: PriceTable | null = null) {
   await record(db, { lane: "trusted", claim }, usage, prices);
 }
 
@@ -65,12 +65,13 @@ const refused = (error: unknown) => Boolean(error && typeof error === "object" &
 
 async function record(db: Pool, segment: Segment, usage: SegmentUsage = unknownUsage, prices: PriceTable | null) {
   // Metering must not cost a finished segment its result: a row the ledger's CHECKs refuse is kept
-  // without its estimate, and then as unknown, rather than failing the segment. Callers pass the
-  // pool, so a failed insert left no transaction to abort.
-  const attempts = [[usage, prices], ...(prices ? [[usage, null]] as const : []), [unknownUsage, null]] as const;
-  for (const [attempt, table] of attempts) {
-    try { return await insertUsage(db, segment, attempt, table); }
-    catch (error) { if (attempt.state === "unknown" || !refused(error)) throw error; }
+  // as unknown instead. Dropping only the estimate would never help: estimateCost prices only a
+  // reported, named, unbilled segment at canonical rates, so a refusal comes from its counts or
+  // model. Callers pass the pool, so a failed insert left no transaction to abort.
+  try { await insertUsage(db, segment, usage, estimateCost(usage, prices)); }
+  catch (error) {
+    if (usage.state === "unknown" || !refused(error)) throw error;
+    await insertUsage(db, segment, unknownUsage, null);
   }
 }
 
@@ -80,41 +81,38 @@ const usageColumnList = ["state", "model", "input_tokens", "output_tokens", "cac
 const usageColumns = usageColumnList.join(",");
 const usageValues = (first: number) => usageColumnList.map((column, i) => "$" + (first + i) + (column === "estimate_price" ? "::jsonb" : "")).join(",");
 
-/** The estimate, or none if the table cannot price this segment: an estimate never fails a write. */
-function estimateOf(usage: SegmentUsage, prices: PriceTable | null) {
-  try { return estimateCost(usage, prices); } catch { return null; }
-}
-
-async function insertUsage(db: Queryable, segment: Segment, usage: SegmentUsage, prices: PriceTable | null) {
+async function insertUsage(db: Queryable, segment: Segment, usage: SegmentUsage, estimate: ReturnType<typeof estimateCost>) {
   const counts = usage.state === "reported" ? usage : undefined;
-  const estimate = estimateOf(usage, prices);
   const byColumn: Record<typeof usageColumnList[number], unknown> = { state: usage.state, model: usage.model,
     input_tokens: counts?.inputTokens ?? null, output_tokens: counts?.outputTokens ?? null,
     cached_input_tokens: counts?.cachedInputTokens ?? null, cache_write_tokens: counts?.cacheWriteTokens ?? null,
     reasoning_tokens: counts?.reasoningTokens ?? null, cost_usd: counts?.costUsd ?? null,
     estimated_cost_usd: estimate?.costUsd ?? null, estimate_price: estimate ? JSON.stringify(estimate.price) : null };
   const values = usageColumnList.map(column => byColumn[column]);
+  // Each lane's WHERE parameters come first; the shared values follow them.
   if (segment.lane === "trusted") {
     const { claim } = segment;
+    const identity = [claim.ownerId, claim.conversationId, claim.requestId, claim.generation, claim.token];
     await db.query(`INSERT INTO birbcrew_ts.usage_ledger (owner_id,member_id,conversation_id,request_id,trusted_request_id,engine,${usageColumns})
-      SELECT c.owner_id,c.member_id,r.conversation_id,r.request_id,r.request_id,m.engine,${usageValues(6)}
+      SELECT c.owner_id,c.member_id,r.conversation_id,r.request_id,r.request_id,m.engine,${usageValues(identity.length + 1)}
         FROM birbcrew_ts.trusted_requests r JOIN birbcrew_ts.conversations c USING (conversation_id)
         JOIN birbcrew_ts.members m USING (owner_id,member_id)
        WHERE c.owner_id=$1 AND r.conversation_id=$2 AND r.request_id=$3 AND r.generation=$4 AND r.token=$5
       ON CONFLICT (conversation_id,trusted_request_id) WHERE trusted_request_id IS NOT NULL DO NOTHING`,
-    [claim.ownerId, claim.conversationId, claim.requestId, claim.generation, claim.token, ...values]);
+    [...identity, ...values]);
     return;
   }
   const { launch } = segment;
+  const identity = [launch.ownerId, launch.conversationId, launch.requestId, launch.token, launch.execution.workflowRunId,
+    launch.execution.activityId, launch.execution.attempt, launch.childId ?? null];
   await db.query(`INSERT INTO birbcrew_ts.usage_ledger (owner_id,member_id,conversation_id,request_id,token,child_id,engine,${usageColumns})
-    SELECT c.owner_id,c.member_id,n.conversation_id,n.request_id,n.token,n.child_id,m.engine,${usageValues(9)}
+    SELECT c.owner_id,c.member_id,n.conversation_id,n.request_id,n.token,n.child_id,m.engine,${usageValues(identity.length + 1)}
       FROM birbcrew_ts.native_launches n JOIN birbcrew_ts.conversations c USING (conversation_id)
       JOIN birbcrew_ts.members m USING (owner_id,member_id)
      WHERE c.owner_id=$1 AND n.conversation_id=$2 AND n.request_id=$3 AND n.token=$4 AND n.workflow_run_id=$5
        AND n.activity_id=$6 AND n.attempt=$7 AND n.child_id IS NOT DISTINCT FROM $8::uuid
     ON CONFLICT (conversation_id,request_id,token) DO NOTHING`,
-  [launch.ownerId, launch.conversationId, launch.requestId, launch.token, launch.execution.workflowRunId,
-    launch.execution.activityId, launch.execution.attempt, launch.childId ?? null, ...values]);
+  [...identity, ...values]);
 }
 
 // The budget's window: the current UTC calendar day of the database clock. It counts every reported
@@ -225,7 +223,7 @@ const totals = (row: Row) => ({ total: totalsView(row, "total"), routine: totals
 type LedgerRow = { usage_id: string; recorded_at: Date; member_id: string; conversation_id: string; request_id: string;
   child_id: string | null; trusted: boolean; engine: string; state: string; model: string | null; input_tokens: number | null; output_tokens: number | null;
   cached_input_tokens: number | null; cache_write_tokens: number | null; reasoning_tokens: number | null; cost_usd: string | null;
-  estimated_cost_usd: string | null; estimate_price: Record<string, string> | null; initiator_kind: string | null; initiator_id: string | null };
+  estimated_cost_usd: string | null; estimate_price: Price | null; initiator_kind: string | null; initiator_id: string | null };
 function recordView(row: LedgerRow) {
   return {
     usageId: row.usage_id, recordedAt: row.recorded_at.toISOString(), memberId: row.member_id, conversationId: row.conversation_id,

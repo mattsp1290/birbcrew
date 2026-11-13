@@ -42,7 +42,7 @@
     "test:expiry": "node --test tests/service/approval-expiry.test.ts",
     "test:expiry:workflow": "node --test tests/service/approval-expiry-workflow.test.ts",
     "test:handoffs": "node --test tests/service/handoffs.test.ts",
-    "test:usage": "node --test tests/service/usage.test.ts",
+    "test:usage": "node --test tests/service/usage.test.ts tests/service/usage-cost.test.ts",
     "test:usage:capture": "node --test tests/service/usage-capture.test.ts",
     "test:webhooks": "node --test tests/service/webhook-target.test.ts tests/service/webhooks.test.ts",
     "test:api:service": "node tests/proof/integration-api.mts",

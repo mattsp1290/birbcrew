@@ -240,7 +240,8 @@ JSON file:
   error that names the setting and the failing entry's position, never the file's
   contents. Without the setting nothing is estimated, as before. A table built in code
   (see [the trusted lane](#the-trusted-context-lane)) is checked entry by entry by the
-  same rules, and a rate that breaks them prices nothing.
+  same rules, and `runTrustedRequest` refuses one that breaks them before it claims a
+  request.
 
 When the supervisor host writes a segment's row, it prices the segment if it is
 `reported`, names a model the table prices, and has no billed cost:
@@ -644,21 +645,24 @@ and compared clause for clause with 29's and 28's, and no wait for a running tur
 `migrate()` refusing to apply a migration below one already applied, including on a
 database that ran this feature before 27 to 30, while a database that lacks migration
 22, as releases before 27 left some, still upgrades; every firing reason the dispatcher
-names being one the reason CHECK allows; and a held installation refusing usage writes.
-For cost it checks an estimate written with the rates it used and kept when the price
-rises, a table that skipped validation costing a segment its estimate but never its
-counts, a retried write adding nothing under another price, a billed segment never
-estimated, unpriced, unnamed and unknown segments left without one, billed and
-estimated totals kept apart in every route, another owner's estimate in neither
-owner's totals or records, and the CHECKs that keep the two apart. For the trusted lane
-it checks one row per trusted request, none for a stale claim or another owner, the
-`trusted` lane and owner initiator in records and its part of every total, its tokens in
-the member's budget, the row surviving `erase()`, the lane CHECKs and keys, and a table
-built in code that the file rules refuse stopping `runTrustedRequest` before it claims a
-request. The capabilities' usage values are pinned. Migration
-36 is applied to a version-32 database: no rewrite, its locks, NOT VALID constraints, a
-retry instead of a queue while a ledger write holds the table, no wait for a running
-trusted turn's lease, and earlier rows left unestimated.
+names being one the reason CHECK allows; the capabilities' usage values, which it pins;
+and a held installation refusing usage writes.
+
+`usage-cost.test.ts`, which `npm run test:usage` runs with it, covers cost, the trusted
+lane and migration 36. For cost it checks an estimate written with the rates it used and
+kept when the price rises, a table that skipped validation costing a segment its
+estimate but never its counts, a retried write adding nothing under another price, a
+billed segment never estimated, unpriced, unnamed and unknown segments left without
+one, billed and estimated totals kept apart in every route, another owner's estimate in
+neither owner's totals or records, and the CHECKs that keep the two apart. For the
+trusted lane it checks one row per trusted request, none for a stale claim or another
+owner, the `trusted` lane and owner initiator in records and its part of every total,
+its tokens in the member's budget, the row surviving `erase()`, the lane CHECKs and
+keys, and a table built in code that the file rules refuse stopping `runTrustedRequest`
+before it claims a request. Migration 36 is applied to a version-32 database: no
+rewrite, its locks, NOT VALID constraints, a retry instead of a queue while a ledger
+write holds the table, no wait for a running trusted turn's lease, and earlier rows left
+unestimated.
 `audit.test.ts` runs every audit filter over two owners' usage rows in JSON and CSV.
 
 `recovery.test.ts` (it needs PostgreSQL 17 `pg_dump`, as the other recovery tests do)
