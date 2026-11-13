@@ -7,9 +7,9 @@ import { join } from "node:path";
 import { after, before, test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { ActivityFailure, ApplicationFailure, WorkflowUpdateFailedError, type Client } from "@temporalio/client";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { MemberClient } from "../../src/service/client.ts";
-import { auditEvents } from "../../src/service/audit.ts";
+import { auditEvents, auditEventTypes } from "../../src/service/audit.ts";
 import { MemberStoreError, ownerInitiator, type Engine, type TurnRequest } from "../../src/service/domain.ts";
 import { createGateway } from "../../src/service/gateway.ts";
 import { IntegrationApi } from "../../src/service/integration-api.ts";
@@ -51,6 +51,33 @@ async function databaseAt(t: TestContext, version = Infinity, skip: readonly num
   }
   return db;
 }
+
+/** Every migration number in the sql directory, in order. */
+const migrationNumbers = async () => (await readdir(sql)).map(file => Number(file.split("-")[0])).sort((a, b) => a - b);
+
+/** The top-level OR clauses of a CHECK as pg_get_constraintdef prints it: "CHECK ((a OR b ...)) NOT VALID". */
+function orClauses(definition: string) {
+  const body = /^CHECK \(\((.*)\)\)( NOT VALID)?$/s.exec(definition)?.[1];
+  assert.ok(body, definition);
+  const clauses: string[] = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === "(") depth++;
+    else if (body[i] === ")") depth--;
+    else if (depth === 0 && body.startsWith(" OR ", i)) { clauses.push(body.slice(start, i)); start = i + 4; }
+  }
+  return [...clauses, body.slice(start)];
+}
+/** Each WHEN status of the firing reason CHECK with the reasons it allows, and its ELSE branch. */
+function reasonBranches(definition: string) {
+  return Object.fromEntries(definition.split("\n").map(line => line.trim()).filter(line => /^(WHEN|ELSE)/.test(line)).map(line => {
+    const status = /^WHEN '(\w+)'::text THEN/.exec(line)?.[1] ?? "ELSE";
+    return [status, [...line.matchAll(/'(\w+)'::text/g)].map(match => match[1]).filter(value => value !== status)];
+  }));
+}
+const constraintDefinitions = async (db: PoolClient) => Object.fromEntries((await db.query<{ name: string; definition: string }>(
+  `SELECT conname AS name, pg_get_constraintdef(oid) AS definition FROM pg_constraint
+    WHERE conname IN ('audit_events_type_check','routine_firings_reason_check')`)).rows.map(row => [row.name, row.definition]));
 
 const reported = (input: number, output = 0, more: Partial<Extract<SegmentUsage, { state: "reported" }>> = {}): SegmentUsage => ({
   state: "reported", model: "fixture-model", inputTokens: input, outputTokens: output, cachedInputTokens: null,
@@ -391,7 +418,7 @@ test("a routine firing refused by its member's budget fails with usage_limit and
 });
 
 test("migration 031 takes its locks without queueing, rewrites nothing, leaves its CHECKs unvalidated and never waits for a running turn", async (t) => {
-  const upgraded = await databaseAt(t, 26);
+  const upgraded = await databaseAt(t, 30);
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
   const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
     (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'codex','fixture') RETURNING member_id`, [ownerId, randomUUID()]);
@@ -402,6 +429,7 @@ test("migration 031 takes its locks without queueing, rewrites nothing, leaves i
     const files = `SELECT pg_relation_filenode('birbcrew_ts.members') AS members, pg_relation_filenode('birbcrew_ts.native_launches') AS launches,
       pg_relation_filenode('birbcrew_ts.audit_events') AS audit, pg_relation_filenode('birbcrew_ts.routine_firings') AS firings`;
     const { rows: [before] } = await db.query(files);
+    const previous = await constraintDefinitions(db);
     await db.query(await readFile(new URL("031-usage.sql", sql), "utf8"));
     assert.deepEqual((await db.query(files)).rows[0], before);
     const { rows } = await db.query(`SELECT c.relname AS relation, l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
@@ -416,22 +444,24 @@ test("migration 031 takes its locks without queueing, rewrites nothing, leaves i
     const { rows: checks } = await db.query(`SELECT conname AS name, convalidated AS validated FROM pg_constraint
       WHERE conname IN ('audit_events_type_check','routine_firings_check4','routine_firings_reason_check') ORDER BY 1`);
     assert.deepEqual(checks, [{ name: "audit_events_type_check", validated: false }, { name: "routine_firings_reason_check", validated: false }]);
+
+    // Each CHECK 031 replaces keeps, clause for clause as PostgreSQL stores it, everything the one it
+    // replaces held (029's 22 audit types and 028's firing reasons), and adds only usage's.
+    const current = await constraintDefinitions(db);
+    const [kept, replaced] = [orClauses(previous.audit_events_type_check), orClauses(current.audit_events_type_check)];
+    const types = (clauses: string[]) => clauses.flatMap(clause => [...clause.matchAll(/'([a-z_]+\.[a-z_]+)'::text/g)].map(match => match[1]));
+    assert.equal(new Set(types(kept)).size, 22);
+    assert.deepEqual(replaced.slice(0, kept.length), kept, "every clause 029 held, unchanged and in order");
+    assert.deepEqual(types(replaced.slice(kept.length)), ["usage.budget_set", "usage.budget_cleared", "usage.request_refused"]);
+    assert.deepEqual([...new Set(types(replaced))].sort(), [...auditEventTypes].sort(), "the registry and the CHECK name the same types");
+    const [reasons, widened] = [reasonBranches(previous.routine_firings_reason_check), reasonBranches(current.routine_firings_reason_check)];
+    assert.ok(reasons.failed.includes("approval_expired"), previous.routine_firings_reason_check);
+    assert.deepEqual(widened, { ...reasons, failed: [...reasons.failed, "usage_limit"] });
+    assert.deepEqual([...widened.skipped].sort(), [...skipReasons].sort());
+    assert.deepEqual([...widened.failed].sort(), [...failReasons].sort());
   } finally {
     await db.query("ROLLBACK");
     db.release();
-  }
-  // A sibling migration that already renamed the reason CHECK does not stop this one.
-  const renamed = await upgraded.connect();
-  try {
-    await renamed.query("BEGIN");
-    await renamed.query("ALTER TABLE birbcrew_ts.routine_firings RENAME CONSTRAINT routine_firings_check4 TO routine_firings_reason_check");
-    await renamed.query(await readFile(new URL("031-usage.sql", sql), "utf8"));
-    const { rows: [reason] } = await renamed.query(`SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
-      WHERE conname='routine_firings_reason_check'`);
-    assert.match(reason.definition, /'usage_limit'/);
-  } finally {
-    await renamed.query("ROLLBACK");
-    renamed.release();
   }
 
   // A launch being reserved holds native_launches in a mode the migration's lock excludes.
@@ -456,7 +486,9 @@ test("migration 031 takes its locks without queueing, rewrites nothing, leaves i
     await holder.query("COMMIT");
     await migrating;
   } finally { holder.release(); }
-  assert.deepEqual((await upgraded.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version>26")).rows, [{ version: 31 }]);
+  // migrate() brought it to the newest migration in the directory, whatever that is.
+  assert.deepEqual((await upgraded.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version>=30 ORDER BY 1")).rows.map(row => row.version),
+    (await migrationNumbers()).filter(version => version >= 30));
   // The turn that started before the upgrade is metered when its segment returns.
   await recordSegmentUsage(upgraded, { ownerId, conversationId, requestId, text, token: start.token, execution }, reported(3, 4));
   assert.equal((await upgraded.query("SELECT count(*)::integer AS n FROM birbcrew_ts.usage_ledger")).rows[0].n, 1);
@@ -464,15 +496,22 @@ test("migration 031 takes its locks without queueing, rewrites nothing, leaves i
 
 test("migrate() refuses to apply a migration below one already applied", async (t) => {
   // A database that ran a later migration first would otherwise get an earlier one's narrower CHECKs.
-  const ahead = await databaseAt(t, 26);
+  const ahead = await databaseAt(t, 30);
   await ahead.query("INSERT INTO birbcrew_ts.schema_versions VALUES (40)");
   await assert.rejects(new MemberStore(ahead).migrate(), /Migration 31 would apply after migration 40/);
   assert.equal((await ahead.query("SELECT to_regclass('birbcrew_ts.usage_ledger') AS ledger")).rows[0].ledger, null);
+  // A development database that ran this branch before 27 to 30 were merged below it holds 31
+  // without them. 027 to 029 would narrow 031's type CHECK and 028 cannot find the reason CHECK
+  // it replaces, so migrate() stops before applying anything.
+  const early = await databaseAt(t, 26);
+  await early.query("INSERT INTO birbcrew_ts.schema_versions VALUES (31)");
+  await assert.rejects(new MemberStore(early).migrate(), /Migration 27 would apply after migration 31/);
+  assert.equal((await early.query("SELECT to_regclass('birbcrew_ts.conversation_handoffs') AS handoffs")).rows[0].handoffs, null);
   // Releases before 27 shipped migration 22 after 26; a database from one still upgrades.
   const shipped = await databaseAt(t, 26, [22]);
   await new MemberStore(shipped).migrate();
-  assert.deepEqual((await shipped.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version IN (22,31) ORDER BY 1")).rows,
-    [{ version: 22 }, { version: 31 }]);
+  assert.deepEqual((await shipped.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version=22 OR version>26 ORDER BY 1")).rows
+    .map(row => row.version), [22, ...(await migrationNumbers()).filter(version => version > 26)]);
 });
 
 test("every firing reason the dispatcher names is one the routine firing CHECK allows", async () => {
@@ -495,7 +534,7 @@ test("every firing reason the dispatcher names is one the routine firing CHECK a
 });
 
 test("migration 031 completes while a native turn holds its admission", async (t) => {
-  const upgraded = await databaseAt(t, 26);
+  const upgraded = await databaseAt(t, 30);
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
   // A Codex turn's admission holds its native_launches row FOR SHARE for the whole native turn.
   const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
