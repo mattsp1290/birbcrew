@@ -34,6 +34,9 @@
 #ifndef SYS_removexattrat
 #define SYS_removexattrat 466
 #endif
+#ifndef SYS_file_setattr
+#define SYS_file_setattr 469
+#endif
 
 static void fail(void) { perror("Native member isolation"); _exit(126); }
 static void checked(long value) { if (value < 0) fail(); }
@@ -165,6 +168,7 @@ static void keep_group(int offline) {
         deny(SYS_lremovexattr, EPERM);
         deny(SYS_setxattrat, EPERM);
         deny(SYS_removexattrat, EPERM);
+        deny(SYS_file_setattr, EPERM);
         emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone, 0, 4));
         load(0);
         emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, CLONE_THREAD, 1, 0));

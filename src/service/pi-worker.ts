@@ -12,6 +12,7 @@ import type { DriverInput } from "./activities.ts";
 import type { TrustedNativeInput } from "./trusted-native-types.ts";
 
 // Started only by pi-launch.ts through the member launcher: no credentials, no sockets, only descriptor 3.
+// Pi sessions here must stay in memory: file-backed Pi storage locks with utimes, which the launcher refuses.
 type Command = { model: Model<Api>; instructions?: string; allowRecordWorkItem?: boolean } & (
   | { kind: "member"; mode: Parameters<typeof runSegment>[2]; input: Omit<DriverInput, "signal"> }
   | { kind: "trusted"; input: Pick<TrustedNativeInput, "text" | "context" | "checkpoint" | "tools"> });

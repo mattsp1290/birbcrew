@@ -94,13 +94,17 @@ For Pi the seccomp filter also refuses:
 - `shmget`, `msgget`, `semget` and `mq_open`, whose objects outlive the worker;
 - `chmod`, `fchmodat`, `fchmodat2`, `utime`, `utimes`, `futimesat`,
   `utimensat`, `setxattr`, `lsetxattr`, `removexattr`, `lremovexattr`,
-  `setxattrat` and `removexattrat`, because Landlock does not mediate file
-  metadata: without them the worker could change the mode of any file its user
-  owns, such as the native state volume;
+  `setxattrat`, `removexattrat` and `file_setattr`, because Landlock does not
+  mediate file metadata: without them the worker could change the mode of any
+  file its user owns, such as the native state volume;
 - `ptrace`.
 
 Landlock also does not mediate `stat`, `access`, `chdir` or `flock`, so the
-worker can still learn whether a path exists and read its metadata. The policy
+worker can still learn whether a path exists and read its metadata. `chown` and
+the descriptor-based `fchmod`, `fchown` and `fsetxattr` stay allowed: they need
+ownership or a descriptor the worker can open, which outside its private
+directory it has only on files its user owns and Landlock lets it read. Run the
+service as a user that does not own the checkout, as the service image does. The policy
 assumes that the service runs as a user without capabilities, as the service
 image does; the launcher does not drop privileges itself.
 
@@ -119,10 +123,9 @@ that neither failed nor hit its token limit, as the agent requires, with the
 model's arguments coerced against the tool's schema as the agent does. A failed
 dispatch fails the turn, as it did in process. The worker still builds the
 model's context, so a call "the model sent" is one the worker led the model
-to send. It
-reads the worker's frames with a limit of 16 Mi characters, fails the turn if
-the worker leaves 64 MiB unread, and stops acting on frames after the first
-failure.
+to send. The host reads the worker's frames with a limit of 16 Mi characters,
+fails the turn if the worker leaves 64 MiB unread, and stops acting on frames
+after the first failure.
 
 The host checks the worker's result before it returns it. A member segment's
 checkpoint must keep the thread, the session and every earlier turn, and add

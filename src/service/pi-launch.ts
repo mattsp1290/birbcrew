@@ -152,12 +152,12 @@ export async function runPiWorker(command: PiCommand, host: PiHost) {
 }
 
 // A worker can leave a directory its host cannot list (mode 0300) or a tree deeper than PATH_MAX, which
-// defeat Node's rm. GNU chmod and rm walk with descriptors; the worker is gone and cannot make links.
+// defeat Node's rm. GNU chmod and rm walk with descriptors; the worker has exited and could make no symlinks.
 async function removePrivate(directory: string) {
   try { return await rm(directory, { recursive: true, force: true }); } catch { /* retried below */ }
   const run = promisify(execFile);
-  await run("chmod", ["-R", "u+rwx", "--", directory]).catch(() => undefined);
-  await run("rm", ["-rf", "--one-file-system", "--", directory]);
+  await run("/bin/chmod", ["-R", "u+rwx", "--", directory]).catch(() => undefined);
+  await run("/bin/rm", ["-rf", "--one-file-system", "--", directory]);
 }
 
 function supervise(directory: string, command: PiCommand, host: PiHost) {
