@@ -6,6 +6,10 @@ An owner spawns a member with a fixed engine and execution profile. Each convers
 
 Pi and Claude release the inference worker during a confirmed human wait. Pi can delegate to two child workflows with separate native sessions and one shared write budget. Codex keeps its invocation-scoped MCP call open until the owner responds or the deadline expires. SQL records the decision, effect receipt and confirmation of native delivery separately. On interruption, clients can distinguish a proven zero-effect call from a committed receipt with unknown delivery. See the [gateway contract](member-gateway.md).
 
+### Internal: child targets
+
+A delegated child can carry a target: the engine and registered profile it runs on, stored as `target` in its `pi_children.role_profile` JSON. A child without one runs on its parent's Pi profile, and that is still every child a member can start, because nothing a runner returns sets a target yet. The child workflow schedules its activities on the target's queue, the supervisor runs the target profile's driver, and the child's usage row records that engine under its parent member. The child activity refuses to run on any queue but the one its row names. Replay does not compare task queues, so without that check a workflow worker from before targets would quietly run a targeted child on its parent's queue. Only a registered delegating Pi profile that holds every tool its child gets can be a target: `ChildStore.delegate` refuses any other with a `ChildTargetError`, and the Claude and Codex drivers refuse a child. Depth stays one: a delegation needs the parent turn's token, a child runs its profile's child branch, and the supervisor refuses a delegation from a child launch. `npm run test:child-targets` covers this, including replay of histories recorded with the workflow source from before targets.
+
 ## Historical Python proof
 
 One Temporal workflow owns each conversation. Its stable ID derives from the
