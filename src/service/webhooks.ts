@@ -46,7 +46,10 @@ const envelope = {
 /** A readable message: a title and labelled values, every one a field of the body. */
 type Message = { title: string; details: readonly (readonly [string, string])[] };
 type KindDefinition = { auditType: AuditEventType; when?: (row: AuditRow) => boolean; body: z.ZodType;
-  fields: (row: AuditRow) => Record<string, unknown>; message: (body: Readonly<Record<string, string>>) => Message };
+  fields: (row: AuditRow) => Record<string, unknown>; message(body: Readonly<Record<string, string>>): Message };
+/** Types a kind's template by that kind's own body, so it can only name fields the body has. */
+const kind = <S extends z.ZodType>(definition: Omit<KindDefinition, "body" | "message"> & { body: S; message: (body: z.output<S>) => Message }) =>
+  definition;
 
 /** What an endpoint can subscribe to. Each kind is one committed audit event type (and, for
  * routine.disabled, one reason), so a delivery exists only for a change that committed. A body
@@ -55,35 +58,36 @@ type KindDefinition = { auditType: AuditEventType; when?: (row: AuditRow) => boo
  * so a status the trail gains is delivered, not skipped. `message` is the fixed template the
  * readable formats send. 032-webhooks.sql repeats the names. */
 export const webhookKinds = {
-  "approval.pending": { auditType: "approval.requested",
+  "approval.pending": kind({ auditType: "approval.requested",
     body: z.strictObject({ ...envelope, kind: z.literal("approval.pending"), conversationId: uuid, requestId: uuid,
       approvalId: uuid, toolName: toolNameSchema }),
     fields: row => ({ conversationId: row.conversationId, requestId: row.requestId, approvalId: row.payload.approvalId,
       toolName: row.payload.toolName }),
     message: body => ({ title: "Crew: approval pending", details: [["Tool", body.toolName], ["Conversation", body.conversationId],
-      ["Request", body.requestId], ["Approval", body.approvalId]] }) },
-  "request.finished": { auditType: "request.finished",
+      ["Request", body.requestId], ["Approval", body.approvalId]] }) }),
+  "request.finished": kind({ auditType: "request.finished",
     body: z.strictObject({ ...envelope, kind: z.literal("request.finished"), conversationId: uuid, requestId: uuid,
       status: auditEvents["request.finished"].payload.shape.status }),
     fields: row => ({ conversationId: row.conversationId, requestId: row.requestId, status: row.payload.status }),
-    message: body => ({ title: `Crew: request ${body.status}`, details: [["Conversation", body.conversationId], ["Request", body.requestId]] }) },
-  "routine.firing_settled": { auditType: "routine.firing_settled",
+    message: body => ({ title: `Crew: request ${body.status}`, details: [["Conversation", body.conversationId], ["Request", body.requestId]] }) }),
+  "routine.firing_settled": kind({ auditType: "routine.firing_settled",
     body: z.strictObject({ ...envelope, kind: z.literal("routine.firing_settled"), routineId: uuid, scheduledFor: z.iso.datetime().max(32),
       status: auditEvents["routine.firing_settled"].payload.shape.status }),
     fields: row => ({ routineId: row.payload.routineId, scheduledFor: row.payload.scheduledFor, status: row.payload.status }),
-    message: body => ({ title: `Crew: routine firing ${body.status}`, details: [["Routine", body.routineId], ["Scheduled for", body.scheduledFor]] }) },
+    message: body => ({ title: `Crew: routine firing ${body.status}`, details: [["Routine", body.routineId], ["Scheduled for", body.scheduledFor]] }) }),
   // Only Crew's own decision: an owner who disables a routine already knows.
-  "routine.disabled": { auditType: "routine.disabled", when: row => row.payload.reason === "consecutive_failures",
+  "routine.disabled": kind({ auditType: "routine.disabled", when: row => row.payload.reason === "consecutive_failures",
     body: z.strictObject({ ...envelope, kind: z.literal("routine.disabled"), routineId: uuid, status: z.literal("consecutive_failures") }),
     fields: row => ({ routineId: row.payload.routineId, status: row.payload.reason }),
-    message: body => ({ title: "Crew: routine disabled", details: [["Routine", body.routineId], ["Reason", body.status]] }) },
+    message: body => ({ title: "Crew: routine disabled", details: [["Routine", body.routineId], ["Reason", body.status]] }) }),
 } as const satisfies Record<string, KindDefinition>;
 export type WebhookKind = keyof typeof webhookKinds;
 export const webhookKindNames = Object.keys(webhookKinds) as [WebhookKind, ...WebhookKind[]];
 const deliveredAuditTypes = [...new Set(webhookKindNames.map(kind => webhookKinds[kind].auditType))];
 
 /** The message a readable format sends for a stored body. The body is parsed again by its kind's
- * strict schema first, so a message can only ever hold what the signed `crew` body holds. */
+ * strict schema first, so a message can only ever hold what the signed `crew` body holds. A schema
+ * tightened later would fail rows queued under the old one, for these formats only, until they give up. */
 export function webhookMessage(kind: WebhookKind, stored: string): Message {
   const { webhookId, ...fields } = JSON.parse(stored) as Record<string, unknown>;
   uuid.parse(webhookId);
@@ -116,6 +120,8 @@ export const webhookFormats = {
 } as const satisfies Record<string, { signed: boolean; render: (kind: WebhookKind, body: string) => Rendered }>;
 export type WebhookFormat = keyof typeof webhookFormats;
 export const webhookFormatNames = Object.keys(webhookFormats) as [WebhookFormat, ...WebhookFormat[]];
+// 035-notification-formats.sql repeats it as the column default.
+export const defaultWebhookFormat: WebhookFormat = "crew";
 
 /** The kind and body fields one committed audit row yields, or null when no kind covers it. A row
  * that does not fit its kind's schema, or would not fit the 1 KiB body CHECK once the fan-out adds
@@ -142,7 +148,7 @@ export function webhookSignature(secret: string, timestamp: number, body: string
 export const webhookCapabilities = {
   version: 1, route: "/v1/webhooks", kinds: webhookKindNames, maximumEnabledPerOwner: webhookLimits.enabledPerOwner,
   schemes: ["https"], insecureTargets: "operator-setting-off-by-default", source: "committed-audit-events", payload: "identifiers-kind-time-status",
-  formats: webhookFormatNames, defaultFormat: "crew",
+  formats: webhookFormatNames, defaultFormat: defaultWebhookFormat,
   signature: { version: "v1", algorithm: "hmac-sha256", signed: "timestamp.body", header: webhookHeaders.signature,
     timestampHeader: webhookHeaders.timestamp, formats: webhookFormatNames.filter(format => webhookFormats[format].signed) },
   secret: "returned-once-at-creation", delivery: "at-least-once-unordered", maximumAttempts: webhookLimits.maximumAttempts,
@@ -196,7 +202,7 @@ const lowerUuid = z.uuid().transform(value => value.toLowerCase());
 const createSchema = z.strictObject({
   requestId: lowerUuid, url: z.string().min(1).max(targetLimits.urlBytes),
   kinds: z.array(z.enum(webhookKindNames)).min(1).max(webhookKindNames.length).refine(kinds => new Set(kinds).size === kinds.length),
-  format: z.enum(webhookFormatNames).default("crew"),
+  format: z.enum(webhookFormatNames).default(defaultWebhookFormat),
 });
 const pageLimit = z.string().regex(/^[1-9][0-9]{0,2}$/).refine(value => Number(value) <= webhookLimits.pageSize).transform(Number).optional();
 // Zod runs refinements even after a failed regex, so they must accept any input.
@@ -492,7 +498,8 @@ export class WebhookDispatcher {
 
   /** Due deliveries, the oldest-due first and at most one per endpoint, leased to this process:
    * for every endpoint it is not sending to, or for `only`, the endpoint whose chain asks. An
-   * expired lease is a claim whose holder stopped; it is claimed again and counts again. */
+   * expired lease is a claim whose holder stopped; it is claimed again and counts again. An
+   * endpoint whose format this process does not know (a later release wrote it) is left, unattempted. */
   private async claim(now: Date, only?: string): Promise<Claim[]> {
     const room = only ? 1 : webhookLimits.endpointsInFlight - this.inflight.size;
     if (room <= 0) return [];
@@ -502,7 +509,7 @@ export class WebhookDispatcher {
             FROM birbcrew_ts.webhook_deliveries d WHERE d.webhook_id=w.webhook_id
              AND ((d.state='pending' AND d.next_attempt_at<=$1) OR (d.state='delivering' AND d.lease_until<=$1))
            ORDER BY d.event_id LIMIT 1 FOR UPDATE SKIP LOCKED) d
-        WHERE w.state='enabled' AND w.owner_id=ANY($2::text[])
+        WHERE w.state='enabled' AND w.owner_id=ANY($2::text[]) AND w.format=ANY($8::text[])
           AND ($7::uuid IS NULL AND NOT w.webhook_id=ANY($3::uuid[]) OR w.webhook_id=$7::uuid)
         ORDER BY d.due LIMIT $4)
       UPDATE birbcrew_ts.webhook_deliveries d SET state='delivering', attempts=least(d.attempts+1, $6), next_attempt_at=NULL,
@@ -512,7 +519,7 @@ export class WebhookDispatcher {
       RETURNING d.webhook_id, d.event_id::text AS event_id, d.attempts, p.attempts AS prior_attempts, d.lease_until, d.kind, d.body, w.url,
         w.format, w.secret`,
       [now, this.owners, [...this.inflight.keys()], room, new Date(now.getTime() + webhookLimits.leaseMs), webhookLimits.maximumAttempts,
-        only ?? null]);
+        only ?? null, webhookFormatNames]);
     return rows;
   }
 

@@ -1038,9 +1038,9 @@ test("the database keeps endpoints and deliveries as history and refuses a membe
   await refused("TRUNCATE birbcrew_ts.webhook_endpoints CASCADE");
   await refused("UPDATE birbcrew_ts.webhook_endpoints SET kinds='{approval.pending}'");
   await refused("UPDATE birbcrew_ts.webhook_endpoints SET format='slack'");
-  await refused(`INSERT INTO birbcrew_ts.webhook_endpoints (owner_id,create_request_id,url,host,kinds,format,secret,state,disabled_reason)
-    VALUES ($1, gen_random_uuid(), 'https://x.example.com/', 'x.example.com', '{request.finished}', 'Slack', repeat('a', 43), 'disabled', 'owner')`,
-    [h.ownerId]);
+  await assert.rejects(h.db.query(`INSERT INTO birbcrew_ts.webhook_endpoints (owner_id,create_request_id,url,host,kinds,format,secret,state,
+      disabled_reason) VALUES ($1, gen_random_uuid(), 'https://x.example.com/', 'x.example.com', '{request.finished}', 'Slack', repeat('a', 43),
+      'disabled', 'owner')`, [h.ownerId]), { code: "23514", constraint: "webhook_endpoints_format_check" });
   await refused("UPDATE birbcrew_ts.webhook_endpoints SET url='https://elsewhere.example.com/'");
   await refused("UPDATE birbcrew_ts.webhook_endpoints SET secret=repeat('a', 43)");
   await refused("UPDATE birbcrew_ts.webhook_endpoints SET url=NULL");
@@ -1314,16 +1314,26 @@ test("a readable message is built only from a body its kind's strict schema acce
     assert.throws(() => webhookMessage("request.finished", JSON.stringify(stored)), JSON.stringify(stored));
   }
   assert.throws(() => webhookMessage("approval.pending", JSON.stringify(body)));
-  // Only direct SQL could store such a body; a readable endpoint's attempt then fails before any connection.
+  // Only direct SQL could store such a body; a readable endpoint's attempt then fails before any connection,
+  // while a well-formed delivery to the same endpoint goes out.
   const h = await harness(t);
   const r = await receiver(t);
   const endpoint = await h.create(r.url("in"), ["request.finished"], h.ownerId, "slack");
   await h.db.query(`INSERT INTO birbcrew_ts.webhook_deliveries (webhook_id,event_id,kind,body,state,next_attempt_at,created_at)
     VALUES ($1, 1, 'request.finished', $2, 'pending', $3, $3)`, [endpoint.webhookId, JSON.stringify({ ...body, webhookId: endpoint.webhookId,
     note: "NOTE-MARKER" }), h.clock()]);
+  // A format this release does not know, as a later release could write: its rows are left alone, unattempted.
+  const { rows: [{ webhook_id: later }] } = await h.db.query<{ webhook_id: string }>(`INSERT INTO birbcrew_ts.webhook_endpoints
+      (owner_id,create_request_id,url,host,kinds,format,secret,state,enabled_at)
+    VALUES ($1, gen_random_uuid(), $2, $3, '{request.finished}', 'teams', repeat('a', 43), 'enabled', clock_timestamp()) RETURNING webhook_id`,
+    [h.ownerId, r.url("later"), `127.0.0.1:${r.port}`]);
+  const good = await h.finished(await h.conversation());
   await pass(h.dispatcher());
-  assert.equal(r.received.length, 0);
-  assert.deepEqual((await h.deliveries(endpoint.webhookId)).map(d => [d.state, d.attempts, d.outcome]), [["pending", 1, "network"]]);
+  assert.deepEqual(r.received.map(item => [item.path, (JSON.parse(item.body) as { text: string }).text.includes(good)]), [["/in", true]]);
+  assertCarriesNoText(r.received);
+  assert.deepEqual((await h.deliveries(endpoint.webhookId)).map(d => [d.eventId === "1", d.state, d.attempts, d.outcome]),
+    [[true, "pending", 1, "network"], [false, "delivered", 1, "delivered"]]);
+  assert.deepEqual((await h.deliveries(later)).map(d => [d.state, d.attempts]), [["pending", 0]]);
 });
 
 /** A Slack-compatible incoming webhook, as Slack documents it: a JSON body whose `text` is a
@@ -1372,9 +1382,11 @@ test("a slack endpoint made through the routes posts a message a Slack-compatibl
   assert.deepEqual((await g.api("/v1/webhooks", { ...body, format: "ntfy" })).body, { error: "conflict" });
   const { format: _format, ...crewReplay } = body;
   assert.deepEqual((await g.api("/v1/webhooks", crewReplay)).body, { error: "conflict" }, "a create without a format is crew");
-  // A hook the service no longer knows: an ordinary failed attempt.
+  // A hook the service no longer knows, and bodies it cannot read: each an ordinary failed attempt.
   const revoked = (await g.api("/v1/webhooks", { requestId: randomUUID(), url: slack.url("/services/T0CREW/B0CREW/REVOKED-TOKEN"),
     kinds: ["request.finished"], format: "slack" })).body;
+  const crewAtHook = (await g.api("/v1/webhooks", { requestId: randomUUID(), url: slack.url(), kinds: ["request.finished"] })).body;
+  const ntfyAtHook = (await g.api("/v1/webhooks", { requestId: randomUUID(), url: slack.url(), kinds: ["request.finished"], format: "ntfy" })).body;
 
   const { memberId } = await store.spawn({ ownerId: g.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture" });
   const conversationId = randomUUID(), requestId = randomUUID();
@@ -1383,11 +1395,12 @@ test("a slack endpoint made through the routes posts a message a Slack-compatibl
     payload: { status: "failed" } }));
   const states = async (id: string) => (await g.api(`/v1/webhooks/${id}/deliveries`)).body.deliveries
     .map((d: { state: string; attempts: number; lastOutcome: string; lastStatusCode: number }) => [d.state, d.attempts, d.lastOutcome, d.lastStatusCode]);
-  const settled = async () => JSON.stringify([await states(view.webhookId), await states(revoked.webhookId)]);
-  const expected = JSON.stringify([[["delivered", 1, "delivered", 200]], [["pending", 1, "http_status", 404]]]);
+  const settled = async () => JSON.stringify(await Promise.all([view, revoked, crewAtHook, ntfyAtHook].map(e => states(e.webhookId))));
+  const expected = JSON.stringify([[["delivered", 1, "delivered", 200]], [["pending", 1, "http_status", 404]], [["pending", 1, "http_status", 400]],
+    [["pending", 1, "http_status", 400]]]);
   for (let i = 0; i < 200 && await settled() !== expected; i++) await delay(25);
-  assert.equal(await settled(), expected, "delivered to the hook, and an ordinary failed attempt for the revoked one");
-  assert.deepEqual(slack.answers.sort(), ["no_service", "ok"]);
+  assert.equal(await settled(), expected, "delivered to the hook; an ordinary failed attempt for the revoked hook and each unreadable body");
+  assert.deepEqual(slack.answers.sort(), ["invalid_payload", "no_service", "no_text", "ok"]);
   const { rows: [event] } = await db.query<{ eventId: string; occurredAt: string }>(`SELECT event_id::text AS "eventId",
     to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt" FROM birbcrew_ts.audit_events
     WHERE event_type='request.finished' AND request_id=$1`, [requestId]);
@@ -1401,9 +1414,10 @@ test("a slack endpoint made through the routes posts a message a Slack-compatibl
   // The hook's path is its credential. The trail, its CSV export and the delivery rows hold the host only.
   const audit = await g.api("/v1/audit?limit=1000&eventType=webhook.created");
   assert.deepEqual(audit.body.events.map((e: { payload: Record<string, unknown> }) => [e.payload.host, e.payload.format]),
-    [[`127.0.0.1:${slack.port}`, "slack"], [`127.0.0.1:${slack.port}`, "slack"]]);
+    ["slack", "slack", "crew", "ntfy"].map(format => [`127.0.0.1:${slack.port}`, format]));
   const csv = (await g.api("/v1/audit?format=csv&limit=10000")).text;
-  const deliveries = (await g.api(`/v1/webhooks/${view.webhookId}/deliveries`)).text + (await g.api(`/v1/webhooks/${revoked.webhookId}/deliveries`)).text;
+  const deliveries = (await Promise.all([view, revoked, crewAtHook, ntfyAtHook].map(async e => (await g.api(`/v1/webhooks/${e.webhookId}/deliveries`)).text)))
+    .join("");
   for (const text of [audit.text, csv, deliveries]) assert.ok(!text.includes("TOKEN") && !text.includes("/services/"), text);
   // Another owner learns nothing of it.
   assert.deepEqual((await g.api(`/v1/webhooks/${view.webhookId}`, undefined, g.stranger)).body, { error: "not_found" });

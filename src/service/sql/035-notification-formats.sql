@@ -5,8 +5,10 @@
 -- added there needs no migration. Like the URL and the kinds, the format never changes.
 --
 -- Locks: ACCESS EXCLUSIVE on webhook_endpoints only, held until migrate() commits. The default is a
--- constant, so no row is rewritten; the CHECK reads the table's few rows once. No audited
--- transaction reads or writes a webhook table, so no change that commits an audit row waits for it.
+-- constant, so no row is rewritten; the CHECK reads the table's few rows once. No transaction that
+-- audits a request, card or routine touches a webhook table, so none waits for it. Only the webhook
+-- routes, the dispatcher and a restore do, and the earlier release's processes are stopped for the
+-- upgrade, so unlike 025 to 032 this takes its lock without retrying.
 ALTER TABLE birbcrew_ts.webhook_endpoints
     ADD COLUMN format text NOT NULL DEFAULT 'crew' CHECK (format ~ '^[a-z][a-z0-9_]{0,31}$');
 
