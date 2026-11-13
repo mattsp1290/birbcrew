@@ -239,7 +239,8 @@ JSON file:
   starts; restart the worker to change prices. A malformed file stops the worker with an
   error that names the setting and the failing entry's position, never the file's
   contents. Without the setting nothing is estimated, as before. A table built in code
-  (see [the trusted lane](#the-trusted-context-lane)) is checked by the same rules.
+  (see [the trusted lane](#the-trusted-context-lane)) is checked entry by entry by the
+  same rules, and a rate that breaks them prices nothing.
 
 When the supervisor host writes a segment's row, it prices the segment if it is
 `reported`, names a model the table prices, and has no billed cost:

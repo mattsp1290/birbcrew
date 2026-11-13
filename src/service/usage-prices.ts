@@ -17,6 +17,7 @@ export type PriceTable = ReadonlyMap<string, Price>;
 
 // A string, so no binary fraction enters the table: whole dollars and at most six decimal places.
 const rate = z.string().regex(/^(0|[1-9][0-9]{0,5})(\.[0-9]{1,6})?$/);
+const canonicalRate = (value: unknown) => rate.safeParse(value).success;
 const entry = z.strictObject({ input: rate, output: rate, cachedInput: rate.optional(), cacheWrite: rate.optional() });
 // The models object passes through as JSON.parse built it, so a model named __proto__ stays an entry.
 const table = z.strictObject({ version: z.literal(1), unit: z.literal(priceUnit),
@@ -87,12 +88,12 @@ export function operatorPrices() {
 export function estimateCost(usage: SegmentUsage, prices: PriceTable | null): { costUsd: string; price: Price } | null {
   if (!prices || usage.state !== "reported" || usage.model === null || usage.costUsd !== null) return null;
   const price = prices.get(usage.model);
-  if (!price) return null;
+  // The exported writers take any table; a rate readPrices or checkedPrices would refuse prices nothing.
+  if (!price || ![price.input, price.cachedInput, price.cacheWrite, price.output].every(canonicalRate)) return null;
   const cached = BigInt(usage.cachedInputTokens ?? 0), written = BigInt(usage.cacheWriteTokens ?? 0);
   const fresh = BigInt(usage.inputTokens) - cached - written;
   if (fresh < 0n) return null;
   const picodollars = fresh * micro(price.input) + cached * micro(price.cachedInput) + written * micro(price.cacheWrite)
     + BigInt(usage.outputTokens) * micro(price.output);
-  // Only a table that skipped checkedPrices can get here with a negative rate; it prices nothing.
-  return picodollars < 0n ? null : { costUsd: scaledDecimal(picodollars, 12), price };
+  return { costUsd: scaledDecimal(picodollars, 12), price };
 }

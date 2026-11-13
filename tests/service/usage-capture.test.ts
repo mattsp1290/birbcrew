@@ -329,8 +329,11 @@ test("an estimate prices each part of the input at its own rate, exactly, and on
     assert.equal(estimateCost(segment as SegmentUsage, prices), null, why);
   }
   assert.equal(estimateCost(usage("gpt-5.4"), null), null, "no table");
-  const unchecked = new Map([["m", { input: "-1.5", cachedInput: "-1.5", cacheWrite: "-1.5", output: "0" }]]);
-  assert.equal(estimateCost(usage("m"), unchecked), null, "a negative total from a table that skipped checkedPrices");
+  // A table that skipped checkedPrices prices nothing with a rate it would refuse, whatever the total.
+  for (const bad of ["-1.5", "0.0000005", "1e-6", "-0.5"]) {
+    const unchecked = new Map([["m", { input: bad, cachedInput: "0.5", cacheWrite: "1", output: "15" }]]);
+    assert.equal(estimateCost(usage("m"), unchecked), null, bad);
+  }
 });
 
 test("the price table is the operator's file, refused whole when any entry is malformed, and names no content in its error", async t => {

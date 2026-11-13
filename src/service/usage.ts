@@ -67,7 +67,8 @@ async function record(db: Pool, segment: Segment, usage: SegmentUsage = unknownU
   // Metering must not cost a finished segment its result: a row the ledger's CHECKs refuse is kept
   // without its estimate, and then as unknown, rather than failing the segment. Callers pass the
   // pool, so a failed insert left no transaction to abort.
-  for (const [attempt, table] of [[usage, prices], [usage, null], [unknownUsage, null]] as const) {
+  const attempts = [[usage, prices], ...(prices ? [[usage, null]] as const : []), [unknownUsage, null]] as const;
+  for (const [attempt, table] of attempts) {
     try { return await insertUsage(db, segment, attempt, table); }
     catch (error) { if (attempt.state === "unknown" || !refused(error)) throw error; }
   }
