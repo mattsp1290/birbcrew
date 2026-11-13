@@ -51,24 +51,23 @@ async function hostModels(model: Model<Api>) {
   return runtime;
 }
 
-function dispatch(call: { nativeCallId: string; toolName: string; args: unknown }) {
+// The host runs the tool with the arguments the model sent through it.
+function dispatch(call: { nativeCallId: string; toolName: string }) {
   return new Promise<{ text: string; isError: boolean }>((resolve, reject) => {
     const id = ++sequence;
     calls.set(id, { resolve, reject });
-    send({ dispatch: id, nativeCallId: call.nativeCallId, toolName: call.toolName, args: call.args });
+    send({ dispatch: id, nativeCallId: call.nativeCallId, toolName: call.toolName });
   });
 }
 
 async function run(command: Command) {
   const { model, instructions, allowRecordWorkItem } = command;
   const profile: PiProfile = { model, modelRuntime: await hostModels(model), ...(instructions !== undefined && { instructions }), allowRecordWorkItem };
-  const onText = (delta: string) => send({ delta });
+  // Text and argument previews are published by the host from the events it relays.
   if (command.kind === "trusted") {
-    return runTrustedSession({ ...command.input, signal, dispatch, onText,
-      onToolDelivered: (delivered) => send({ delivered }) }, profile);
+    return runTrustedSession({ ...command.input, signal, dispatch, onToolDelivered: (delivered) => send({ delivered }) }, profile);
   }
-  return runSegment({ ...command.input, signal, onText,
-    onToolArgs: (toolArgs, matchedOperation) => send({ toolArgs, matchedOperation }) }, profile, command.mode);
+  return runSegment({ ...command.input, signal }, profile, command.mode);
 }
 
 function receive(message: unknown) {

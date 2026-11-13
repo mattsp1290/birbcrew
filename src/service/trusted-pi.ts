@@ -3,27 +3,52 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { contentText } from "@earendil-works/pi-ai";
+import { contentText, validateToolArguments, type Tool, type ToolCall } from "@earendil-works/pi-ai";
 import { createAgentSession,DefaultResourceLoader,SessionManager,SettingsManager,type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { z } from "zod";
-import type { PiProfile } from "./pi.ts";
+import { sdkSystemEntries, type PiProfile } from "./pi.ts";
 import { runPiWorker } from "./pi-launch.ts";
 import type { TrustedNativeInput } from "./trusted-native-types.ts";
 
 const stateSchema=z.strictObject({sessionId:z.uuid(),messages:z.array(z.json()).max(256)});
 const workerTurn=z.strictObject({text:z.string().min(1).refine(text=>Buffer.byteLength(text)<=65536),checkpoint:stateSchema});
+const textPart=z.object({type:z.literal("text"),text:z.string()});
+const systemEntry=z.strictObject({role:z.literal("system"),content:z.union([z.string(),z.array(textPart)]),timestamp:z.number(),
+  sections:z.record(z.string(),z.string().nullable()).optional(),
+  toolsAdded:z.array(z.looseObject({name:z.string(),description:z.string(),parameters:z.object({}).passthrough()})).optional(),
+  toolsRemoved:z.array(z.object({name:z.string()})).optional()});
+type Appended={role?:unknown;content?:unknown;stopReason?:unknown;toolCallId?:unknown;toolName?:unknown;isError?:unknown};
 
-/** The SDK runs in a confined worker; registered tools still run here, through input.dispatch. The reply
- * must be the text the model sent through this host, and the checkpoint must extend the prior one. */
+/** The SDK runs in a confined worker; registered tools still run here, through input.dispatch, with the
+ * arguments the model sent. What the worker appends to the checkpoint must be this request's prompt, the
+ * replies the model sent through this host, the results the host delivered, and the SDK's own system entries. */
 export async function runTrustedPi(input:TrustedNativeInput,profile:PiProfile) {
   const {text,context,checkpoint,tools}=input;
+  const declared:Tool[]=tools.map(tool=>({name:tool.name,description:tool.description,parameters:tool.inputSchema as Tool["parameters"]}));
+  // The agent coerces a call's arguments against the tool's schema before running it; so does the host.
+  const dispatch=(call:ToolCall,signal:AbortSignal)=>{
+    const tool=declared.find(candidate=>candidate.name===call.name);
+    if(!tool)throw new Error("Unregistered trusted Pi tool call");
+    return input.dispatch({nativeCallId:call.id,toolName:call.name,args:validateToolArguments(tool,call),signal});
+  };
   // trusted-native.ts allows 16 tool calls; each result and the final reply need a model request.
-  const {result,observed,streamed}=await runPiWorker({kind:"trusted",instructions:profile.instructions,input:{text,context,checkpoint,tools}},
-    {profile,signal:input.signal,modelRequests:17,onText:input.onText,dispatch:input.dispatch,onToolDelivered:input.onToolDelivered});
+  const {result,directory,observed,streamed,delivered}=await runPiWorker({kind:"trusted",instructions:profile.instructions,input:{text,context,checkpoint,tools}},
+    {profile,signal:input.signal,modelRequests:17,onText:input.onText,dispatch,onToolDelivered:input.onToolDelivered});
   const turn=workerTurn.parse(result);
   const prior=checkpoint === null ? undefined : stateSchema.parse(checkpoint);
+  const appended=turn.checkpoint.messages.slice(prior?.messages.length ?? 0) as Appended[];
+  const of=(role:string)=>appended.filter(message=>message.role === role);
+  const sdkWritten=sdkSystemEntries({instructions:profile.instructions,context,directory,cwd:"birb-trusted-pi-",tools:declared});
+  const users=of("user");
   if(turn.text!==streamed || turn.text!==observed.map(message=>contentText(message.content,"")).join("") ||
-     (prior && (turn.checkpoint.sessionId!==prior.sessionId || !isDeepStrictEqual(turn.checkpoint.messages.slice(0,prior.messages.length),prior.messages))))
+     (prior && (turn.checkpoint.sessionId!==prior.sessionId || !isDeepStrictEqual(turn.checkpoint.messages.slice(0,prior.messages.length),prior.messages))) ||
+     appended.some(message=>!["system","user","assistant","toolResult"].includes(message.role as string)) ||
+     !of("system").every(message=>{const entry=systemEntry.safeParse(message);return entry.success && sdkWritten(entry.data);}) ||
+     users.length!==1 || !textPart.array().or(z.string()).safeParse(users[0].content).success ||
+     contentText(users[0].content as string)!==text ||
+     !isDeepStrictEqual(of("assistant").map(message=>[message.content,message.stopReason]),observed.map(message=>[message.content,message.stopReason])) ||
+     !isDeepStrictEqual(of("toolResult").map(message=>[message.toolCallId,message.toolName,message.isError,
+       textPart.array().safeParse(message.content).data?.map(part=>part.text).join("\n")]),delivered.map(result=>[result.toolCallId,result.toolName,result.isError,result.text])))
     throw new Error("Trusted Pi worker returned a turn outside its request");
   return turn;
 }

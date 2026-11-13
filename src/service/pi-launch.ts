@@ -3,12 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PI_ATTRIBUTION, type Api, type AssistantMessage, type AssistantMessageEvent, type Context, type Model, type ProviderResponse } from "@earendil-works/pi-ai";
+import { PI_ATTRIBUTION, type Api, type AssistantMessage, type AssistantMessageEvent, type Context, type Model, type ProviderResponse, type ToolCall } from "@earendil-works/pi-ai";
 import { VERSION, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Duplex } from "node:stream";
 import { z } from "zod";
 import { readFrames, writeFrame } from "./pi-channel.ts";
 import type { PiProfile } from "./pi.ts";
+import { toolPreviewReporter } from "./tool-preview.ts";
 
 const source = fileURLToPath(new URL("../..", import.meta.url)).replace(/\/$/, "");
 const launcher = join(source, ".proof/bin/member-launch");
@@ -35,21 +36,20 @@ export const forwardedOptions = z.strictObject({
   timeoutMs: z.int().min(1).max(2_147_483_647).optional(),
   websocketConnectTimeoutMs: z.int().min(1).max(600_000).optional(),
   maxRetries: z.literal(0).optional(),
-  maxRetryDelayMs: z.int().min(0).max(60_000).optional(),
+  maxRetryDelayMs: z.int().min(0).max(600_000).optional(),
 });
-const text = z.string().max(65_536);
 const id = z.int().min(1);
 const toolCall = z.strictObject({ nativeCallId: z.string().min(1).max(256), toolName: z.string().min(1).max(64) });
+// The worker reports no text or previews: the host derives both from the events it relays.
 const workerMessage = z.union([
-  z.strictObject({ delta: text }),
-  z.strictObject({ toolArgs: toolCall.shape.nativeCallId, matchedOperation: z.boolean() }),
   z.strictObject({ request: id, context: z.record(z.string(), z.unknown()), options: forwardedOptions }),
   z.strictObject({ cancel: id }),
-  z.strictObject({ dispatch: id, ...toolCall.shape, args: z.unknown() }),
+  z.strictObject({ dispatch: id, ...toolCall.shape }),
   z.strictObject({ delivered: toolCall }),
   z.strictObject({ result: z.unknown() }),
   z.strictObject({ error: z.string().max(1024) }),
 ]);
+const replyBytes = 65_536, unreadBytes = 64 * 1024 * 1024;
 
 export type PiCommand =
   | { kind: "member"; mode: string; instructions?: string; allowRecordWorkItem?: boolean; input: Record<string, unknown> }
@@ -61,13 +61,17 @@ export interface PiHost {
   /** A member segment ends after one model reply; a trusted turn adds one per registered tool call. */
   modelRequests: number;
   onText?: (delta: string) => void | Promise<void>;
-  /** Whether this segment may publish argument previews, as only a fresh record_work_item call does. */
-  previews?: boolean;
+  /** Also publish text a reply sent without deltas, as the member session's AG-UI translator does. */
+  translatedText?: boolean;
+  /** The request whose fresh record_work_item call may publish argument previews, as runSegment did. */
+  previews?: string;
   onToolArgs?: (nativeCallId: string, matchedOperation: boolean) => void;
-  /** Present only for trusted turns: the registered tools run here, never in the worker. */
-  dispatch?: (call: { nativeCallId: string; toolName: string; args: unknown; signal: AbortSignal }) => Promise<{ text: string; isError: boolean }>;
+  /** Present only for trusted turns: the registered tools run here, with the call the model sent. */
+  dispatch?: (call: ToolCall, signal: AbortSignal) => Promise<{ text: string; isError: boolean }>;
   onToolDelivered?: (call: z.infer<typeof toolCall>) => void | Promise<void>;
 }
+
+export interface Delivered { toolCallId: string; toolName: string; text: string; isError: boolean }
 
 // The identity the SDK's own session sends for this host (pi-coding-agent core/client-identity.js).
 function identity() {
@@ -133,8 +137,8 @@ function failed(model: Model<Api>, aborted: boolean): AssistantMessageEvent {
 /**
  * Runs one Pi command in a worker confined by the member launcher. The worker gets no credentials and no
  * sockets: this host makes each model request with the operator's profile and runs each tool dispatch.
- * Resolves with the worker's unvalidated result, the assistant messages this host relayed, and the text
- * the worker published.
+ * Resolves with the worker's unvalidated result and what the host itself saw: the private directory, the
+ * assistant messages it relayed, the text it published from them, and the tool results it delivered.
  */
 export async function runPiWorker(command: PiCommand, host: PiHost) {
   host.signal.throwIfAborted();
@@ -150,14 +154,15 @@ function supervise(directory: string, command: PiCommand, host: PiHost) {
   const { profile, signal } = host;
   const { headers: _, ...model } = profile.model;
   const launch = piLaunch(directory, [worker], profile.invocationGroup);
-  return new Promise<{ result: unknown; observed: AssistantMessage[]; streamed: string }>((resolve, reject) => {
+  return new Promise<{ result: unknown; directory: string; observed: AssistantMessage[]; streamed: string; delivered: Delivered[] }>((resolve, reject) => {
     const child = spawn(launch.command, launch.args, launch.options);
     const channel = child.stdio[3] as Duplex | null;
     const halted = new AbortController(), exited = new AbortController();
     const streams = new Map<number, AbortController>();
     const observed: AssistantMessage[] = [];
-    // Trusted tool calls the model made, those dispatched, and those whose results the worker has yet to deliver.
-    const relayed = new Map<string, string>(), dispatched = new Set<string>(), undelivered = new Map<string, string>();
+    // Trusted tool calls the model made, those dispatched, and the results not yet delivered to the model.
+    const relayed = new Map<string, ToolCall>(), dispatched = new Set<string>(), undelivered = new Map<string, Delivered>();
+    const delivered: Delivered[] = [];
     let reply: z.infer<typeof workerMessage> | undefined, failure: unknown, requests = 0, inflight = 0;
     let streamed = "", streamedBytes = 0;
     let hooks: ReturnType<typeof providerHooks> | undefined;
@@ -179,25 +184,55 @@ function supervise(directory: string, command: PiCommand, host: PiHost) {
       callbacks = callbacks.then(async () => { if (!halted.signal.aborted) await action(); }).catch(fail);
     };
     const post = (message: object) => {
-      if (channel?.writable && !exited.signal.aborted) writeFrame(channel, message, (error) => { if (error) fail(error); });
+      if (!channel?.writable || exited.signal.aborted) return;
+      if (channel.writableLength > unreadBytes) return fail(new Error("Pi worker stopped reading its channel"));
+      writeFrame(channel, message, (error) => { if (error) fail(error); });
     };
     const working = () => AbortSignal.any([signal, halted.signal, exited.signal]);
+    const preview = host.previews === undefined ? undefined :
+      toolPreviewReporter(host.previews, (callId, matched) => inOrder(() => host.onToolArgs?.(callId, matched)));
+    // sent counts the characters published for each content part of the reply being relayed.
+    function publish(event: AssistantMessageEvent, sent: Map<number, number>) {
+      const text = (index: number, delta: string) => {
+        if (!delta) return;
+        sent.set(index, (sent.get(index) ?? 0) + delta.length);
+        streamedBytes += Buffer.byteLength(delta);
+        if (streamedBytes > replyBytes) throw new Error("Pi model reply exceeded its bound");
+        streamed += delta;
+        inOrder(() => host.onText?.(delta));
+      };
+      if (event.type === "text_delta") text(event.contentIndex, event.delta);
+      else if (host.translatedText && event.type === "text_end") text(event.contentIndex, event.content.slice(sent.get(event.contentIndex) ?? 0));
+      else if (host.translatedText && (event.type === "done" || event.type === "error")) {
+        for (const [index, part] of (event.type === "done" ? event.message : event.error).content.entries()) {
+          if (part.type === "text") text(index, part.text.slice(sent.get(index) ?? 0));
+        }
+      } else if (preview && event.type === "toolcall_delta" && event.delta) {
+        const call = event.partial.content[event.contentIndex];
+        if (call?.type === "toolCall" && call.name === "record_work_item" && call.id) preview(call.id, call.arguments.operation_id);
+      }
+    }
 
+    // The SDK waits for each reply before it asks again, so a worker never needs two requests at once.
     async function serve(id: number, context: Context, options: z.infer<typeof forwardedOptions>) {
-      if (streams.has(id) || ++requests > host.modelRequests) throw new Error("Pi worker exceeded its model requests");
+      if (streams.size || ++requests > host.modelRequests) throw new Error("Pi worker exceeded its model requests");
       const controller = new AbortController();
       streams.set(id, controller);
       let settled = false;
+      const sent = new Map<number, number>();
       try {
         const extension = await (hooks ??= providerHooks(profile));
         const events = profile.modelRuntime.streamSimple(profile.model, context, {
           ...options, maxRetries: 0, identity: identity(), ...extension.options, signal: AbortSignal.any([working(), controller.signal]),
         });
         for await (const event of events) {
+          publish(event, sent);
           if (event.type === "done" || event.type === "error") {
-            const message = event.type === "done" ? event.message : event.error;
-            observed.push(message);
-            for (const part of message.content) if (part.type === "toolCall") relayed.set(part.id, part.name);
+            observed.push(event.type === "done" ? event.message : event.error);
+            // The agent runs tools only from a reply that ends to use them.
+            if (event.type === "done" && event.reason === "toolUse") {
+              for (const part of event.message.content) if (part.type === "toolCall") relayed.set(part.id, part);
+            }
             settled = true;
           }
           post({ stream: id, event });
@@ -209,18 +244,19 @@ function supervise(directory: string, command: PiCommand, host: PiHost) {
       }
     }
 
-    async function dispatch(id: number, call: z.infer<typeof toolCall> & { args: unknown }) {
-      if (!host.dispatch || relayed.get(call.nativeCallId) !== call.toolName || dispatched.has(call.nativeCallId)) {
+    // The tool runs with the call the model sent, never with arguments from the worker. As in process, a
+    // failed dispatch fails the turn.
+    async function dispatch(id: number, { nativeCallId, toolName }: z.infer<typeof toolCall>) {
+      const call = relayed.get(nativeCallId);
+      if (!host.dispatch || call?.name !== toolName || dispatched.has(nativeCallId)) {
         throw new Error("Pi worker dispatched a tool call its model did not make");
       }
-      dispatched.add(call.nativeCallId);
+      dispatched.add(nativeCallId);
       inflight++;
       try {
-        const { text, isError } = await host.dispatch({ ...call, signal: working() });
-        undelivered.set(call.nativeCallId, call.toolName);
+        const { text, isError } = await host.dispatch(call, working());
+        undelivered.set(nativeCallId, { toolCallId: nativeCallId, toolName, text, isError });
         post({ dispatch: id, result: { text, isError } });
-      } catch (error) {
-        post({ dispatch: id, error: error instanceof Error ? error.message : "Trusted application tool failed" });
       } finally {
         inflight--;
       }
@@ -231,23 +267,16 @@ function supervise(directory: string, command: PiCommand, host: PiHost) {
       const parsed = workerMessage.safeParse(value);
       if (!parsed.success || reply) return fail(new Error("Unexpected Pi worker message"));
       const message = parsed.data;
-      if ("delta" in message) {
-        streamedBytes += Buffer.byteLength(message.delta);
-        if (streamedBytes > 65_536) return fail(new Error("Pi worker exceeded its reply bound"));
-        streamed += message.delta;
-        inOrder(() => host.onText?.(message.delta));
-      } else if ("toolArgs" in message) {
-        if (!host.previews) return fail(new Error("Unexpected Pi tool preview"));
-        inOrder(() => host.onToolArgs?.(message.toolArgs, message.matchedOperation));
-      } else if ("request" in message) serve(message.request, message.context as unknown as Context, message.options).catch(fail);
+      if ("request" in message) serve(message.request, message.context as unknown as Context, message.options).catch(fail);
       else if ("cancel" in message) streams.get(message.cancel)?.abort();
       else if ("dispatch" in message) {
         const { dispatch: id, ...call } = message;
         dispatch(id, call).catch(fail);
       } else if ("delivered" in message) {
-        const { nativeCallId, toolName } = message.delivered;
-        if (undelivered.get(nativeCallId) !== toolName) return fail(new Error("Unpaired Pi tool result"));
-        undelivered.delete(nativeCallId);
+        const result = undelivered.get(message.delivered.nativeCallId);
+        if (result?.toolName !== message.delivered.toolName) return fail(new Error("Unpaired Pi tool result"));
+        undelivered.delete(result.toolCallId);
+        delivered.push(result);
         inOrder(() => host.onToolDelivered?.(message.delivered));
       } else if ("result" in message && (inflight || undelivered.size)) fail(new Error("Pi worker finished before its tool results"));
       else reply = message;
@@ -281,7 +310,7 @@ function supervise(directory: string, command: PiCommand, host: PiHost) {
         if ("error" in reply) throw new Error(reply.error);
         if (!observed.length) throw new Error("Pi worker answered without a model request");
         if (profile.prepare) (await hooks!).verify();
-        resolve({ result: reply.result, observed, streamed });
+        resolve({ result: reply.result, directory, observed, streamed, delivered });
       } catch (error) {
         reject(error);
       }

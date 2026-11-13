@@ -2,7 +2,9 @@ import type { Duplex } from "node:stream";
 
 // The host and its confined Pi worker exchange newline-delimited JSON over descriptor 3. Node's own IPC
 // channel is not used: one malformed line from the worker would throw out of Node's reader and end the host.
-const frameLimit = 32 * 1024 * 1024;
+// A frame holds at most one model context: a 4 MiB checkpoint's turns, the instructions and context, and
+// the tool schemas. The limit counts characters.
+const frameLimit = 16 * 1024 * 1024;
 
 export function readFrames(stream: Duplex, onFrame: (value: unknown) => void, onError: (error: Error) => void) {
   let pending: string[] = [], size = 0, failed = false;

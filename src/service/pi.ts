@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { createTranslator, toAguiMessages, type HistoryEntry } from "@ag-ui/pi";
 import { createDelegationBatch, delegationToolName, delegationToolResults, type Delegation } from "@birbcrew/pi-subagents";
-import { contentText, type Api, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
+import { contentText, toToolDeclaration, type Api, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -128,15 +128,37 @@ const workerSegment = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("delegated"), proposals: z.array(z.unknown()), checkpoint: piCheckpoint, usage: z.unknown() }),
 ]);
 
-// The child profiles come from pi-subagents' role table, as they did in process, never from the worker.
-async function confirmDelegations(calls: AssistantMessage["content"], profile: PiProfile) {
+async function delegationBatch(profile: PiProfile) {
   const batch = createDelegationBatch({ model: profile.model.id, allowRecordWorkItem: !!profile.allowRecordWorkItem });
   let tool: ToolDefinition | undefined;
   await batch.extension({ registerTool: (definition: ToolDefinition) => { tool = definition; } } as unknown as ExtensionAPI);
-  const execute = tool!.execute as unknown as (id: string, args: unknown) => Promise<unknown>;
+  return { batch, tool: tool! };
+}
+
+// The child profiles come from pi-subagents' role table, as they did in process, never from the worker.
+async function confirmDelegations(calls: AssistantMessage["content"], profile: PiProfile) {
+  const { batch, tool } = await delegationBatch(profile);
+  const execute = tool.execute as unknown as (id: string, args: unknown) => Promise<unknown>;
   for (const call of calls) if (call.type === "toolCall") await execute(call.id, call.arguments);
   return batch.confirm(calls, calls.map((call) => ({ role: "toolResult", toolName: delegationToolName,
     toolCallId: call.type === "toolCall" ? call.id : "", isError: false, content: [] })));
+}
+
+type SystemEntry = { content: string | { type: "text"; text: string }[]; sections?: Record<string, string | null>; toolsAdded?: { name: string }[] };
+const untimed = <T extends { timestamp: number }>(message: T) => ({ ...message, timestamp: 0 });
+
+/** What the SDK writes into a session's system entries for this segment, so the host can recognise them. */
+export function sdkSystemEntries(expected: { instructions?: string; context?: string; directory: string; cwd: string;
+  tools: { name: string; description: string; parameters: unknown }[] }) {
+  const preamble = expected.instructions ?? "You are a BirbCrew coworker.";
+  const addendum = expected.context ? `<addendum>\n${expected.context}\n</addendum>` : undefined;
+  const cwd = `<cwd>\n${expected.directory}/${expected.cwd}`;
+  const declarations = new Map(expected.tools.map((tool) => [tool.name, toToolDeclaration(tool as Parameters<typeof toToolDeclaration>[0])]));
+  return (entry: SystemEntry) => contentText(entry.content) === "" &&
+    Object.entries(entry.sections ?? {}).every(([name, value]) => name === "preamble" ? value === preamble :
+      name === "addendum" ? value === (addendum ?? null) :
+      name === "cwd" && typeof value === "string" && value.startsWith(cwd) && /^[A-Za-z0-9]{6}\n<\/cwd>$/.test(value.slice(cwd.length))) &&
+    (entry.toolsAdded ?? []).every((tool) => isDeepStrictEqual(tool, declarations.get(tool.name)));
 }
 
 /**
@@ -147,11 +169,11 @@ async function confirmDelegations(calls: AssistantMessage["content"], profile: P
 async function confinedSegment(input: DriverInput, profile: PiProfile, mode: "text" | DeferredTool | "delegating") {
   const { threadId, runId, text, projectContext, childResults, continuation } = input;
   const tool = mode === "delegating" ? (profile.allowRecordWorkItem ? "record_work_item" : undefined) : mode === "text" ? undefined : mode;
-  const { result, observed, streamed } = await runPiWorker({
+  const { result, directory, observed, streamed } = await runPiWorker({
     kind: "member", mode, instructions: profile.instructions, allowRecordWorkItem: profile.allowRecordWorkItem,
     input: { threadId, runId, text, checkpoint: input.checkpoint, projectContext, childResults, continuation },
-  }, { profile, signal: input.signal, modelRequests: 1, onText: input.onText, onToolArgs: input.onToolArgs,
-    previews: tool === "record_work_item" && !continuation && !childResults });
+  }, { profile, signal: input.signal, modelRequests: 1, onText: input.onText, translatedText: true, onToolArgs: input.onToolArgs,
+    previews: tool === "record_work_item" && !continuation && !childResults ? runId : undefined });
   const segment = workerSegment.parse(result);
   const state = stateSchema.parse(segment.checkpoint.state);
   const prior = input.checkpoint === null ? undefined : stateSchema.parse(input.checkpoint.state);
@@ -167,6 +189,18 @@ async function confinedSegment(input: DriverInput, profile: PiProfile, mode: "te
       (prior?.pending && !("tool" in current && current.tool && isDeepStrictEqual(
         [current.system, current.user, current.tool.proposal], [prior.pending.system, prior.pending.user, prior.pending.proposal]))) ||
       !isDeepStrictEqual(message.content, relayed.content)) throw outside();
+  // The system entries the worker added must be the SDK's own, and a resumed call's results the host's.
+  const sdkWritten = sdkSystemEntries({ instructions: profile.instructions, context: projectContext, directory, cwd: "birb-pi-",
+    tools: [...(tool ? [proposalTool(runId, tool).definition] : []), ...(mode === "delegating" ? [(await delegationBatch(profile)).tool] : [])] });
+  const resumed = "tool" in current ? current.tool : undefined;
+  if (!(prior?.pending ? resumed?.system ?? [] : current.system).every(sdkWritten)) throw outside();
+  if (prior?.pending) {
+    const pendingCalls = prior.pending.proposal.content.filter((part) => part.type === "toolCall");
+    const expected = continuation ? [toolResult(onlyCall(prior.pending), continuation)] : childResults ?
+      delegationToolResults(pendingCalls.map((call) => ({ nativeCallId: call.id })), childResults, prior.pending.proposal.timestamp) : [];
+    const stored = !resumed ? [] : "result" in resumed ? [resumed.result] : resumed.results;
+    if (!isDeepStrictEqual(stored.map(untimed), expected.map(untimed))) throw outside();
+  }
   let proposals: Delegation[] | undefined;
   if (segment.kind === "complete") {
     if (segment.text !== streamed || segment.text !== contentText(relayed.content, "") || calls.length) throw outside();
