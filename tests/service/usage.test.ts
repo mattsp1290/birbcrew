@@ -456,9 +456,9 @@ test("migration 031 takes its locks without queueing, rewrites nothing, leaves i
     assert.deepEqual([...new Set(types(replaced))].sort(), [...auditEventTypes].sort(), "the registry and the CHECK name the same types");
     const [reasons, widened] = [reasonBranches(previous.routine_firings_reason_check), reasonBranches(current.routine_firings_reason_check)];
     assert.ok(reasons.failed.includes("approval_expired"), previous.routine_firings_reason_check);
-    assert.deepEqual(widened, { ...reasons, failed: [...reasons.failed, "usage_limit"] });
     assert.deepEqual([...widened.skipped].sort(), [...skipReasons].sort());
     assert.deepEqual([...widened.failed].sort(), [...failReasons].sort());
+    assert.deepEqual(widened, { ...reasons, failed: [...reasons.failed, "usage_limit"] });
   } finally {
     await db.query("ROLLBACK");
     db.release();
