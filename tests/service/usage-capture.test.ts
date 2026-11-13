@@ -18,7 +18,7 @@ import { runPiSegment, runPiTurn } from "../../src/service/pi.ts";
 import { createProxyProfile } from "../../src/service/proxy-profiles.ts";
 import { MemberStore } from "../../src/service/store.ts";
 import { startSupervisor } from "../../src/service/supervisor.ts";
-import { claudeUsage, codexRolloutModel, codexRolloutTotal, codexUsage, piUsage, type SegmentUsage } from "../../src/service/usage-capture.ts";
+import { claudeUsage, codexRolloutModel, codexRolloutTotal, codexUsage, combinedUsage, piUsage, type SegmentUsage } from "../../src/service/usage-capture.ts";
 import { estimateCost, readPrices } from "../../src/service/usage-prices.ts";
 import { startClaudeFixtureProvider } from "../fixtures/engines/claude/index.mts";
 import { startProvider } from "../fixtures/engines/codex/provider.mts";
@@ -282,6 +282,18 @@ test("Pi names the model that answered, and no model when a segment's calls name
   assert.equal(model([message({ responseModel: "routed" }), message({ responseModel: "routed" })]), "routed");
   assert.equal(model([message(), message({ responseModel: "fallback" })]), null);
   assert.equal(model([message({ responseModel: 5 })]), "requested", "a malformed responseModel is not a model name");
+});
+
+test("a trusted Claude request's queries sum into one row, unknown when any query reported nothing", () => {
+  const query = (input: number, more: object = {}): SegmentUsage => ({ ...reported, model: "claude-sonnet-4-6", inputTokens: input,
+    outputTokens: 10, cachedInputTokens: 2, cacheWriteTokens: 1, reasoningTokens: null, ...more });
+  assert.deepEqual(combinedUsage([query(10), query(30)]), query(40, { outputTokens: 20, cachedInputTokens: 4, cacheWriteTokens: 2 }));
+  assert.deepEqual(combinedUsage([query(10), query(30, { cachedInputTokens: null })]),
+    query(40, { outputTokens: 20, cachedInputTokens: null, cacheWriteTokens: 2 }), "a part one query left out is left out of the sum");
+  assert.deepEqual(combinedUsage([query(10), { state: "unknown", model: "claude-sonnet-4-6" }]), { state: "unknown", model: "claude-sonnet-4-6" });
+  assert.deepEqual(combinedUsage([query(10), query(10, { model: "other" })]).model, null);
+  assert.deepEqual(combinedUsage([]), { state: "unknown", model: null });
+  assert.equal(combinedUsage([query(2_000_000_000), query(2_000_000_000)]).state, "unknown", "a sum the ledger cannot hold");
 });
 
 test("an estimate prices each part of the input at its own rate, exactly, and only for a reported, priced, unbilled segment", async t => {

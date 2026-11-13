@@ -149,3 +149,16 @@ export function codexUsage(total: unknown, prior: Record<string, unknown> | null
     cached: share("cached_input_tokens") ?? null, cacheWrite: share("cache_write_input_tokens") ?? null,
     reasoning: share("reasoning_output_tokens") ?? null });
 }
+
+/** A trusted Claude request runs one query per tool round trip, and its one row is their sum. Any
+ * query that reported nothing usable makes the whole request unknown, and a part one query leaves
+ * out is left out of the sum. */
+export function combinedUsage(parts: readonly SegmentUsage[]): SegmentUsage {
+  const name = sameModel(parts.map(part => part.model));
+  const counted = parts.flatMap(part => part.state === "reported" ? [part] : []);
+  if (!parts.length || counted.length !== parts.length) return unknown(name);
+  type Part = "inputTokens" | "outputTokens" | "cachedInputTokens" | "cacheWriteTokens" | "reasoningTokens" | "costUsd";
+  const sum = (field: Part) => counted.every(part => part[field] !== null) ? counted.reduce((total, part) => total + part[field]!, 0) : null;
+  return reported(name, { input: sum("inputTokens")!, output: sum("outputTokens")!, cached: sum("cachedInputTokens"),
+    cacheWrite: sum("cacheWriteTokens"), reasoning: sum("reasoningTokens"), cost: sum("costUsd") });
+}

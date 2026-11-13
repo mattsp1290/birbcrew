@@ -4,6 +4,7 @@ import { runTrustedPi } from "./trusted-pi.ts";
 import { runTrustedClaude } from "./trusted-claude.ts";
 import { runTrustedCodex } from "./trusted-codex.ts";
 import type { TrustedNativeInput, TrustedNativeProfile } from "./trusted-native-types.ts";
+import { segmentUsage } from "./usage-capture.ts";
 export type { TrustedNativeInput, TrustedNativeTool, TrustedNativeProfile } from "./trusted-native-types.ts";
 
 const envelope = z.strictObject({version:z.literal(1),engine:z.enum(["pi","claude","codex"]),
@@ -64,5 +65,5 @@ export async function runTrustedNativeTurn(input: TrustedNativeInput, profile: T
   input.signal.throwIfAborted();
   const checkpoint = envelope.parse({version:1,engine:input.engine,threadId:input.threadId,binding:input.binding,capabilities,state:result.checkpoint});
   if (Buffer.byteLength(JSON.stringify(checkpoint)) > 4 * 1024 * 1024) throw new Error("Trusted checkpoint exceeds 4 MiB");
-  return {text:result.text,checkpoint};
+  return {text:result.text,checkpoint,usage:segmentUsage.parse(result.usage)};
 }

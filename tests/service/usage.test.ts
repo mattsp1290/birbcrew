@@ -21,7 +21,8 @@ import { FileRecoveryFence } from "../../src/service/recovery-fence.ts";
 import { failReasons, RoutineApi, RoutineDispatcher, skipReasons, type Clock } from "../../src/service/routines.ts";
 import { MemberStore, ownerAdmissionActivity } from "../../src/service/store.ts";
 import type { Launch } from "../../src/service/supervisor.ts";
-import { recordSegmentUsage, UsageApi } from "../../src/service/usage.ts";
+import { TrustedContextStore } from "../../src/service/trusted-context.ts";
+import { recordSegmentUsage, recordTrustedUsage, UsageApi } from "../../src/service/usage.ts";
 import type { SegmentUsage } from "../../src/service/usage-capture.ts";
 import type { PriceTable } from "../../src/service/usage-prices.ts";
 
@@ -243,15 +244,15 @@ test("the usage routes total an owner's usage by member and conversation, mark r
   assert.deepEqual(summary, { status: 200, body: { apiVersion: "1", from: null, to: null,
     total: { segments: 4, unknownSegments: 1, inputTokens: 1350, outputTokens: 135, totalTokens: 1485, cachedInputTokens: 400,
       cacheWriteTokens: 0, reasoningTokens: 10, costUsd: "0.25", costReportedSegments: 1, estimatedCostUsd: null, costEstimatedSegments: 0 },
-    routine: routineTotals } });
+    routine: routineTotals, trusted: zero } });
 
   const members = (await g.api("/v1/usage/members")).body;
   const piTotals = { segments: 3, unknownSegments: 1, inputTokens: 1050, outputTokens: 105, totalTokens: 1155, cachedInputTokens: 400,
     cacheWriteTokens: 0, reasoningTokens: 0, costUsd: "0.25", costReportedSegments: 1, estimatedCostUsd: null, costEstimatedSegments: 0 };
   const codexTotals = { ...zero, segments: 1, inputTokens: 300, outputTokens: 30, totalTokens: 330, reasoningTokens: 10 };
   assert.deepEqual(members.members, [
-    { memberId: pi.memberId, engine: "pi", total: piTotals, routine: routineTotals, budget: null },
-    { memberId: codex.memberId, engine: "codex", total: codexTotals, routine: zero, budget: null },
+    { memberId: pi.memberId, engine: "pi", total: piTotals, routine: routineTotals, trusted: zero, budget: null },
+    { memberId: codex.memberId, engine: "codex", total: codexTotals, routine: zero, trusted: zero, budget: null },
   ].sort((a, b) => a.memberId.localeCompare(b.memberId)));
   const page = (await g.api("/v1/usage/members?limit=1")).body;
   assert.equal(page.hasMore, true);
@@ -260,7 +261,7 @@ test("the usage routes total an owner's usage by member and conversation, mark r
 
   const conversations = (await g.api("/v1/usage/conversations?memberId=" + codex.memberId)).body;
   assert.deepEqual(conversations, { apiVersion: "1", conversations: [{ conversationId: third.conversationId, memberId: codex.memberId,
-    total: codexTotals, routine: zero }], nextAfter: third.conversationId, hasMore: false });
+    total: codexTotals, routine: zero, trusted: zero }], nextAfter: third.conversationId, hasMore: false });
   assert.equal((await g.api("/v1/usage/conversations")).body.conversations.length, 4);
 
   const records = (await g.api("/v1/usage/records?limit=3")).body;
@@ -271,7 +272,7 @@ test("the usage routes total an owner's usage by member and conversation, mark r
   const rest = (await g.api("/v1/usage/records?before=" + records.nextBefore)).body;
   assert.deepEqual(rest.records.map((r: { requestId: string }) => r.requestId), [first.requestId]);
   assert.deepEqual({ ...rest.records[0], usageId: undefined, recordedAt: undefined }, { usageId: undefined, recordedAt: undefined,
-    memberId: pi.memberId, conversationId: first.conversationId, requestId: first.requestId, childId: null, engine: "pi",
+    memberId: pi.memberId, conversationId: first.conversationId, requestId: first.requestId, childId: null, lane: "member", engine: "pi",
     state: "reported", model: "fixture-model", inputTokens: 1000, outputTokens: 100, cachedInputTokens: 400, cacheWriteTokens: null,
     reasoningTokens: null, costUsd: "0.25", estimatedCostUsd: null, estimatePrice: null, initiator: { kind: "owner" } });
   assert.equal((await g.api("/v1/usage/records?conversationId=" + third.conversationId)).body.records.length, 1);
@@ -384,6 +385,77 @@ test("an estimated cost is written once with the rates it used, kept apart from 
   ] as const) await assert.rejects(direct(columns), { code: "23514" }, why);
   await direct({ ...counts, estimated_cost_usd: "0.000000000001", estimate_price: rates });
   await target.commit();
+});
+
+/** A trusted-context request started as runTrustedRequest starts one: its claim binds the generation and token. */
+async function trustedStart(db: MemberStore, owner: { ownerId: string; memberId: string }) {
+  const trusted = new TrustedContextStore(db.pool, { id: "usage-test", tools: [], async authorize() { return true; } });
+  const key = { ownerId: owner.ownerId, conversationId: await conversation(db, owner) };
+  await trusted.open(key, { scope: "scope", version: "v1", text: "context" });
+  const requestId = randomUUID();
+  await trusted.submit(key, requestId, "prompt");
+  const start = await trusted.begin(key);
+  assert.ok(start);
+  return { trusted, key, requestId, claim: start.claim };
+}
+
+test("a trusted-context request is metered once in its own lane, as the owner's, and counts toward its member's budget", async (t) => {
+  const owner = await member(store, undefined, "claude");
+  const g = await gateway(t, {} as MemberClient, owner.ownerId);
+  const { trusted, key, requestId, claim } = await trustedStart(store, owner);
+  const usage = reported(1000, 100, { model: "claude-sonnet-4-6", cachedInputTokens: 400 });
+  const prices = priced("3", "15", "0.3", "claude-sonnet-4-6");
+  // Neither a stale claim nor another owner's names the run, and a repeated write adds nothing.
+  await recordTrustedUsage(pool, { ...claim, token: randomUUID() }, usage, prices);
+  await recordTrustedUsage(pool, { ...claim, generation: claim.generation + 1 }, usage, prices);
+  await recordTrustedUsage(pool, { ...claim, ownerId: "owner-" + randomUUID() }, usage, prices);
+  assert.equal((await pool.query("SELECT 1 FROM birbcrew_ts.usage_ledger WHERE conversation_id=$1", [key.conversationId])).rowCount, 0);
+  await recordTrustedUsage(pool, claim, usage, prices);
+  await recordTrustedUsage(pool, claim, reported(5, 5), prices);
+  await trusted.commit(claim, "reply", {});
+  const { rows } = await pool.query(`SELECT token, trusted_request_id, child_id, input_tokens FROM birbcrew_ts.usage_ledger
+    WHERE conversation_id=$1`, [key.conversationId]);
+  assert.deepEqual(rows, [{ token: null, trusted_request_id: requestId, child_id: null, input_tokens: 1000 }]);
+
+  // Its record names its lane and the owner, as the trusted lane's effects do in the audit trail;
+  // the totals carry it in total and in their trusted part.
+  const [record] = (await g.api("/v1/usage/records?conversationId=" + key.conversationId)).body.records;
+  assert.deepEqual([record.lane, record.engine, record.requestId, record.initiator, record.estimatedCostUsd],
+    ["trusted", "claude", requestId, { kind: "owner" }, "0.00342"]);
+  const memberLane = await spend(store, owner, reported(10, 1));
+  const summary = (await g.api("/v1/usage")).body;
+  assert.deepEqual([summary.total.segments, summary.total.totalTokens, summary.trusted.segments, summary.trusted.totalTokens,
+    summary.trusted.estimatedCostUsd, summary.routine.segments], [2, 1111, 1, 1100, "0.00342", 0]);
+  assert.deepEqual((await g.api("/v1/usage/members")).body.members[0].trusted, summary.trusted);
+  assert.deepEqual((await g.api("/v1/usage/records?conversationId=" + memberLane.conversationId)).body.records[0].lane, "member");
+
+  // The budget is the member's: the trusted lane's tokens count in its window, and the member lane is
+  // refused once they use it up, though the trusted lane itself is never refused by it.
+  const budget = await g.api("/v1/usage/budgets/" + owner.memberId, { tokenLimit: 1111 }, undefined, "PUT");
+  assert.deepEqual([budget.body.usedTokens, budget.body.admitting], [1111, false]);
+
+  // Erasing the trusted conversation keeps its row: counts and a model, never content.
+  await trusted.invalidate(key, 1, { scope: "scope", version: "v2", text: "context" });
+  await trusted.erase(key);
+  assert.equal((await g.api("/v1/usage/records?conversationId=" + key.conversationId)).body.records.length, 1);
+
+  // The ledger's CHECKs and keys hold whatever writes a trusted row.
+  const next = await trustedStart(store, owner);
+  const direct = (columns: Record<string, unknown>) => {
+    const names = Object.keys(columns), values = Object.values(columns);
+    return pool.query(`INSERT INTO birbcrew_ts.usage_ledger (owner_id,member_id,conversation_id,engine,state,${names})
+      VALUES ($1,$2,$3,'claude','unknown',${names.map((_, i) => "$" + (i + 4))})`, [owner.ownerId, owner.memberId, next.key.conversationId, ...values]);
+  };
+  for (const [why, columns] of [
+    ["a launch token as well", { request_id: next.requestId, trusted_request_id: next.requestId, token: randomUUID() }],
+    ["neither a token nor a trusted request", { request_id: next.requestId }],
+    ["another request's ID", { request_id: randomUUID(), trusted_request_id: next.requestId }],
+    ["a Pi child", { request_id: next.requestId, trusted_request_id: next.requestId, child_id: randomUUID() }],
+  ] as const) await assert.rejects(direct(columns), { code: "23514" }, why);
+  const unknown = randomUUID();
+  await assert.rejects(direct({ request_id: unknown, trusted_request_id: unknown }), { code: "23503" }, "a trusted request that does not exist");
+  await direct({ request_id: next.requestId, trusted_request_id: next.requestId });
+  await assert.rejects(direct({ request_id: next.requestId, trusted_request_id: next.requestId }), { code: "23505" }, "one row per trusted request");
 });
 
 test("an owner sets, changes and clears a member's budget; each change is audited once", async (t) => {
@@ -871,7 +943,7 @@ test("migration 031 completes while a native turn holds its admission", async (t
   assert.equal((await upgraded.query("SELECT count(*)::integer AS n FROM birbcrew_ts.usage_ledger")).rows[0].n, 1);
 });
 
-test("migration 036 adds the estimate without a rewrite or a scan, never queues for the ledger, and leaves earlier rows unestimated", async (t) => {
+test("migration 036 adds the estimate and the trusted lane without a rewrite or a scan, never queues, and leaves earlier rows unestimated", async (t) => {
   const upgraded = await databaseAt(t, 32);
   const current = new MemberStore(upgraded);
   const owner = await member(current, undefined, "claude");
@@ -891,11 +963,16 @@ test("migration 036 adds the estimate without a rewrite or a scan, never queues 
     assert.deepEqual((await db.query(file)).rows[0], before, "no rewrite");
     const { rows } = await db.query(`SELECT c.relname AS relation, l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
       WHERE l.pid=pg_backend_pid() AND c.relkind='r' AND c.relnamespace='birbcrew_ts'::regnamespace ORDER BY 1,2`);
-    assert.deepEqual(rows, [{ relation: "usage_ledger", mode: "AccessExclusiveLock" }]);
+    // No other table, and nothing on trusted_requests stronger than the foreign key needs: SHARE ROW
+    // EXCLUSIVE allows a running trusted turn's reads. The ledger's weaker entries sit under its ACCESS EXCLUSIVE.
+    const modes = (relation: string) => rows.filter(row => row.relation === relation).map(row => row.mode);
+    assert.deepEqual([...new Set(rows.map(row => row.relation))], ["trusted_requests", "usage_ledger"]);
+    assert.deepEqual(modes("trusted_requests"), ["AccessShareLock", "ShareRowExclusiveLock"]);
+    assert.ok(modes("usage_ledger").includes("AccessExclusiveLock"));
     const { rows: checks } = await db.query(`SELECT conname AS name, convalidated AS validated FROM pg_constraint
-      WHERE conrelid='birbcrew_ts.usage_ledger'::regclass AND conname LIKE 'usage_ledger_estimate%' ORDER BY 1`);
-    assert.deepEqual(checks, [{ name: "usage_ledger_estimate_check", validated: false },
-      { name: "usage_ledger_estimate_price_check", validated: false }], "NOT VALID: no row is scanned");
+      WHERE conrelid='birbcrew_ts.usage_ledger'::regclass AND conname ~ '^usage_ledger_(estimate|lane|trusted)' ORDER BY 1`);
+    assert.deepEqual(checks, ["usage_ledger_estimate_check", "usage_ledger_estimate_price_check", "usage_ledger_lane_check",
+      "usage_ledger_trusted_request_fkey"].map(name => ({ name, validated: false })), "NOT VALID: no row is scanned");
   } finally {
     await db.query("ROLLBACK");
     db.release();
@@ -929,6 +1006,20 @@ test("migration 036 adds the estimate without a rewrite or a scan, never queues 
   const records = (await new UsageApi(current).records(owner.ownerId, {})).records;
   assert.deepEqual(records.map(r => [r.requestId, r.estimatedCostUsd]),
     [[later.request.requestId, "0.0028"], [earlier.request.requestId, null]]);
+});
+
+test("migration 036 completes while a trusted-context turn holds its lease", async (t) => {
+  const upgraded = await databaseAt(t, 32);
+  const current = new MemberStore(upgraded);
+  const owner = await member(current, undefined, "claude");
+  const { trusted, claim } = await trustedStart(current, owner);
+  // A trusted native turn reads its request under its lease's transaction for the whole turn.
+  await trusted.admitted(claim, AbortSignal.timeout(30_000), async () => {
+    const migrated = await Promise.race([current.migrate().then(() => true), delay(5_000, false)]);
+    assert.equal(migrated, true, "migration 036 must not wait for a running trusted turn");
+  });
+  await recordTrustedUsage(upgraded, claim, reported(3, 4));
+  assert.equal((await upgraded.query("SELECT count(*)::integer AS n FROM birbcrew_ts.usage_ledger WHERE trusted_request_id IS NOT NULL")).rows[0].n, 1);
 });
 
 test("a held installation refuses every usage write and still serves reads", async (t) => {

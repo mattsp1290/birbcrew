@@ -6,6 +6,7 @@ import { createAgentSession,DefaultResourceLoader,SessionManager,SettingsManager
 import { z } from "zod";
 import type { PiProfile } from "./pi.ts";
 import type { TrustedNativeInput } from "./trusted-native-types.ts";
+import { piUsage } from "./usage-capture.ts";
 
 const stateSchema=z.strictObject({sessionId:z.uuid(),messages:z.array(z.json()).max(256)});
 export async function runTrustedPi(input:TrustedNativeInput,profile:PiProfile) {
@@ -55,13 +56,16 @@ export async function runTrustedPi(input:TrustedNativeInput,profile:PiProfile) {
       const expected=input.tools.map(t=>t.name).sort();
       if(JSON.stringify(session.getActiveToolNames().sort())!==JSON.stringify(expected))throw new Error("Unexpected trusted Pi tool catalog");
       input.signal.addEventListener("abort",stop,{once:true});input.signal.throwIfAborted();
+      const before=sessionManager.getEntries().length;
       await session.prompt(input.text,{expandPromptTemplates:false});await session.waitForIdle();
       await Promise.all(publications);input.signal.throwIfAborted();if(failure)throw failure;
       const messages=sessionManager.getEntries().flatMap(e=>e.type === "message"?[e.message]:[]);
       const last=messages.at(-1);
       if(!text || completed.size || last?.role !== "assistant" || last.stopReason !== "stop")throw new Error("Trusted Pi turn did not complete");
       prepared?.verify();
-      return {text,checkpoint:stateSchema.parse({sessionId:state.sessionId,messages:JSON.parse(JSON.stringify(messages))})};
+      // This request's own model calls: the assistant messages it added, not the restored history.
+      const usage=piUsage(sessionManager.getEntries().slice(before).flatMap(e=>e.type === "message" && e.message.role === "assistant"?[e.message]:[]));
+      return {text,checkpoint:stateSchema.parse({sessionId:state.sessionId,messages:JSON.parse(JSON.stringify(messages))}),usage};
     } finally {input.signal.removeEventListener("abort",stop);unsubscribe();session.dispose();}
   } finally {await rm(cwd,{recursive:true,force:true});}
 }
