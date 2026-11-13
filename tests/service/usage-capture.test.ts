@@ -16,7 +16,7 @@ import { runPiSegment, runPiTurn } from "../../src/service/pi.ts";
 import { createProxyProfile } from "../../src/service/proxy-profiles.ts";
 import { MemberStore } from "../../src/service/store.ts";
 import { startSupervisor } from "../../src/service/supervisor.ts";
-import { claudeUsage, codexRolloutTotal, codexUsage, piUsage } from "../../src/service/usage-capture.ts";
+import { claudeUsage, codexRolloutModel, codexRolloutTotal, codexUsage, piUsage } from "../../src/service/usage-capture.ts";
 import { startClaudeFixtureProvider } from "../fixtures/engines/claude/index.mts";
 import { startProvider } from "../fixtures/engines/codex/provider.mts";
 import { createPiFixtureOptions } from "../fixtures/engines/pi/index.mts";
@@ -37,7 +37,8 @@ test("Codex reports a native thread's running total; each turn records only its 
   const first = await runCodexTurn(input, profile);
   const second = await runCodexTurn({ ...input, runId: randomUUID(), text: "recall", checkpoint: first.checkpoint }, profile);
   const third = await runCodexTurn({ ...input, runId: randomUUID(), text: "recall", checkpoint: second.checkpoint }, profile);
-  const share = (n: number) => ({ ...reported, model: null, inputTokens: 100 * n, outputTokens: 7 * n, cachedInputTokens: 10 * n,
+  // The model is the one each turn's turn_context entry in the rollout names.
+  const share = (n: number) => ({ ...reported, model: "gpt-5.4", inputTokens: 100 * n, outputTokens: 7 * n, cachedInputTokens: 10 * n,
     cacheWriteTokens: 0, reasoningTokens: 2 * n });
   assert.deepEqual([first.usage, second.usage, third.usage], [share(1), share(2), share(3)]);
   assert.equal(provider.requests.length, 3);
@@ -46,7 +47,26 @@ test("Codex reports a native thread's running total; each turn records only its 
   const silent = await startProvider();
   t.after(silent.close);
   const quiet = await runCodexTurn({ ...input, threadId: randomUUID() }, { ...profile, baseUrl: silent.url });
-  assert.deepEqual(quiet.usage, { state: "unknown", model: null });
+  assert.deepEqual(quiet.usage, { state: "unknown", model: "gpt-5.4" });
+});
+
+test("a Codex rollout names its last turn's model only when that turn's entries agree", () => {
+  const line = (value: object) => JSON.stringify(value);
+  const started = line({ type: "event_msg", payload: { type: "task_started" } });
+  const context = (model: unknown) => line({ type: "turn_context", payload: { turn_id: randomUUID(), model } });
+  const done = line({ type: "event_msg", payload: { type: "task_complete" } });
+  const earlier = [line({ type: "session_meta" }), started, context("gpt-old"), done];
+  assert.equal(codexRolloutModel([...earlier, started, context("gpt-5.4"), done]), "gpt-5.4", "the last turn, not an earlier one");
+  assert.equal(codexRolloutModel([...earlier, started, context("gpt-5.4"), context("gpt-5.4"), done]), "gpt-5.4");
+  assert.equal(codexRolloutModel([...earlier, started, context("gpt-5.4"), context("gpt-5.5"), done]), null, "two models in one turn");
+  assert.equal(codexRolloutModel([...earlier, started, done]), null, "a turn with no turn_context");
+  assert.equal(codexRolloutModel([...earlier, started, context(7), done]), null);
+  assert.equal(codexRolloutModel([...earlier, started, context("x".repeat(257)), done]), null, "longer than the ledger keeps");
+  assert.equal(codexRolloutModel([context("gpt-5.4"), done]), null, "no task_started");
+  assert.equal(codexRolloutModel([...earlier, started, "{not json", done]), null);
+  assert.deepEqual(codexUsage({ input_tokens: 9, output_tokens: 1 }, null, "gpt-5.4"), { ...reported, model: "gpt-5.4", inputTokens: 9,
+    outputTokens: 1, cachedInputTokens: null, cacheWriteTokens: null, reasoningTokens: null });
+  assert.deepEqual(codexUsage({ input_tokens: 0, output_tokens: 0 }, null, "gpt-5.4"), { state: "unknown", model: "gpt-5.4" });
 });
 
 test("a Codex rollout that cannot be read, or a total that went backwards, is unknown", () => {
@@ -202,7 +222,7 @@ test("the supervisor records one ledger row per launch for each engine, and a re
   assert.deepEqual(Object.fromEntries(rows), {
     pi: [{ token: true, engine: "pi", state: "unknown", model: "faux-1", input: null, output: null }],
     claude: [{ token: true, engine: "claude", state: "reported", model: "claude-sonnet-4-6", input: 10, output: 10 }],
-    codex: [{ token: true, engine: "codex", state: "unknown", model: null, input: null, output: null }],
+    codex: [{ token: true, engine: "codex", state: "unknown", model: "gpt-5.4", input: null, output: null }],
   });
   // Each model.invoke span carries the segment's usage state and, when reported, its two counts.
   const spans = (await readFile(traces, "utf8")).trim().split("\n").map(line => JSON.parse(line))
@@ -224,4 +244,15 @@ test("Pi keeps a cost only when every call's total is the provider's billed cost
   assert.deepEqual(piUsage([]), { state: "unknown", model: null });
   assert.deepEqual(piUsage([{ role: "assistant", model: "m", usage: { input: -1, output: 1, cacheRead: 0, cacheWrite: 0 } }]),
     { state: "unknown", model: "m" });
+});
+
+test("Pi names the model that answered, and no model when a segment's calls name different ones", () => {
+  const message = (extra: object = {}) => ({ role: "assistant", model: "requested", usage: { input: 70, output: 9, cacheRead: 30,
+    cacheWrite: 0, totalTokens: 109, cost: { total: 0.1 } }, ...extra });
+  const model = (messages: object[]) => piUsage(messages).model;
+  assert.equal(model([message(), message()]), "requested");
+  // pi-ai sets responseModel when the provider names another model, as a router or a fallback does.
+  assert.equal(model([message({ responseModel: "routed" }), message({ responseModel: "routed" })]), "routed");
+  assert.equal(model([message(), message({ responseModel: "fallback" })]), null);
+  assert.equal(model([message({ responseModel: 5 })]), "requested", "a malformed responseModel is not a model name");
 });

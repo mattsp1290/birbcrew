@@ -42,20 +42,28 @@ function reported(name: string | null, fields: { input?: number; output?: number
 }
 
 const piMessage = z.looseObject({
-  role: z.literal("assistant"), model: z.unknown().optional(),
+  role: z.literal("assistant"), model: z.unknown().optional(), responseModel: z.unknown().optional(),
   usage: z.looseObject({
     input: z.unknown(), output: z.unknown(), cacheRead: z.unknown(), cacheWrite: z.unknown(), reasoning: z.unknown().optional(),
     cost: z.looseObject({ total: z.unknown(), totalFromProvider: z.unknown().optional() }).optional(),
   }),
 });
 
+/** The one model every call names, else null: an operator's price is keyed on it, so a segment whose
+ * calls disagree has no model to price. */
+function sameModel(names: readonly unknown[]) {
+  const distinct = new Set(names.map(reportedModel));
+  return distinct.size === 1 ? [...distinct][0] : null;
+}
+
 /** Pi (pi-ai): every assistant message carries the usage of the model call that produced it. Its
  * `input` excludes cache reads and writes. Its cost is a catalog estimate unless
- * `totalFromProvider` is true; the segment keeps a cost only when every call has a billed one. */
+ * `totalFromProvider` is true; the segment keeps a cost only when every call has a billed one. The
+ * model is the one that answered: pi-ai sets `responseModel` when the provider names another model
+ * than the one requested, as a router or a fallback does. */
 export function piUsage(messages: readonly unknown[]): SegmentUsage {
   const calls = messages.map(message => piMessage.safeParse(message));
-  const last = calls.at(-1)?.data;
-  const name = reportedModel(last?.model);
+  const name = sameModel(calls.map(call => typeof call.data?.responseModel === "string" ? call.data.responseModel : call.data?.model));
   if (!calls.length || calls.some(call => !call.success)) return unknown(name);
   const sum = { input: 0, output: 0, cached: 0, cacheWrite: 0, reasoning: 0 as number | null, cost: 0 as number | null };
   for (const { data } of calls) {
@@ -111,19 +119,32 @@ export function codexRolloutTotal(lines: readonly string[]): Record<string, unkn
   return total;
 }
 
+/** The model of a Codex rollout's last turn: CLI 0.167.1 writes a turn_context entry naming it after
+ * each task_started. Null when that turn names none, or names more than one. */
+export function codexRolloutModel(lines: readonly string[]): string | null {
+  const names: unknown[] = [];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let entry: { type?: unknown; payload?: { type?: unknown; model?: unknown } };
+    try { entry = JSON.parse(lines[i]); } catch { return null; }
+    if (entry?.type === "event_msg" && entry.payload?.type === "task_started") return names.length ? sameModel(names) : null;
+    if (entry?.type === "turn_context") names.push(entry.payload?.model);
+  }
+  return null;
+}
+
 /** Codex (SDK 0.167.1 turn.completed): the usage is the native thread's running total, carried
  * across resumed turns, so this turn's share is the total less the one the prior rollout ended
  * on. Responses API counts: input_tokens already includes the cached tokens and output_tokens
- * the reasoning tokens. Codex names no model and no cost. */
-export function codexUsage(total: unknown, prior: Record<string, unknown> | null | undefined): SegmentUsage {
+ * the reasoning tokens. Codex reports no cost, and names the model only in its rollout. */
+export function codexUsage(total: unknown, prior: Record<string, unknown> | null | undefined, name: string | null = null): SegmentUsage {
   const now = codexTotal.safeParse(total);
-  if (!now.success || prior === undefined) return unknown();
+  if (!now.success || prior === undefined) return unknown(name);
   const share = (field: typeof codexFields[number]) => {
     const after = tokens(now.data[field]), before = tokens(prior?.[field] ?? 0);
     return after === undefined || before === undefined || after < before ? undefined : after - before;
   };
   // A part of the input or output that cannot be read is left out; the counts themselves must be sound.
-  return reported(null, { input: share("input_tokens"), output: share("output_tokens"),
+  return reported(name, { input: share("input_tokens"), output: share("output_tokens"),
     cached: share("cached_input_tokens") ?? null, cacheWrite: share("cache_write_input_tokens") ?? null,
     reasoning: share("reasoning_output_tokens") ?? null });
 }
