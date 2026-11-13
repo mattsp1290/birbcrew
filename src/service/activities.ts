@@ -7,7 +7,7 @@ import { recoverClaudeProposal } from "./claude.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Delegation, ChildOutcome } from "@birbcrew/pi-subagents";
 import { ChildStore, type ChildKey } from "./children.ts";
-import type { ChildProfile } from "./child-target.ts";
+import { ChildTargetError, type ChildProfile } from "./child-target.ts";
 import { activityQueue } from "./queues.ts";
 import { Context } from "@temporalio/activity";
 import { ApplicationFailure } from "@temporalio/client";
@@ -79,11 +79,15 @@ export function memberActivities(store: MemberStore, supervisor: Supervisor, pro
       const timer = setInterval(() => ctx.heartbeat(), 2000);
       try {
         // A workflow worker from before child targets schedules every child on its parent's Pi queue.
-        // Refuse to run a child anywhere but the queue its row names; the workflow then settles it failed.
-        const target = await children.target(key);
+        // Refuse to run a child anywhere but the queue its row names; the workflow then settles it
+        // failed. Both refusals come before a launch is reserved.
+        const target = await children.target(key).catch((error: unknown) => {
+          throw error instanceof ChildTargetError ? ApplicationFailure.nonRetryable(error.message, "ChildTargetError") : error;
+        });
         if (ctx.info.taskQueue !== activityQueue(target.engine, target.profile)) {
           throw ApplicationFailure.nonRetryable("Child scheduled on another engine queue", "ChildTargetMismatch");
         }
+        if (target.engine !== "pi") throw ApplicationFailure.nonRetryable("Only Pi runs delegated children so far", "ChildTargetError");
         const identity = {workflowRunId: execution.runId, activityId: ctx.info.activityId, attempt: ctx.info.attempt};
         let start = await children.begin(key, identity, !!resume);
         if (start.kind === "draining") {

@@ -11,8 +11,8 @@ import { ChildTargetError, type ChildProfile, type ChildTarget } from "../../src
 import { registerProfiles } from "../../src/service/deployment.ts";
 import { MemberStoreError, type Conversation } from "../../src/service/domain.ts";
 import { memberProfiles, type MemberProfile } from "../../src/service/profiles.ts";
-import { activityQueue } from "../../src/service/queues.ts";
 import { MemberStore } from "../../src/service/store.ts";
+import { runnerResultSchema } from "../../src/service/supervisor.ts";
 import { recordSegmentUsage } from "../../src/service/usage.ts";
 import { createPiFixtureOptions } from "../fixtures/engines/pi/index.mts";
 
@@ -56,9 +56,9 @@ function proposal(task: string, target?: unknown, role: "analyst" | "recorder" =
 }
 
 /** A Pi parent turn admitted and started, as the conversation workflow's first segment leaves it. */
-async function parentTurn() {
+async function parentTurn(profile = names.crew) {
   const ownerId = "owner-" + randomUUID();
-  const { memberId } = await store.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile: names.crew });
+  const { memberId } = await store.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
   const conversationId = randomUUID();
   await store.openConversation({ ownerId, conversationId, memberId });
   const request = { ownerId, conversationId, requestId: randomUUID(), text: "delegate" };
@@ -94,7 +94,6 @@ test("a target naming a delegating Pi profile is stored on the child row and nam
   assert.equal("target" in untargeted, false);
   assert.deepEqual((await roleProfiles(parent.request.requestId)).map(profile => profile.target), [target, undefined]);
   assert.deepEqual(await children.target(targeted), target);
-  assert.equal(activityQueue(target.engine, target.profile), "birbcrew-ts-members-v1/pi/" + names.analysts);
   // The queue comes from the row, never from what a key claims.
   assert.deepEqual(await children.target({ ...untargeted, target }), { engine: "pi", profile: names.crew });
   assert.deepEqual(await store.beginTurn(parent.request, parent.execution), { kind: "delegated", children: [targeted, untargeted] });
@@ -117,7 +116,7 @@ test("a Claude or Codex target is refused with a typed error, and nothing is wri
   assert.equal((await parent.delegate([proposal("remember")])).length, 1, "the turn can still delegate");
 });
 
-test("a Pi target must be a registered delegating profile that holds every tool its child gets", async () => {
+test("a Pi target must be a registered delegating profile, and it and the parent must hold every tool the child gets", async () => {
   const parent = await parentTurn();
   for (const one of [
     proposal("remember", { engine: "pi", profile: "unregistered-" + suffix }),
@@ -125,9 +124,15 @@ test("a Pi target must be a registered delegating profile that holds every tool 
     proposal("remember", { engine: "pi", profile: names.claude }), // registered for Claude only
     proposal("record assigned x", { engine: "pi", profile: names.analysts }, "recorder"), // lacks record_work_item
   ]) {
-    await assert.rejects(parent.delegate([proposal("remember"), one]), refused("unregistered_target"), one.profile.target?.profile);
+    await assert.rejects(parent.delegate([proposal("remember"), one]), refused("ineligible_target"), one.profile.target?.profile);
   }
   assert.equal(await parent.delegations(), 0);
+  // A parent without record_work_item cannot get a recorder by naming a target that has it.
+  const analysts = await parentTurn(names.analysts);
+  await assert.rejects(analysts.delegate([proposal("record assigned z", { engine: "pi", profile: names.crew }, "recorder")]),
+    refused("ineligible_target"));
+  assert.equal(await analysts.delegations(), 0);
+  assert.equal((await analysts.delegate([proposal("remember", { engine: "pi", profile: names.crew })])).length, 1);
   const keys = await parent.delegate([proposal("remember", { engine: "pi", profile: names.analysts }),
     proposal("record assigned y", { engine: "pi", profile: names.crew }, "recorder")]);
   assert.deepEqual(keys.map(key => key.target?.profile), [names.analysts, names.crew]);
@@ -160,6 +165,10 @@ test("a child cannot delegate further, whatever its target", async t => {
     assert.deepEqual([result.kind, "text" in result && result.text], ["complete", "stored " + role]);
   }
   assert.deepEqual(tools, [[], ["record_work_item"]]);
+  // A target must run the model its parent pinned on the child; only the launch can check that.
+  await assert.rejects(drivers.pi!(input({ role: "analyst", version: 1, instructions: roles.analyst, model: "another-model", tools: [],
+    target: { engine: "pi", profile: names.crew } }, "remember"), member), /Child profile differs from member/);
+  assert.equal(tools.length, 2, "no model call");
 
   // The Claude and Codex drivers refuse a child outright instead of running it as a member turn.
   const childProfile: ChildProfile = { role: "analyst", version: 1, instructions: roles.analyst, model: "fixture", tools: [],
@@ -168,6 +177,14 @@ test("a child cannot delegate further, whatever its target", async t => {
     await assert.rejects(drivers[engine]!(input({ ...childProfile, target: { engine, profile: names.crew } }, "remember"), { ...member, engine }),
       refused("unsupported_engine"));
   }
+});
+
+test("nothing a runner returns can set a child target", () => {
+  const child = proposal("remember");
+  const reply = { kind: "delegated", checkpoint, proposals: [child] };
+  assert.equal(runnerResultSchema.safeParse(reply).success, true);
+  const targeted = { ...reply, proposals: [{ ...child, profile: { ...child.profile, target: { engine: "pi", profile: names.analysts } } }] };
+  assert.equal(runnerResultSchema.safeParse(targeted).success, false);
 });
 
 test("a child's usage row records the engine that ran it and stays the parent member's", async () => {

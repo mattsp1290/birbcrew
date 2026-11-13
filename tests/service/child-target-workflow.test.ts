@@ -14,6 +14,7 @@ import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { Pool } from "pg";
 import { expiryActivity, memberActivities } from "../../src/service/activities.ts";
+import { ApprovalStore } from "../../src/service/approvals.ts";
 import { ChildStore, type ChildKey } from "../../src/service/children.ts";
 import type { ChildTarget } from "../../src/service/child-target.ts";
 import { MemberClient } from "../../src/service/client.ts";
@@ -78,11 +79,13 @@ const connection = await Connection.connect({ address: server.address });
 const temporal = new Client({ connection });
 const native = await NativeConnection.connect({ address: server.address });
 const supervisor = await startSupervisor(config, stateDir);
-const engines = await Promise.all([parentProfile, targetProfile].map(async profile => {
-  const worker = await Worker.create({ connection: native, taskQueue: activityQueue("pi", profile),
-    activities: memberActivities(store, supervisor, profiles, stateDir, "pi") });
+// The Claude queue only shows that a non-Pi target is refused before anything launches.
+const engines = await Promise.all(([["pi", parentProfile], ["pi", targetProfile], ["claude", targetProfile]] as const).map(async ([engine, profile]) => {
+  const worker = await Worker.create({ connection: native, taskQueue: activityQueue(engine, profile),
+    activities: memberActivities(store, supervisor, profiles, stateDir, engine) });
   return { worker, done: worker.run() };
 }));
+const ledger = new ApprovalStore(pool);
 
 const ownerId = "owner-" + randomUUID(), token = randomUUID();
 const gateway = createGateway(store, new MemberClient(store, temporal), { [createHash("sha256").update(token).digest("hex")]: ownerId });
@@ -91,17 +94,22 @@ await once(gateway, "listening");
 const port = (gateway.address() as AddressInfo).port;
 const workflows: string[] = [];
 after(async () => {
-  const closed = once(gateway, "close");
-  gateway.close(); gateway.closeAllConnections();
-  await closed; await gateway.stopped();
-  for (const id of workflows) await temporal.workflow.getHandle(id).terminate("fixture cleanup").catch(() => {});
-  for (const { worker } of engines) worker.shutdown();
-  await Promise.all(engines.map(({ done }) => done));
-  await supervisor.close();
-  await native.close(); await connection.close(); await pool.end();
-  await server.stop();
-  await rm(local, { recursive: true, force: true });
-  await rm(directory, { recursive: true, force: true });
+  // Every step runs even if an earlier one fails, so a failure cannot leave the server or workers running.
+  const steps = [
+    async () => { const closed = once(gateway, "close"); gateway.close(); gateway.closeAllConnections(); await closed; await gateway.stopped(); },
+    async () => { for (const id of workflows) await temporal.workflow.getHandle(id).terminate("fixture cleanup").catch(() => {}); },
+    async () => {
+      for (const { worker } of engines) if (worker.getState() === "RUNNING") worker.shutdown();
+      await Promise.all(engines.map(({ done }) => done));
+    },
+    () => supervisor.close(), () => native.close(), () => connection.close(), () => pool.end(), () => server.stop(),
+    () => rm(local, { recursive: true, force: true }), () => rm(directory, { recursive: true, force: true }),
+  ];
+  const failures = [];
+  for (const step of steps) {
+    try { await step(); } catch (error) { failures.push(error); }
+  }
+  if (failures.length) throw new AggregateError(failures, "Fixture cleanup failed");
 });
 
 /** The Temporal server BIRBCREW_TEMPORAL_ADDRESS names, else a development server from TEMPORAL_CLI. */
@@ -118,7 +126,7 @@ async function temporalServer() {
     { stdio: "ignore" });
   const exited = once(child, "exit");
   void exited.catch(() => {});
-  const stop = async () => { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGTERM"); await exited; } };
+  const stop = async () => { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGTERM"); await exited.catch(() => {}); } };
   for (let attempt = 0; ; attempt++) {
     try { await promisify(execFile)(cli, ["operator", "cluster", "health", "--address", address, "--command-timeout", "1s"]); break; }
     catch (error) {
@@ -167,7 +175,7 @@ const childRow = async (key: ChildKey) => (await pool.query<{ phase: string; nat
 
 /** A Pi parent turn admitted and started, with one analyst child delegated as given. No parent
  * workflow runs: nothing a parent can produce yet carries a target. */
-async function delegated(task: string, childTarget?: ChildTarget) {
+async function delegated(task: string, childTarget?: ChildTarget, role: "analyst" | "recorder" = "analyst") {
   const { memberId } = await store.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile: parentProfile });
   const conversationId = randomUUID();
   await store.openConversation({ ownerId, conversationId, memberId });
@@ -175,16 +183,20 @@ async function delegated(task: string, childTarget?: ChildTarget) {
   const turn = await store.beginTurn(request, { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 });
   if (turn.kind !== "start") throw new Error("Expected a started turn");
   const [key] = await children.delegate(turn.conversation, request.requestId, turn.token, [{ nativeCallId: "call_" + randomUUID(), task,
-    profile: { role: "analyst", version: 1, instructions: "Answer the assigned question using only the supplied task context.", model,
-      tools: [], ...(childTarget && { target: childTarget }) } }], { version: 1, engine: "pi", state: {} });
-  return { key, memberId };
+    profile: { role, version: 1, instructions: role === "analyst" ? "Answer the assigned question using only the supplied task context."
+      : "Complete the assigned task. Request owner approval to record a work item when asked.", model,
+      tools: role === "recorder" ? ["record_work_item"] : [], ...(childTarget && { target: childTarget }) } }], { version: 1, engine: "pi", state: {} });
+  return { key, memberId, conversationId, requestId: request.requestId };
 }
 
-/** Runs the child's workflow to its end, as its parent's executeChild would. */
-async function runChild(key: ChildKey) {
+/** Starts the child's workflow, as its parent's executeChild would. */
+async function startChild(key: ChildKey) {
   const workflowId = `birbcrew-ts/child/${key.childId}`;
   workflows.push(workflowId);
-  const handle = await temporal.workflow.start("piChildWorkflow", { workflowId, taskQueue: memberTaskQueue, args: [key, parentProfile] });
+  return { workflowId, handle: await temporal.workflow.start("piChildWorkflow", { workflowId, taskQueue: memberTaskQueue, args: [key, parentProfile] }) };
+}
+async function runChild(key: ChildKey) {
+  const { workflowId, handle } = await startChild(key);
   await handle.result();
   return workflowId;
 }
@@ -194,9 +206,10 @@ async function replay(workflowId: string, path = workflowsPath) {
   const recorded = await temporal.workflow.getHandle(workflowId).fetchHistory();
   await Worker.runReplayHistory({ workflowsPath: path }, recorded, workflowId);
   const events = recorded.events ?? [];
+  const scheduled = (name: string) => events.flatMap(event => event.activityTaskScheduledEventAttributes?.activityType?.name === name
+    ? [event.activityTaskScheduledEventAttributes.taskQueue?.name] : []);
   return {
-    queues: events.flatMap(event => event.activityTaskScheduledEventAttributes?.activityType?.name === "executeChildSegment"
-      ? [event.activityTaskScheduledEventAttributes.taskQueue?.name] : []),
+    queues: scheduled("executeChildSegment"), settled: scheduled("settleApproval"),
     failures: events.flatMap(event => event.activityTaskFailedEventAttributes?.failure?.applicationFailureInfo?.type ?? []),
     patches: events.flatMap(event => event.markerRecordedEventAttributes?.markerName === "core_patch"
       ? (event.markerRecordedEventAttributes.details?.["patch-data"]?.payloads ?? []).map(payload => Buffer.from(payload.data ?? []).toString())
@@ -243,6 +256,49 @@ test("a workflow worker from before targets schedules a targeted child on its pa
   } finally { await worker.stop(); }
 });
 
+test("a targeted recorder's card is settled, and its resume runs, on the target's queue", { timeout: 180_000 }, async () => {
+  const worker = await workflowWorker();
+  try {
+    const { key, memberId, conversationId, requestId } = await delegated("record assigned cedar", target, "recorder");
+    const { workflowId, handle } = await startChild(key);
+    const card = await until(async () => (await ledger.pending({ ownerId, memberId, conversationId }))
+      .find(approval => approval.invocationId === key.childId), "the child's card");
+    const { approvalId, invocationId, nativeCallId, argumentDigest, version } = card;
+    assert.equal(await ledger.decide({ ownerId, memberId, conversationId, requestId, invocationId, nativeCallId, approvalId,
+      argumentDigest, version, choice: "approve" }), "approve");
+    await handle.signal("childDecision");
+    await handle.result();
+    const row = await childRow(key);
+    assert.equal(row.phase, "complete");
+    const outcome = row.outcome as { kind: string; text: string };
+    assert.equal(outcome.kind, "completed");
+    assert.equal(JSON.parse(outcome.text.slice("settled ".length)).kind, "recorded");
+    assert.ok((await prompts(logs.target)).includes("record assigned cedar"));
+    const replayed = await replay(workflowId);
+    assert.deepEqual(replayed.queues, [activityQueue("pi", targetProfile), activityQueue("pi", targetProfile)]);
+    assert.deepEqual(replayed.settled, [activityQueue("pi", targetProfile)]);
+  } finally { await worker.stop(); }
+});
+
+test("a child whose row names a Claude target is refused on that queue before anything launches", { timeout: 180_000 }, async () => {
+  const worker = await workflowWorker();
+  try {
+    const nonce = randomUUID();
+    const { key } = await delegated("remember " + nonce, target);
+    // The store refuses a Claude target, so write one directly, as a later release or an operator might.
+    await pool.query(`UPDATE birbcrew_ts.pi_children SET role_profile=jsonb_set(role_profile,'{target,engine}','"claude"')
+      WHERE child_id=$1`, [key.childId]);
+    const workflowId = await runChild({ ...key, target: { engine: "claude", profile: targetProfile } });
+    const row = await childRow(key);
+    assert.deepEqual([row.phase, row.outcome], ["failed", { kind: "failed", nativeCallId: row.native_call_id, code: "child_failed" }]);
+    assert.equal((await pool.query("SELECT 1 FROM birbcrew_ts.native_launches WHERE child_id=$1", [key.childId])).rowCount, 0);
+    for (const log of Object.values(logs)) assert.ok(!(await prompts(log)).includes("remember " + nonce));
+    const replayed = await replay(workflowId);
+    assert.deepEqual(replayed.queues, [activityQueue("claude", targetProfile)]);
+    assert.deepEqual(replayed.failures, ["ChildTargetError"]);
+  } finally { await worker.stop(); }
+});
+
 test("histories recorded with the workflow source before targets replay, and a child card it left waiting is answered under this one",
   { timeout: 240_000 }, async () => {
     async function delegation(tasks: { role: "analyst" | "recorder"; task: string }[]) {
@@ -279,11 +335,18 @@ test("histories recorded with the workflow source before targets replay, and a c
       const outcomes = JSON.parse((await waiting.reply()).slice("delegated ".length)) as { kind: string; text: string }[];
       assert.deepEqual(outcomes.map(outcome => outcome.kind), ["completed", "completed"]);
       assert.equal(JSON.parse(outcomes[1].text.slice("settled ".length)).kind, "recorded");
-      for (const r of [finished, waiting]) {
-        assert.deepEqual((await replay(r.workflowId)).queues, []);
-        for (const child of await r.children()) {
+      const parentQueue = activityQueue("pi", parentProfile);
+      // Analysts run one segment; the recorder's second segment and its card's settlement were
+      // scheduled by this release, on the same queue the previous one would have used.
+      const expected = [[[parentQueue]], [[parentQueue], [parentQueue, parentQueue]]];
+      for (const [index, r] of [finished, waiting].entries()) {
+        await replay(r.workflowId);
+        const children = await r.children();
+        assert.equal(children.length, expected[index].length);
+        for (const [ordinal, child] of children.entries()) {
           const replayed = await replay(child);
-          assert.ok(replayed.queues.length >= 1 && replayed.queues.every(queue => queue === activityQueue("pi", parentProfile)), child);
+          assert.deepEqual(replayed.queues, expected[index][ordinal], child);
+          assert.deepEqual(replayed.settled, expected[index][ordinal].slice(1), child);
           assert.deepEqual(replayed.patches, []);
         }
       }

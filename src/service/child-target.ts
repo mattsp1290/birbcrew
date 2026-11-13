@@ -10,10 +10,12 @@ export type ChildTarget = z.infer<typeof childTargetSchema>;
 /** A child's stored role profile. */
 export type ChildProfile = Delegation["profile"] & { target?: ChildTarget };
 
-/** Why a child target was refused. Only a registered delegating Pi profile can be a target until
- * the other engines have child drivers, so a Claude or Codex target is unsupported. */
+/** Why a child target was refused. Until the other engines have child drivers, a target must be a
+ * registered delegating Pi profile that holds every tool its child gets, as its parent must. Its
+ * driver also requires the child's pinned model, always the parent's, to be its own; the profiles
+ * table has no model column, so only a launch checks that. */
 export class ChildTargetError extends Error {
-  readonly code: "invalid_target" | "unsupported_engine" | "unregistered_target";
+  readonly code: "invalid_target" | "unsupported_engine" | "ineligible_target";
   constructor(code: ChildTargetError["code"]) {
     super(`Child target refused: ${code}`);
     this.name = "ChildTargetError";
