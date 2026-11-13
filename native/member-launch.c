@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <sched.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/landlock.h>
@@ -53,34 +54,71 @@ static void permit_under(int rules, const char *root, const char *child, uint64_
     permit(rules, path, access, 0);
 }
 
+static struct sock_filter code[64];
+static unsigned short length;
+static void emit(struct sock_filter instruction) { if (length == 64) _exit(126); code[length++] = instruction; }
+static void deny(uint32_t call, uint32_t error) {
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, call, 0, 1));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | error));
+}
+
 // Descendants stay in the invocation process group supervised by the host. An offline member (Pi) also
-// cannot create sockets: its model traffic and tool calls cross the inherited IPC channel to the host.
-// io_uring is denied with them because it can open and connect sockets without the socket syscall.
+// cannot open a socket, since its model traffic and tool calls cross descriptor 3 to the host; io_uring
+// could open one without the socket call. It cannot start a process, undo its death signal or signal any
+// process but itself, so nothing it does outlives or reaches past its turn.
 static void keep_group(int offline) {
-    struct sock_filter code[] = {
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+    emit((struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)));
 #if defined(__aarch64__)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0),
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0));
 #elif defined(__x86_64__)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0));
 #else
 #error Unsupported native member architecture
 #endif
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS));
+    emit((struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)));
 #if defined(__x86_64__)
-        // x32 numbers carry this bit and would otherwise miss every comparison below.
-        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000, 5, 0),
+    // x32 numbers carry this bit and would otherwise miss every comparison below.
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000, 0, 1));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
 #endif
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_setsid, 4, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_setpgid, 3, 0),
-        // Without the offline policy these repeat the setsid comparison and change nothing.
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, offline ? SYS_socket : SYS_setsid, 2, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, offline ? SYS_io_uring_setup : SYS_setsid, 1, 0),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-    };
-    struct sock_fprog filter = { .len = sizeof(code)/sizeof(code[0]), .filter = code };
+    deny(SYS_setsid, EPERM);
+    deny(SYS_setpgid, EPERM);
+    if (offline) {
+        deny(SYS_socket, EPERM);
+        deny(SYS_socketpair, EPERM);
+        deny(SYS_io_uring_setup, EPERM);
+#if defined(__x86_64__)
+        deny(SYS_fork, EPERM);
+        deny(SYS_vfork, EPERM);
+#endif
+        // glibc then starts threads with clone, which is checked below.
+        deny(SYS_clone3, ENOSYS);
+        deny(SYS_tkill, EPERM);
+        deny(SYS_pidfd_send_signal, EPERM);
+        deny(SYS_rt_sigqueueinfo, EPERM);
+        deny(SYS_rt_tgsigqueueinfo, EPERM);
+        // Each block below loads an argument, so it returns for its own system call.
+        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone, 0, 4));
+        emit((struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])));
+        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, CLONE_THREAD, 1, 0));
+        emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
+        emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 0, 4));
+        emit((struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])));
+        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, PR_SET_PDEATHSIG, 0, 1));
+        emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
+        emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+        // After execv the worker keeps this process ID.
+        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_kill, 1, 0));
+        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_tgkill, 0, 4));
+        emit((struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])));
+        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)getpid(), 1, 0));
+        emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
+        emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+    }
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+    struct sock_fprog filter = { .len = length, .filter = code };
     checked(prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filter));
 }
 
@@ -129,10 +167,9 @@ int main(int argc, char **argv) {
         for (int i = 0; lib[i]; i++) permit(rules, lib[i], read | list | exec, 1);
         permit(rules, ".", private, 0);
         if (source) {
-            // The Node IPC channel is the worker's only route out; every other inherited descriptor closes below.
-            const char *channel = getenv("NODE_CHANNEL_FD");
-            struct stat ipc;
-            if (!channel || strcmp(channel, "3") || fstat(3, &ipc) || !S_ISSOCK(ipc.st_mode)) return 126;
+            // Descriptor 3 is the worker's only route out; every other inherited descriptor closes below.
+            struct stat channel;
+            if (fstat(3, &channel) || !S_ISSOCK(channel.st_mode)) return 126;
             permit_under(rules, source, "package.json", read);
             permit_under(rules, source, "node_modules", read | list);
             permit_under(rules, source, "src/service", read | list);
