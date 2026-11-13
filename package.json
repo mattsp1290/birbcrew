@@ -42,6 +42,8 @@
     "test:expiry": "node --test tests/service/approval-expiry.test.ts",
     "test:expiry:workflow": "node --test tests/service/approval-expiry-workflow.test.ts",
     "test:handoffs": "node --test tests/service/handoffs.test.ts",
+    "test:usage": "node --test tests/service/usage.test.ts",
+    "test:usage:capture": "node --test tests/service/usage-capture.test.ts",
     "test:api:service": "node tests/proof/integration-api.mts",
     "test:recovery:coordinated": "node tests/proof/coordinated-recovery.mts",
     "test:temporal:tls": "node tests/proof/temporal-tls.mts"

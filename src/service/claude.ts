@@ -5,6 +5,7 @@ import { mkdir, realpath } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { turnTextBytes } from "./domain.ts";
+import { segmentUsage } from "./usage-capture.ts";
 
 const call = z.strictObject({ id: z.string().min(1).max(256), name: z.string(), input: z.record(z.string(), z.json()) });
 const binding = z.strictObject({
@@ -42,9 +43,11 @@ export const claudeCommand = z.strictObject({
   continuation: continuation.optional(),
 });
 
-const success = z.strictObject({ kind: z.literal("complete"), text: z.string().min(1).max(65_536), checkpoint: claudeCheckpoint });
+// usage is absent only from a recovered proposal, which makes no model call.
+const success = z.strictObject({ kind: z.literal("complete"), text: z.string().min(1).max(65_536), checkpoint: claudeCheckpoint,
+  usage: segmentUsage.optional() });
 const pending = z.strictObject({ kind: z.literal("pending"), checkpoint: claudeCheckpoint,
-  proposal: nativeProposal,
+  proposal: nativeProposal, usage: segmentUsage.optional(),
 });
 const response = z.union([success, pending, z.strictObject({ error: z.string() })]);
 
@@ -70,7 +73,7 @@ interface ClaudeInput {
 export async function runClaudeTurn(input: ClaudeInput, profile: ClaudeProfile) {
   const result = await executeSegment(input, profile, "chat");
   if (result.kind !== "complete") throw new Error("Unexpected tool proposal in Claude chat");
-  return { text: result.text, checkpoint: result.checkpoint };
+  return { text: result.text, checkpoint: result.checkpoint, usage: result.usage };
 }
 
 export function runClaudeSegment(input: ClaudeInput, profile: ClaudeProfile, tool: DeferredTool = "record_work_item") {

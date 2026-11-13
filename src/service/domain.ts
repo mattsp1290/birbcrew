@@ -108,7 +108,8 @@ export type BeginTurn =
 export class MemberStoreError extends Error {
   readonly code: "not_found" | "conflict" | "busy" | "stale" | "input_limit" | "history_unavailable" | "request_rejected"
     | "routine_limit" | "routine_deleted" | "memory_limit" | "memory_deleted" | "instructions_limit"
-    | "handed_off" | "handoff_pending" | "handoff_empty" | "handoff_too_large" | "trusted_conversation";
+    | "handed_off" | "handoff_pending" | "handoff_empty" | "handoff_too_large" | "trusted_conversation"
+    | "usage_limit" | "usage_limit_closed";
 
   constructor(code: MemberStoreError["code"]) {
     super(code);

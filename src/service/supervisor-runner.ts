@@ -13,6 +13,7 @@ import { memberProfiles } from "./profiles.ts";
 import type { DriverInput } from "./activities.ts";
 import type { Conversation, Checkpoint } from "./domain.ts";
 import { temporalSettings } from "./temporal-config.ts";
+import { usageAttributes } from "./usage-capture.ts";
 
 interface AdmittedTurn {
   launch: Launch;
@@ -68,7 +69,7 @@ process.once("message", async (command: AdmittedTurn) => {
             : await driver(input, member);
           await items?.finish();
           return result;
-        });
+        }, result => usageAttributes(result.usage));
         return traced("workflow.segment",scope, () => command.checkpoint ? traced("native.restore",scope,invoke) : invoke());
       });
     } finally {

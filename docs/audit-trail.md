@@ -42,10 +42,12 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   caller chooses it. An owner admission stores no `initiator_id`; the audit row
   names the owner ID. A request with no admission row is recorded as
   owner-initiated, as before migration 23: requests admitted by workflow histories
-  older than `bounded-conversations-v1`, and trusted-context effects, whose lane
-  records no admission. `member.spawned`, `member.instructions_set`,
-  `conversation.opened`, `conversation.handed_off`, the routine facts and the memory
-  facts belong to no request and name the acting owner. Migration 25 adds the
+  older than `bounded-conversations-v1`, trusted-context effects, whose lane
+  records no admission, and a request refused under its member's usage budget
+  (`usage.request_refused`, whose payload names the routine instead when a routine's
+  firing submitted it). `member.spawned`, `member.instructions_set`,
+  `conversation.opened`, `conversation.handed_off`, the routine facts, the memory
+  facts and the budget facts belong to no request and name the acting owner. Migration 25 adds the
   second kind, `routine`, with the routine's ID: an admission records it only from
   the routine's firing row (see
   [scheduled routines](scheduled-routines.md#what-a-firing-records)). Migration 27
@@ -98,7 +100,7 @@ audit version may switch to a keyed per-owner digest.
 
 The registry is the `auditEvents` object in `src/service/audit.ts`.
 `audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
-`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql`, `027-handoffs.sql`, `028-approval-expiry.sql` and then `029-member-instructions.sql`, lists the same types.
+`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql`, `027-handoffs.sql`, `028-approval-expiry.sql`, `029-member-instructions.sql` and then `031-usage.sql`, lists the same types.
 Each widening replaces the whole constraint, so the last widening lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
@@ -127,6 +129,9 @@ A test checks that the two lists match. `GET /v1/capabilities` lists them under
 | `memory.suspended` | system | a restored installation resumes and suspends an active entry | entry | `memoryId`, `reason` (`recovery_restore`) |
 | `conversation.handed_off` | owner | a [conversation handoff](handoffs.md) commits; on the source conversation | handoff | `handoffId`, `targetConversationId`, `targetMemberId`, `firstRequestId`, `carriedTurns`, `omittedTurns`, `uncertainTurns`, `transcriptDigest` |
 | `member.instructions_set` | owner | `spawn` inserts a member with [instructions](member-instructions.md) | member | `digest` (SHA-256 of the text), `bytes` |
+| `usage.budget_set` | owner | a member's [usage budget](usage-metering.md) is set or its limit changes | member + revision | `revision`, `tokenLimit`, `period` |
+| `usage.budget_cleared` | owner | a member's usage budget is cleared | member + revision | `revision` |
+| `usage.request_refused` | system | admission refuses a request because its member used its budget; the only refused call the trail records | conversation + request | `tokenLimit`, `usedTokens`, `period`, `windowStart`, `budgetRevision`, optional `routineId` |
 
 `approval.decided` names the deciding owner as its actor. Through the gateway, the
 owner comes from the bearer token at `POST .../human`. The operator CLI names the
@@ -333,6 +338,12 @@ Migration 30 adds three indexes for the filters and changes no constraint or
 trigger. It holds `SHARE` on `audit_events`, taken the same way, so audited writes
 wait for the index builds; applied alone, from version 29, reads continue.
 [Audit filters](audit-filters.md#upgrade-and-recovery) lists its locks.
+
+Migration 31 replaces `audit_events_type_check` the same way, with every type 29 lists
+plus the three usage types, and adds two partial unique indexes for them. It takes
+`audit_events` and `routine_firings` together with `members` and `native_launches`
+without queueing, so it never waits for a native turn;
+[usage metering](usage-metering.md#upgrade-and-recovery) lists its locks.
 
 The audit table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest

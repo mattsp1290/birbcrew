@@ -6,6 +6,7 @@ import type { MemberClient } from "./client.ts";
 import { MemberStoreError, promptBytes, turnTextBytes, type Engine, type RequestInitiator } from "./domain.ts";
 import type { MemberStore } from "./store.ts";
 import { textProjection } from "./text-stream.ts";
+import { overBudget } from "./usage.ts";
 
 /** Conversation handoff (docs/handoffs.md). An owner hands a conversation of one member to another
  * of their members. One transaction seals the source, opens a fresh target and records the
@@ -197,6 +198,9 @@ export class HandoffApi {
       if (!history.turns.length) throw new MemberStoreError("handoff_empty");
       const fitted = fitTranscript(source.engine, history.uncertain, history.turns, handoffLimits.transcriptBytes);
       if (!fitted) throw new MemberStoreError("handoff_too_large");
+      // Once committed, the reserved request is never refused by its member's budget: a refusal
+      // then would leave the source sealed and the target pending. So the target's budget decides here.
+      if (await overBudget(db, ownerId, body.memberId)) throw new MemberStoreError("usage_limit");
       const targetConversationId = randomUUID();
       await this.store.openWithin(db, { ownerId, memberId: body.memberId, conversationId: targetConversationId });
       const { rows: [inserted] } = await db.query<HandoffRow>(`INSERT INTO birbcrew_ts.conversation_handoffs

@@ -20,7 +20,8 @@ member memory route, limits, injection and deletion semantics per engine), `hand
 (the conversation handoff routes, delivery and transcript and prompt limits),
 `approvalExpiry` (the deadline field, its bounds and the fields that report an
 expiry), `memberInstructions` (the spawn field, the read route, limits, order and
-restore), health dependencies and listing limits. Additive
+restore), `usage` (the ledger states, what each engine reports, the budget period and
+refusal codes), health dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
@@ -50,6 +51,9 @@ proof of the operator's provider access or configured profile availability.
 | `POST /v1/conversations/{conversationId}/handoffs` | Hand the conversation to another member (`requestId`, `memberId`): seal it and open a target whose first request carries its transcript |
 | `GET /v1/conversations/{conversationId}/handoff` | The handoff that created or sealed this conversation; never its transcript |
 | `GET /v1/members/{memberId}/instructions` | The member's instructions, or `null` |
+| `GET /v1/usage`, `GET /v1/usage/members`, `GET /v1/usage/conversations` | Token totals for the owner, per member (with its budget) and per conversation, over an optional time range |
+| `GET /v1/usage/records` | Usage ledger rows, one per native segment, newest first |
+| `GET`/`PUT`/`DELETE /v1/usage/budgets/{memberId}` | Read, set (`tokenLimit`) or clear a member's daily token budget |
 
 Authentication is required even for capabilities and health. There is no
 unauthenticated route. A request without a valid token gets `401` before the gateway
@@ -114,9 +118,11 @@ through the pool still work. Allow the parameter in the pooler (PgBouncer's
 
 When the database is ready, `schemaVersion` is the highest migration number applied to
 it. It is `null` when the database is unavailable. Migration numbers are not
-contiguous, and a later release can add a migration numbered below one that an earlier
-release already applied, so a database can gain a migration without `schemaVersion`
-changing. `schemaVersion` therefore names the newest migration present, not the full
+contiguous. Up to migration 26, a later release could add a migration numbered below one
+that an earlier release had already applied (22 came after 26), so a database can gain a
+migration without `schemaVersion` changing. (From the release that adds migration 31
+on, every gateway, worker and CLI process refuses to start rather than apply a migration
+numbered 27 or above below the newest applied one.) `schemaVersion` therefore names the newest migration present, not the full
 applied set, and cannot by itself identify a release. The gateway applies its
 migrations at startup, so a value below the largest number in the deployed release's
 migration list (in `src/service/store.ts`) means the database is behind that release;
@@ -253,6 +259,13 @@ the cancellation fields, not an assumption that `completed` means a tool succeed
   **not** proof it can never appear; retry the same identity/payload.
 - `409`: explicit conflict, capacity limit, or rejected request. Inspect the error and
   reconcile that identity. Never silently generate a replacement UUID.
+  `409 usage_limit` means the member has used its daily token budget: nothing was
+  admitted, and the same request can be sent again once the window or the budget
+  allows it (see [usage metering](usage-metering.md)). `409 usage_limit_closed` is the
+  same refusal from Crew's second budget check, which only refuses when usage was
+  recorded, or the budget set or lowered, between the two checks. As after any refused
+  admission, that conversation is then closed to new turns; send the request again in a
+  new conversation.
 - `503 retry_same_request`, connection loss, timeout: the outcome may be ambiguous.
   GET the same identity, then retry the exact submission if needed. Do not infer a
   rejection from a lost acknowledgement. A validation/explicit rejected submission
@@ -464,6 +477,19 @@ together do not, and `409 memory_limit` when notes and instructions fit but memo
 does not. A handoff adds no instructions to its transcript; a source reply that quotes
 them is carried like any other reply. A restore keeps instructions as they were. See
 [member instructions](member-instructions.md).
+
+## Usage metering
+
+Crew records one ledger row for each native segment with the token counts the engine's
+SDK reported, or `unknown` when it reported none. It keeps a cost only when the
+provider billed it; it never estimates one. The `/v1/usage` routes total an owner's
+rows, per member and per conversation, and mark the part that routines started. An
+owner can set one daily token budget per member (`PUT /v1/usage/budgets/{memberId}`).
+While the member's input and output tokens for the UTC day are at or over it, a new
+request fails `409 usage_limit` (or `409 usage_limit_closed` when the refusal also closed
+the conversation), and a routine's firing fails with reason `usage_limit`; a request already
+admitted is never refused or interrupted, so the cap can be passed by what running
+requests use. See [usage metering](usage-metering.md).
 
 ## Validation
 

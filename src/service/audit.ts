@@ -16,12 +16,14 @@ const routineFact = "((payload->>'routineId'), (payload->>'revision')) WHERE eve
 const routineChange = { routineId: uuid, revision: z.int().min(2).max(2_147_483_647) };
 const grantFact = "(event_type, (payload->>'grantId'), (payload->>'approvalId')) WHERE event_type IN ('approval.auto_approved', 'grant.created', 'grant.revoked')";
 const memoryFact = "((payload->>'memoryId'), event_type) WHERE event_type IN ('memory.created', 'memory.deleted', 'memory.suspended')";
+const budgetFact = "(member_id, (payload->>'revision')) WHERE event_type IN ('usage.budget_set', 'usage.budget_cleared')";
+const tokenLimit = z.int().min(1).max(1_000_000_000_000);
 
 /** The actors audit_events_actor_check in 021-audit.sql allows. */
 export const actorKinds = ["owner", "system"] as const;
 type Actor = (typeof actorKinds)[number];
 /** The closed audit vocabulary. 021-audit.sql repeats these types in a CHECK, widened by
- * 024-standing-grants.sql, 025-routines.sql, 026-memories.sql, 027-handoffs.sql, 028-approval-expiry.sql and 029-member-instructions.sql. Payloads are strict: identifiers, digests, choices and statuses only,
+ * 024-standing-grants.sql, 025-routines.sql, 026-memories.sql, 027-handoffs.sql, 028-approval-expiry.sql, 029-member-instructions.sql and 031-usage.sql. Payloads are strict: identifiers, digests, choices and statuses only,
  * never prompt/reply text, tool arguments or secrets. An actor given as a function is
  * decided by the validated payload. A routine acts with its owner's authority, so rows its
  * firings cause name the owner; Crew's own decisions about a routine name the system. */
@@ -73,7 +75,7 @@ export const auditEvents = {
     payload: z.strictObject({
       routineId: uuid, scheduledFor: z.iso.datetime(), status: z.enum(["succeeded", "failed", "skipped"]),
       reason: z.enum(["missed", "overlap", "owner_unavailable", "rejected", "approval_required", "approval_expired",
-        "turn_failed", "turn_cancelled", "turn_uncertain"]).optional(),
+        "turn_failed", "turn_cancelled", "turn_uncertain", "usage_limit"]).optional(),
     }) },
   // No digest of the text: an entry is deletable owner content, and an unsalted digest kept in
   // this append-only table would let an export holder confirm a guess of deleted text.
@@ -93,6 +95,15 @@ export const auditEvents = {
   // text Crew keeps and returns to the owner.
   "member.instructions_set": { actor: "owner", key: "(member_id) WHERE event_type = 'member.instructions_set'",
     payload: z.strictObject({ digest: sha256, bytes: z.int().min(1).max(instructionsBytes) }) },
+  "usage.budget_set": { actor: "owner", key: budgetFact,
+    payload: z.strictObject({ revision: z.int().min(1).max(2_147_483_647), tokenLimit, period: z.literal("utc_day") }) },
+  "usage.budget_cleared": { actor: "owner", key: budgetFact, payload: z.strictObject({ revision: z.int().min(2).max(2_147_483_647) }) },
+  // The first refusal the trail records: Crew's own decision under the owner's budget, made
+  // inside admission, keyed by the request so a retried refusal adds nothing. routineId: the
+  // firing that submitted it, as conversation.opened names one; the request has no admission.
+  "usage.request_refused": { actor: "system", key: "(conversation_id, request_id) WHERE event_type = 'usage.request_refused'",
+    payload: z.strictObject({ tokenLimit, usedTokens: z.int().min(0), period: z.literal("utc_day"), windowStart: z.iso.datetime(),
+      budgetRevision: z.int().min(1), routineId: uuid.optional() }) },
 } as const;
 export type AuditEventType = keyof typeof auditEvents;
 export const auditEventTypes = Object.keys(auditEvents) as AuditEventType[];
@@ -104,8 +115,9 @@ export interface AuditFact<T extends AuditEventType> {
 
 // No caller chooses the initiator. A request's row copies the one its admission recorded,
 // read by the insert itself inside the caller's transaction. A request with no admission row
-// (workflow histories older than durable admission, and the trusted-context lane, which
-// records none) is attributed to the owner, as before admissions recorded an initiator.
+// (workflow histories older than durable admission, the trusted-context lane, which records
+// none, and a request refused under its member's usage budget) is attributed to the owner, as
+// before admissions recorded an initiator.
 // An owner admission stores no initiator_id; the audit row names the owner. The type CHECK
 // gives every request-tied type a request_id and the others, spawn and open, none.
 const initiatorFromAdmission = `SELECT $1,$2,$3,coalesce(a.initiator_kind,'owner'),coalesce(a.initiator_id,$1),$4,$5,$6,$7,$8

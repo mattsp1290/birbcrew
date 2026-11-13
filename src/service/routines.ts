@@ -51,8 +51,12 @@ export const firingTransitions: Record<FiringStatus, readonly FiringStatus[]> = 
   succeeded: [], failed: [], skipped: [],
 };
 const settledStatuses: readonly FiringStatus[] = ["succeeded", "failed", "skipped"];
-type SkipReason = "missed" | "overlap" | "owner_unavailable";
-type FailReason = "rejected" | "approval_required" | "approval_expired" | "turn_failed" | "turn_cancelled" | "turn_uncertain";
+// The firing reason CHECK (routine_firings_reason_check) repeats both lists.
+export const skipReasons = ["missed", "overlap", "owner_unavailable"] as const;
+export const failReasons = ["rejected", "approval_required", "approval_expired", "turn_failed", "turn_cancelled", "turn_uncertain",
+  "usage_limit"] as const;
+type SkipReason = typeof skipReasons[number];
+type FailReason = typeof failReasons[number];
 type FiringReason = SkipReason | FailReason;
 
 export const routineCapabilities = {
@@ -464,14 +468,17 @@ export class RoutineDispatcher {
     if (this.driving.has(claim.conversation_id)) return;
     this.driving.add(claim.conversation_id);
     try {
-      let refusal = false;
+      let refusal: FailReason | undefined;
       try {
         const deadline = Date.now() + routineLimits.admissionDeadlineMs;
         const key = { ownerId: claim.owner_id, conversationId: claim.conversation_id };
         await this.members.open({ ...key, memberId: claim.member_id }, deadline);
         await this.members.accept({ ...key, requestId: claim.request_id, text: claim.prompt,
           ...(claim.approval_deadline_seconds !== null && { approvalDeadlineSeconds: claim.approval_deadline_seconds }) }, deadline);
-      } catch (error) { refusal = refused(error); }
+      } catch (error) {
+        refusal = error instanceof MemberStoreError && (error.code === "usage_limit" || error.code === "usage_limit_closed") ? "usage_limit"
+          : refused(error) ? "rejected" : undefined;
+      }
       const now = this.clock();
       await this.transaction(async db => {
         const { rows: [current] } = await db.query<{ status: FiringStatus }>(`SELECT status FROM birbcrew_ts.routine_firings
@@ -482,7 +489,7 @@ export class RoutineDispatcher {
         const admitted = await db.query("SELECT 1 FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",
           [claim.conversation_id, claim.request_id]);
         if (admitted.rowCount) await moveFiring(db, claim, "claimed", "admitted", null, now);
-        else if (refusal && await moveFiring(db, claim, "claimed", "failed", "rejected", now)) {
+        else if (refusal && await moveFiring(db, claim, "claimed", "failed", refusal, now)) {
           await countOutcome(db, claim.routine_id, "failure", now);
         }
         // Otherwise the outcome is unknown: the claim stays, and its lease expiry retries the same identity.

@@ -21,6 +21,7 @@ import type { DriverInput, DriverResult } from "./activities.ts";
 import { nativeProposal, toolNameSchema, type DeferredTool } from "./deferral.ts";
 import { continueSession, nativeCall, proposalTool, toolResult } from "./pi-tools.ts";
 import { checkpointSchema } from "./domain.ts";
+import { piUsage } from "./usage-capture.ts";
 
 const textPart = z.object({ type: z.literal("text"), text: z.string(), textSignature: z.string().optional() });
 const thinkingPart = z.object({
@@ -110,7 +111,7 @@ export async function runPiSegment(input: DriverInput, profile: PiProfile, tool:
 export async function runPiTurn(input: DriverInput, profile: PiProfile) {
   const segment = await runSegment(input, profile, "text");
   if (segment.kind !== "complete") throw new Error("Unexpected Pi tool proposal on a text turn");
-  return { text: segment.text, checkpoint: segment.checkpoint };
+  return { text: segment.text, checkpoint: segment.checkpoint, usage: segment.usage };
 }
 
 async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" | DeferredTool | "delegating") {
@@ -240,6 +241,7 @@ async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" |
 
       const messages = sessionManager.getEntries().slice(before)
         .flatMap((entry) => entry.type === "message" ? [entry.message] : []);
+      const usage = piUsage(messages.filter((message) => message.role === "assistant"));
       const last = messages.at(-1);
       if (last?.role === "toolResult") {
         if (pending || bytes > 65_536) throw new Error("Unexpected repeated Pi tool proposal");
@@ -257,14 +259,14 @@ async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" |
         const receipts = messages.slice(at + 1);
         if (batch && calls.every((call) => call.name === delegationToolName)) {
           const proposals = batch.confirm(calls, receipts);
-          return { kind: "delegated" as const, proposals, checkpoint: privateCheckpoint({ ...state, pending: proposal }) };
+          return { kind: "delegated" as const, proposals, checkpoint: privateCheckpoint({ ...state, pending: proposal }), usage };
         }
         const call = onlyCall(proposal);
         if (!tool || call.name !== toolName || receipts.length !== 1 || call.id !== last.toolCallId || !tool.accepted.has(call.id) || last.isError) {
           throw new Error("Pi did not confirm a permitted tool proposal");
         }
         return { kind: "pending" as const, proposal: nativeProposal.parse({ name: call.name, nativeCallId: call.id, arguments: call.arguments }),
-          checkpoint: privateCheckpoint({ ...state, pending: proposal }) } satisfies DriverResult;
+          checkpoint: privateCheckpoint({ ...state, pending: proposal }), usage } satisfies DriverResult;
       }
       if (last?.role !== "assistant" || last.stopReason !== "stop" || committedCallIds.length) {
         throw new Error("Pi did not complete the text turn");
@@ -285,7 +287,7 @@ async function runSegment(input: DriverInput, profile: PiProfile, mode: "text" |
       }
       prepared?.verify();
       const next = { threadId: state.threadId, sessionId: state.sessionId, turns: [...state.turns, turn] };
-      return { kind: "complete" as const, text, checkpoint: privateCheckpoint(next) };
+      return { kind: "complete" as const, text, checkpoint: privateCheckpoint(next), usage };
     } finally {
       input.signal.removeEventListener("abort", abort);
       unsubscribe();

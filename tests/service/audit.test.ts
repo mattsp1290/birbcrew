@@ -17,6 +17,7 @@ import { IntegrationApi } from "../../src/service/integration-api.ts";
 import { withNativeAdmission } from "../../src/service/native-admission.ts";
 import { RoutineApi, RoutineDispatcher } from "../../src/service/routines.ts";
 import { admittedInitiator, MemberStore } from "../../src/service/store.ts";
+import { recordSegmentUsage } from "../../src/service/usage.ts";
 
 const url = process.env.BIRBCREW_TEST_DATABASE_URL;
 if (!url) throw new Error("Set BIRBCREW_TEST_DATABASE_URL to a disposable PostgreSQL database.");
@@ -435,6 +436,10 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
       "conversation.handed_off": { conversationId, payload: { handoffId: randomUUID(), targetConversationId: randomUUID(),
         targetMemberId: randomUUID(), firstRequestId: randomUUID(), carriedTurns: 1, omittedTurns: 0, uncertainTurns: 0, transcriptDigest: digest } },
       "member.instructions_set": { payload: { digest, bytes: 1 } },
+      "usage.budget_set": { payload: { revision: 1, tokenLimit: 1000, period: "utc_day" } },
+      "usage.budget_cleared": { payload: { revision: 2 } },
+      "usage.request_refused": { conversationId, requestId, payload: { tokenLimit: 1000, usedTokens: 1000, period: "utc_day",
+        windowStart: "2031-01-01T00:00:00.000Z", budgetRevision: 1 } },
     };
     for (const type of auditEventTypes) {
       const fact = { type, ownerId, memberId, ...samples[type] } as AuditFact<typeof type>;
@@ -1160,13 +1165,93 @@ test("handoff, expiry and instructions rows answer every filter alike in JSON an
   assert.deepEqual(await types({ initiatorId: uuidOwner }), []);
 });
 
+test("usage rows answer every filter alike in JSON and CSV, and only to their owner", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  async function created(response: Response, status: number) {
+    assert.equal(response.status, status, await response.clone().text());
+    return response.json();
+  }
+  /** One owner's trail: a metered request, a budget it has used, a request the budget refuses, the budget cleared. */
+  async function trail(ownerId: string, credential: string) {
+    const memberId = (await created(await f.api("/v1/members", { requestId: randomUUID(), engine: "pi", profile }, credential), 201)).memberId as string;
+    const spent = randomUUID(), refused = randomUUID(), request = { ownerId, conversationId: spent, requestId: randomUUID(), text: "metered prompt" };
+    await created(await f.api("/v1/conversations", { conversationId: spent, memberId }, credential), 201);
+    await created(await f.api(`/v1/conversations/${spent}/requests`, { requestId: request.requestId, text: request.text }, credential), 202);
+    const execution = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
+    const turn = await store.beginTurn(request, execution);
+    assert.equal(turn.kind, "start"); if (turn.kind !== "start") throw new Error("unreachable");
+    await pool.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+      VALUES ($1,$2,$3,$4,$5,1)`, [spent, request.requestId, turn.token, execution.workflowRunId, execution.activityId]);
+    await recordSegmentUsage(pool, { ...request, token: turn.token, execution }, { state: "reported", model: "m", inputTokens: 9, outputTokens: 1,
+      cachedInputTokens: null, cacheWriteTokens: null, reasoningTokens: null, costUsd: null });
+    await store.commitTurn({ ownerId, conversationId: spent, requestId: request.requestId, token: turn.token, reply: "done",
+      checkpoint: { version: 1, engine: "pi", state: {} } });
+    const budget = `/v1/usage/budgets/${memberId}`;
+    await created(await f.api(budget, { tokenLimit: 10 }, credential, "PUT"), 200);
+    await created(await f.api("/v1/conversations", { conversationId: refused, memberId }, credential), 201);
+    assert.deepEqual(await created(await f.api(`/v1/conversations/${refused}/requests`, { requestId: randomUUID(), text: "over budget" }, credential),
+      409), { error: "usage_limit" });
+    await created(await f.api(budget, undefined, credential, "DELETE"), 200);
+    return { ownerId, credential, memberId, spent, refused };
+  }
+  const owners = [await trail(f.ownerId, f.token), await trail(f.strangerId, f.stranger)];
+  const usageTypes = ["usage.budget_set", "usage.budget_cleared", "usage.request_refused"];
+
+  for (const [mine, theirs] of [owners, [...owners].reverse()]) {
+    const all = (await f.audit("", mine.credential)).events;
+    // A refused request has no admission, so its row names the owner as initiator; Crew refused it.
+    const owner = { kind: "owner", id: mine.ownerId };
+    assert.deepEqual(all.map(event => [event.type, event.memberId, event.conversationId, event.actor.kind, event.initiator]), [
+      ["member.spawned", mine.memberId, null, "owner", owner],
+      ["conversation.opened", mine.memberId, mine.spent, "owner", owner],
+      ["request.accepted", mine.memberId, mine.spent, "owner", owner],
+      ["request.finished", mine.memberId, mine.spent, "system", owner],
+      ["usage.budget_set", mine.memberId, null, "owner", owner],
+      ["conversation.opened", mine.memberId, mine.refused, "owner", owner],
+      ["usage.request_refused", mine.memberId, mine.refused, "system", owner],
+      ["usage.budget_cleared", mine.memberId, null, "owner", owner],
+    ], mine.ownerId);
+    const cases: [string, (event: Event) => boolean][] = [
+      ["eventType=usage.request_refused", event => event.type === "usage.request_refused"],
+      ["eventType=" + usageTypes.join(","), event => usageTypes.includes(event.type)],
+      ["actorKind=system&eventType=usage.request_refused", event => event.type === "usage.request_refused"],
+      ["actorKind=owner&eventType=usage.request_refused", () => false],
+      ["actorKind=owner&eventType=usage.budget_set,usage.budget_cleared", event => event.type.startsWith("usage.budget_")],
+      ["initiatorKind=owner&eventType=usage.request_refused", event => event.type === "usage.request_refused"],
+      ["initiatorKind=routine", () => false],
+      [`memberId=${mine.memberId}&eventType=${usageTypes.join(",")}`, event => usageTypes.includes(event.type)],
+      [`conversationId=${mine.refused}`, event => event.conversationId === mine.refused],
+      [`conversationId=${mine.refused}&eventType=usage.budget_set`, () => false],
+      // The other owner's member and conversations are empty pages.
+      ["memberId=" + theirs.memberId, () => false],
+      ["conversationId=" + theirs.refused, () => false],
+      [`conversationId=${theirs.refused}&eventType=usage.request_refused`, () => false],
+      ...auditEventTypes.map((type): [string, (event: Event) => boolean] => ["eventType=" + type, event => event.type === type]),
+    ];
+    for (const [query, keep] of cases) {
+      const page = await f.audit("?" + query, mine.credential);
+      assert.deepEqual(page.events.map(event => event.eventId), all.filter(keep).map(event => event.eventId), query);
+      const csv = await f.api("/v1/audit?format=csv&" + query, undefined, mine.credential);
+      assert.equal(csv.status, 200, query);
+      assert.equal(csv.headers.get("audit-next-after"), page.nextAfter, query);
+      assert.equal(await csv.text(), auditCsv(page.events as unknown as AuditEvent[]), query);
+    }
+  }
+});
+
 test("migration 30 indexes a version-29 trail without queueing for an open audited write or waiting for a native turn", async (t) => {
   const upgraded = await databaseAt(t, 29);
   const current = new MemberStore(upgraded);
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
   const { memberId } = await current.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
   await current.openConversation({ ownerId, memberId, conversationId });
-  await current.recordAcceptance({ ownerId, conversationId, requestId, text }, ownerInitiator);
+  // Admitted by the previous release, in SQL: this release's admission also reads the budgets 031 adds.
+  await current.transaction(async db => {
+    const digest = createHash("sha256").update(text).digest();
+    await db.query(`INSERT INTO birbcrew_ts.request_admissions (conversation_id,request_id,prompt_digest,initiator_kind)
+      VALUES ($1,$2,$3,'owner')`, [conversationId, requestId, digest]);
+    await appendAudit(db, { type: "request.accepted", ownerId, memberId, conversationId, requestId, payload: { promptDigest: digest.toString("hex") } });
+  });
 
   // It locks only audit_events, in SHARE mode, and rewrites nothing.
   const db = await upgraded.connect();

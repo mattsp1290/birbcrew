@@ -11,6 +11,7 @@ import { memoryCapabilities } from "./memories.ts";
 import { instructionsCapabilities, instructionsSummarySql, type InstructionsSummary } from "./instructions.ts";
 import { routineCapabilities } from "./routines.ts";
 import type { MemberStore } from "./store.ts";
+import { usageCapabilities } from "./usage.ts";
 
 const listDefaultLimit = 50, listMaximumLimit = 100;
 
@@ -48,6 +49,7 @@ export const integrationCapabilities = {
     codex: "earlier-of-live-and-request-deadline", piChildCards: "not-covered",
   },
   memberInstructions: instructionsCapabilities,
+  usage: usageCapabilities,
 } as const;
 
 type Listing = "member" | "conversation";

@@ -12,6 +12,7 @@ import { firingConversation, firingInitiator } from "./routines.ts";
 import { snapshotMemories } from "./memories.ts";
 import { instructionsOf, type InstructionsSummary } from "./instructions.ts";
 import { handoffAdmission } from "./handoffs.ts";
+import { budgetApplies, refuseOverBudget } from "./usage.ts";
 import { ApplicationFailure } from "@temporalio/client";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -59,6 +60,30 @@ function sameTerms(admission: { prompt_digest: Buffer; approval_deadline_seconds
     && admission.approval_deadline_seconds === (request.approvalDeadlineSeconds ?? null);
 }
 
+/** recordAcceptance's checks of a request with no admission row that come before its member's
+ * budget, in its order, inside the caller's transaction after it locked the conversation: a turn
+ * a legacy submit already started, the conversation's request bound, a handoff's seal or
+ * reservation, a routine firing's terms and the prompt bound. A refusal throws. Returns the
+ * initiator an admission would record, and whether the request's turn already started. */
+async function admissionTerms(db: PoolClient, key: TurnRequest, conversation: Conversation, attested: RequestInitiator) {
+  const digest=createHash("sha256").update(key.text).digest();
+  const {rows:[existingTurn]}=await db.query<{prompt_digest:Buffer}>(
+    "SELECT prompt_digest FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
+  if(existingTurn) {
+    if(!existingTurn.prompt_digest.equals(digest))throw new MemberStoreError("conflict");
+  } else {
+    const {rows:[budget]}=await db.query<{limit:number;used:number}>(`SELECT turn_limit AS "limit",
+      (SELECT count(*) FROM (SELECT request_id FROM birbcrew_ts.request_admissions WHERE conversation_id=$1
+       UNION SELECT request_id FROM birbcrew_ts.turns WHERE conversation_id=$1) ids)::integer AS used
+      FROM birbcrew_ts.conversations WHERE conversation_id=$1`,[key.conversationId]);
+    if(budget.used>=budget.limit)throw new MemberStoreError("input_limit");
+  }
+  const handoff=existingTurn?null:await handoffAdmission(db,key);
+  const recorded=handoff??await firingInitiator(db,key,conversation)??attested;
+  if(recorded.kind!=="handoff")submitSchema.parse(key);
+  return {recorded,started:Boolean(existingTurn)};
+}
+
 /** The initiator a request's admission recorded, read inside the caller's open transaction,
  * which has already checked that the conversation is its owner's (as proposeLocked's lockTurn
  * does). The trigger in 023-request-initiator.sql keeps it from changing, so no row lock is needed.
@@ -93,6 +118,9 @@ export function ownerAdmissionActivity(store: MemberStore) {
       if (error instanceof MemberStoreError && (error.code === "handed_off" || error.code === "handoff_pending")) {
         throw ApplicationFailure.nonRetryable(error.code);
       }
+      // Retrying cannot change a budget refusal within the activity's deadline. MemberClient
+      // reads this failure type back as usage_limit_closed.
+      if (error instanceof MemberStoreError && error.code === "usage_limit") throw ApplicationFailure.nonRetryable("usage_limit", "usage_limit");
       throw error;
     }
   };
@@ -125,10 +153,16 @@ export class MemberStore {
       await db.query("CREATE SCHEMA IF NOT EXISTS birbcrew_ts");
       await db.query("CREATE TABLE IF NOT EXISTS birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
       const migrations = [[1, "001-members.sql"], [2, "002-approvals.sql"], [3, "003-native-launches.sql"],
-      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [22, "022-conversation-owner-index.sql"], [23, "023-request-initiator.sql"], [24, "024-standing-grants.sql"], [25, "025-routines.sql"], [26, "026-memories.sql"], [27, "027-handoffs.sql"], [28, "028-approval-expiry.sql"], [29, "029-member-instructions.sql"], [30, "030-audit-filters.sql"]] as const;
+      [4, "004-observation.sql"], [5, "005-pi-children.sql"], [6, "006-open-text.sql"], [7, "007-native-stops.sql"], [8, "008-tool-previews.sql"], [9, "009-project-notes.sql"], [10, "010-next-step.sql"], [11, "011-codex-members.sql"], [12, "012-codex-calls.sql"], [13, "013-codex-item-receipts.sql"], [14, "014-trusted-context.sql"], [15, "015-trusted-receipt-authority.sql"], [16, "016-conversation-rollover.sql"], [17, "017-conversation-admissions.sql"], [18, "018-integration-cancellations.sql"], [19, "019-recovery.sql"], [20, "020-admission-reconciliation.sql"], [21, "021-audit.sql"], [22, "022-conversation-owner-index.sql"], [23, "023-request-initiator.sql"], [24, "024-standing-grants.sql"], [25, "025-routines.sql"], [26, "026-memories.sql"], [27, "027-handoffs.sql"], [28, "028-approval-expiry.sql"], [29, "029-member-instructions.sql"], [30, "030-audit-filters.sql"], [31, "031-usage.sql"]] as const;
+      // Number a new migration above every one already released.
+      const { rows: [{ latest }] } = await db.query<{ latest: number | null }>("SELECT max(version) AS latest FROM birbcrew_ts.schema_versions");
       for (const [version, name] of migrations) {
         const applied = await db.query("SELECT 1 FROM birbcrew_ts.schema_versions WHERE version=$1", [version]);
         if (applied.rowCount) continue;
+        // Migrations replace whole CHECK constraints, so one applied after a later one would
+        // silently narrow what the later one allowed. Releases up to 26 shipped some out of
+        // order (22 after 26), and those upgrades keep working.
+        if (version > 26 && latest !== null && version < latest) throw new Error(`Migration ${version} would apply after migration ${latest}`);
         await db.query(await readFile(new URL("./sql/" + name, import.meta.url), "utf8"));
         await db.query("INSERT INTO birbcrew_ts.schema_versions VALUES ($1)", [version]);
       }
@@ -212,7 +246,10 @@ export class MemberStore {
 
   /** recordAcceptance's refusals of a new request, checked before MemberClient sends any workflow
    * update: the same refusal inside the workflow's admission activity fails the whole conversation.
-   * recordAcceptance repeats them under the conversation's lock. */
+   * recordAcceptance repeats them under the conversation's lock. The member's budget comes last,
+   * so a request refused for another reason records no budget refusal. A handoff's reserved
+   * request met its target's budget when the handoff committed (handoffs.ts) and is never
+   * refused by it afterwards: a refusal then would strand a sealed source. */
   async checkAdmission(input: z.input<typeof turnRequestSchema>): Promise<void> {
     const key = turnRequestSchema.parse(input);
     await conversationFor(this.pool, key, false);
@@ -220,7 +257,26 @@ export class MemberStore {
     const turn = await this.pool.query("SELECT 1 FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",
       [key.conversationId, key.requestId]);
     if (turn.rowCount) return;
-    if ((await handoffAdmission(this.pool, key))?.kind !== "handoff") submitSchema.parse(key);
+    if ((await handoffAdmission(this.pool, key))?.kind === "handoff") return;
+    submitSchema.parse(key);
+    if (!await budgetApplies(this.pool, key)) return;
+    // The lock waits for an admission, turn start or handoff that holds the conversation, and
+    // recordAcceptance's earlier checks run again under it, so a request refused under the budget
+    // and audited as such is one admission would refuse for the budget alone.
+    const refused = await this.transaction(async db => {
+      await db.query("SELECT 1 FROM birbcrew_ts.conversations WHERE owner_id=$1 AND conversation_id=$2 FOR KEY SHARE",
+        [key.ownerId, key.conversationId]);
+      // Read again under the lock: the trusted lane may have attached, or the budget been cleared.
+      if (!await budgetApplies(db, key)) return false;
+      const conversation = await conversationFor(db, key, false);
+      const admitted = await db.query("SELECT 1 FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",
+        [key.conversationId, key.requestId]);
+      if (admitted.rowCount) return false;
+      const { recorded, started } = await admissionTerms(db, key, conversation, ownerInitiator);
+      return !started && recorded.kind !== "handoff"
+        && refuseOverBudget(db, key, conversation.memberId, recorded.kind === "routine" ? recorded.id : undefined);
+    });
+    if (refused) throw new MemberStoreError("usage_limit");
   }
 
   /** A replay of an admitted request keeps the initiator its first admission recorded. A routine
@@ -232,7 +288,8 @@ export class MemberStore {
     const attested=requestInitiator.parse(initiator);
     if(attested.kind!=="owner")throw new MemberStoreError("conflict");
     const digest=createHash("sha256").update(key.text).digest();
-    return this.transaction(async db=>{
+    // A budget refusal commits its audit row, then refuses.
+    const refused=await this.transaction(async db=>{
       const conversation=await conversationFor(db,key,true);
       const {rows:[prior]}=await db.query<{phase:"accepted"|"rejected";reason:string|null;prompt_digest:Buffer;approval_deadline_seconds:number|null}>(
         "SELECT phase,reason,prompt_digest,approval_deadline_seconds FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
@@ -241,26 +298,17 @@ export class MemberStore {
         if(prior.phase==="rejected")throw new MemberStoreError("request_rejected");
         return;
       }
-      const {rows:[existingTurn]}=await db.query<{prompt_digest:Buffer}>(
-        "SELECT prompt_digest FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
-      if(existingTurn) {
-        if(!existingTurn.prompt_digest.equals(digest))throw new MemberStoreError("conflict");
-      } else {
-        const {rows:[budget]}=await db.query<{limit:number;used:number}>(`SELECT turn_limit AS "limit",
-          (SELECT count(*) FROM (SELECT request_id FROM birbcrew_ts.request_admissions WHERE conversation_id=$1
-           UNION SELECT request_id FROM birbcrew_ts.turns WHERE conversation_id=$1) ids)::integer AS used
-          FROM birbcrew_ts.conversations WHERE conversation_id=$1`,[key.conversationId]);
-        if(budget.used>=budget.limit)throw new MemberStoreError("input_limit");
-      }
-      const handoff=existingTurn?null:await handoffAdmission(db,key);
-      const recorded=handoff??await firingInitiator(db,key,conversation)??attested;
-      if(recorded.kind!=="handoff")submitSchema.parse(key);
+      const {recorded,started}=await admissionTerms(db,key,conversation,attested);
+      // A request whose turn already started (a legacy non-durable submit) is running, never refused,
+      // and a handoff's reserved request met its target's budget when the handoff committed.
+      if(!started&&recorded.kind!=="handoff"&&await refuseOverBudget(db,key,conversation.memberId,recorded.kind==="routine"?recorded.id:undefined))return true;
       const [initiatorKind,initiatorId]=initiatorColumns(recorded);
       await db.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest,initiator_kind,initiator_id,approval_deadline_seconds)
         VALUES($1,$2,$3,$4,$5,$6)`,[key.conversationId,key.requestId,digest,initiatorKind,initiatorId,key.approvalDeadlineSeconds??null]);
       await appendAudit(db,{type:"request.accepted",ownerId:key.ownerId,memberId:conversation.memberId,
         conversationId:key.conversationId,requestId:key.requestId,payload:{promptDigest:digest.toString("hex")}});
     });
+    if(refused)throw new MemberStoreError("usage_limit");
   }
 
   async rejectAccepted(input: z.input<typeof turnRequestSchema>, reason:"predecessor_failed"|"predecessor_cancelled"): Promise<void> {
