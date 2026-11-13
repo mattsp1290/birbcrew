@@ -8,24 +8,22 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { Pool } from "pg";
-import { expiryActivity, memberActivities } from "../../src/service/activities.ts";
+import { memberActivities } from "../../src/service/activities.ts";
 import { ApprovalStore } from "../../src/service/approvals.ts";
 import { ChildStore, type ChildKey } from "../../src/service/children.ts";
 import type { ChildTarget } from "../../src/service/child-target.ts";
 import { MemberClient } from "../../src/service/client.ts";
-import { answerLive, cancelLive } from "../../src/service/codex-calls.ts";
 import { registerProfiles } from "../../src/service/deployment.ts";
 import { createGateway } from "../../src/service/gateway.ts";
-import type { MemberProfile } from "../../src/service/profiles.ts";
-import { progressActivity } from "../../src/service/progress-activity.ts";
 import { activityQueue, memberTaskQueue } from "../../src/service/queues.ts";
-import { MemberStore, ownerAdmissionActivity } from "../../src/service/store.ts";
+import { MemberStore } from "../../src/service/store.ts";
 import { startSupervisor } from "../../src/service/supervisor.ts";
+import { memberQueueActivities } from "../../src/service/worker.ts";
 
 // Child targets against a real Temporal server, Crew's worker activities, its supervisor and the Pi
 // fixture provider (no inference): where a targeted child runs, what a workflow worker from before
@@ -41,37 +39,26 @@ process.env.BIRBCREW_DATABASE_URL = database;
 process.env.BIRBCREW_PROOF_ENGINE = "pi";
 const logs = { parent: join(directory, "parent.jsonl"), target: join(directory, "target.jsonl") };
 process.env.BIRBCREW_PROOF_REQUESTS = logs.parent;
+process.env.BIRBCREW_PROOF_TARGET_REQUESTS = logs.target;
 const parentProfile = "fixture.crew.v1", targetProfile = "fixture.crew-target.v1";
 const target: ChildTarget = { engine: "pi", profile: targetProfile };
 const workflowsPath = fileURLToPath(new URL("../../src/service/workflow.ts", import.meta.url));
+// The supervisor loads the profiles from this module; the environment above must be set first.
+const config = fileURLToPath(new URL("../proof/child-target-profiles.mts", import.meta.url));
 
-// Inside the checkout, so the workflow bundle and the profile module resolve this repository's packages.
+// Inside the checkout, so the workflow bundle resolves this repository's packages.
 const local = resolve(".proof", "child-target-" + randomUUID());
 await mkdir(local, { recursive: true });
 const legacyPath = join(local, "workflow.ts");
 const legacySource = await readFile(new URL("../proof/fixtures/pre-child-target-workflow.ts.txt", import.meta.url), "utf8");
 assert.ok(!legacySource.includes("target"), "the fixture is the workflow source from before child targets");
 await writeFile(legacyPath, legacySource.replaceAll('from "./', 'from "../../src/service/'));
-// The target profile runs the parent's fixture model, so the model its parent pins on a child
-// matches, and logs its own prompts.
-const config = join(local, "profiles.mts");
-await writeFile(config, `import { appendFileSync } from "node:fs";
-  import { contentText } from "@earendil-works/pi-ai";
-  import { createPiFixtureOptions } from ${JSON.stringify(new URL("../fixtures/engines/pi/index.mts", import.meta.url).href)};
-  const source = await import(${JSON.stringify(new URL("../proof/fixture-profiles.mts", import.meta.url).href)});
-  const crew = source.profiles.get(${JSON.stringify(parentProfile)});
-  const pi = await createPiFixtureOptions((context) => {
-    const last = context.messages.findLast((message) => message.role === "user");
-    if (last?.role === "user") appendFileSync(${JSON.stringify(logs.target)}, JSON.stringify({ prompt: contentText(last.content) }) + "\\n");
-  });
-  export const profiles = new Map([[${JSON.stringify(parentProfile)}, crew], [${JSON.stringify(targetProfile)}, { ...crew, pi }]]);
-  export const close = source.close;`);
 
 const pool = new Pool({ connectionString: database });
 const store = new MemberStore(pool);
 await store.migrate();
 const children = new ChildStore(pool);
-const { profiles } = await import(pathToFileURL(config).href) as { profiles: Map<string, MemberProfile> };
+const { profiles } = await import("../proof/child-target-profiles.mts");
 const stateDir = join(directory, "native");
 await registerProfiles(pool, profiles, stateDir);
 const model = profiles.get(parentProfile)!.pi!.model.id;
@@ -137,16 +124,10 @@ async function temporalServer() {
   return { address, stop };
 }
 
-/** The conversation workflow's worker, as worker.ts registers it, running the given source. */
+/** The conversation workflow's worker, with the activities worker.ts registers beside it, running the given source. */
 async function workflowWorker(path = workflowsPath) {
-  const worker = await Worker.create({ connection: native, taskQueue: memberTaskQueue, workflowsPath: path, activities: {
-    rejectUnstartedAdmission: store.rejectUnstartedAdmission.bind(store), recordAcceptance: ownerAdmissionActivity(store),
-    rejectAccepted: store.rejectAccepted.bind(store), conversationProgress: progressActivity(store),
-    cancelGenerating: store.cancelGenerating.bind(store), decideLive: answerLive.bind(null, pool), cancelLive: cancelLive.bind(null, pool),
-    reconcileTurn: store.reconcileTurn.bind(store), reconcileChild: children.reconcile.bind(children),
-    closeExitedChild: children.closeExitedChild.bind(children), quarantineDelegation: children.quarantineDelegation.bind(children),
-    expireApproval: expiryActivity(store),
-  } });
+  const worker = await Worker.create({ connection: native, taskQueue: memberTaskQueue, workflowsPath: path,
+    activities: memberQueueActivities(store) });
   const done = worker.run();
   return { async stop() { worker.shutdown(); await done; } };
 }

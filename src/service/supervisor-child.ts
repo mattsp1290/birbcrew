@@ -1,7 +1,7 @@
-import type { ChildOutcome } from "@birbcrew/pi-subagents";
+import type { ChildOutcome, Delegation } from "@birbcrew/pi-subagents";
 import type { Pool, PoolClient } from "pg";
 import { confirmedApproval, type Approval } from "./approvals.ts";
-import { childTarget, storedTarget, type ChildProfile } from "./child-target.ts";
+import { childTarget, storedTarget } from "./child-target.ts";
 import type { Checkpoint, Conversation } from "./domain.ts";
 import type { Launch } from "./supervisor.ts";
 
@@ -12,7 +12,7 @@ export interface ReadySegment {
   checkpoint: Checkpoint | null;
   parentToken: string;
   approval?: Approval;
-  childProfile?: ChildProfile;
+  childProfile?: Delegation["profile"];
   childResults?: ChildOutcome[];
 }
 
@@ -23,7 +23,7 @@ export async function inspectChild(db: PoolClient, launch: Launch): Promise<Read
     memberId: string;
     conversationId: string;
     profile: string;
-    role_profile: ChildProfile;
+    role_profile: Delegation["profile"] & { target?: unknown };
     phase: string;
     native_checkpoint: Checkpoint | null;
     approved_id: string | null;
@@ -49,9 +49,11 @@ export async function inspectChild(db: PoolClient, launch: Launch): Promise<Read
   if (row.outcome) return { kind: "childDone" };
   if (row.launch_revoked || row.stop_requested || row.parent_phase !== "started" || row.cancelled) throw new Error("Child admission revoked");
   // The parent is a Pi member (m.engine='pi' above). The runner picks the driver of the child's
-  // target, or of its parent's Pi profile when the row has none.
+  // target, or of its parent's Pi profile when the row has none. Drivers learn where they run only
+  // from the conversation, so the target is not passed on in the child's profile.
   const { ownerId, memberId, conversationId } = row;
-  const { engine, profile } = childTarget(storedTarget(row.role_profile.target), row.profile);
+  const { target, ...childProfile } = row.role_profile;
+  const { engine, profile } = childTarget(storedTarget(target), row.profile);
   const conversation: Conversation = { ownerId, memberId, conversationId, profile, engine };
   const approval = row.approved_id ? await confirmedApproval(db, {
     ...conversation, requestId: launch.requestId,
@@ -60,8 +62,7 @@ export async function inspectChild(db: PoolClient, launch: Launch): Promise<Read
   if (approval && row.phase === "waiting") return { kind: "pending", approval };
   if (row.phase !== (approval ? "resuming" : "running")) throw new Error("Child is not executable");
   return {
-    kind: "ready", conversation, checkpoint: row.native_checkpoint, parentToken: row.parent_token, approval,
-    childProfile: row.role_profile
+    kind: "ready", conversation, checkpoint: row.native_checkpoint, parentToken: row.parent_token, approval, childProfile
   };
 }
 

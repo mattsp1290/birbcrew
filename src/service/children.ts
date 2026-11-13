@@ -7,7 +7,8 @@ import type { Pool, PoolClient } from "pg";
 import type { ChildOutcome, Delegation } from "@birbcrew/pi-subagents";
 import { ApprovalStore, confirmedApproval, type Approval } from "./approvals.ts";
 import { appendAudit } from "./audit.ts";
-import { childTarget, ChildTargetError, childTargetSchema, storedTarget, type ChildProfile, type ChildTarget } from "./child-target.ts";
+import { childTarget, ChildTargetError, holdsChildTools, keyTarget, proposedTarget, runsChild, storedTarget, type ChildProfile,
+  type ChildTarget } from "./child-target.ts";
 import { checkpointSchema, MemberStoreError, type Conversation, type Checkpoint, type TurnRequest } from "./domain.ts";
 
 type PersistedDelegation = Omit<Delegation, "profile"> & {
@@ -82,23 +83,24 @@ export async function childrenFor(db: PoolClient, conversation: Conversation, re
   const { rows } = await db.query<{ child_id: string; target: unknown }>(`SELECT child_id,role_profile->'target' AS target
     FROM birbcrew_ts.pi_children WHERE conversation_id=$1 AND request_id=$2 ORDER BY ordinal`, [conversation.conversationId, requestId]);
   return rows.map(({ child_id, target }) => {
-    // A key without a target keeps exactly the shape recorded in histories before targets. A
-    // stored target this release cannot read is left off the key rather than failing the parent
-    // turn: the child's own activity reads its row and refuses it (ChildStore.target).
-    const stored = target === null ? undefined : childTargetSchema.safeParse(target).data;
+    // A key without a target keeps exactly the shape recorded in histories before targets.
+    const stored = keyTarget(target);
     return { ownerId: conversation.ownerId, memberId: conversation.memberId, conversationId: conversation.conversationId, requestId,
       childId: child_id, ...(stored && { target: stored }) };
   });
 }
 
-/** Refuses a proposal's target before anything is written. Absent, the child runs on its parent's
- * profile. A Claude or Codex target has no child driver yet. */
-function proposedTarget(proposal: PersistedDelegation) {
-  if (proposal.profile.target === undefined) return undefined;
-  const target = childTargetSchema.safeParse(proposal.profile.target);
-  if (!target.success) throw new ChildTargetError("invalid_target");
-  if (target.data.engine !== "pi") throw new ChildTargetError("unsupported_engine");
-  return target.data;
+/** Whether a target can run a child, as far as the profiles table shows: the target must run children
+ * under the rule its Pi driver applies at launch (runsChild). That driver checks only the profile that
+ * runs the child, so the parent must hold the child's tools too, as an untargeted child's launch checks.
+ * The model pin, always the parent's, is checked only at launch: the table has no model column. */
+async function eligibleTarget(db: PoolClient, target: ChildTarget, parentProfile: string, child: Pick<ChildProfile, "tools">) {
+  const { rows: [facts] } = await db.query<{ delegate_task: boolean; protected_tool: string | null; parent_tool: string | null }>(
+    `SELECT t.delegate_task,t.protected_tool,p.protected_tool AS parent_tool FROM birbcrew_ts.profiles t
+      LEFT JOIN birbcrew_ts.profiles p ON p.name=$3 AND p.engine='pi' WHERE t.name=$1 AND t.engine=$2`,
+    [target.profile, target.engine, parentProfile]);
+  return !!facts && runsChild({ delegateTask: facts.delegate_task, protectedTool: facts.protected_tool }, child)
+    && holdsChildTools(facts.parent_tool, child);
 }
 async function cancelLocked(db: PoolClient, key: ChildKey, row: ChildRow, ledger: ApprovalStore) {
   const outcome: ChildOutcome = { kind: "cancelled", nativeCallId: row.native_call_id };
@@ -120,7 +122,7 @@ export class ChildStore {
     }
     const checkpoint = checkpointSchema.parse(rawCheckpoint);
     if (checkpoint.engine !== "pi") throw new MemberStoreError("conflict");
-    const targets = proposals.map(proposedTarget);
+    const planned = proposals.map(proposal => ({ proposal, target: proposedTarget(proposal.profile.target) }));
     return transaction(this.pool, async db => {
       const parent = await lockParent(db, { ...conversation, requestId });
       const args = [conversation.conversationId, requestId];
@@ -129,22 +131,12 @@ export class ChildStore {
       const admitted = await db.query(`SELECT 1 FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2
         AND token=$3 AND phase='started'`, [...args, token]);
       if (!admitted.rowCount) throw new MemberStoreError("stale");
-      for (const [index, target] of targets.entries()) {
-        // What the profiles table can show of the target driver's child rule (profiles.ts): the
-        // target delegates and holds the child's tool. That driver checks only the target, so the
-        // parent must hold the tool too, as an untargeted child's launch checks. The driver also
-        // requires the child's pinned model, always the parent's; the table has no model column.
-        if (target && !(await db.query(`SELECT 1 FROM birbcrew_ts.profiles t WHERE t.name=$1 AND t.engine=$2 AND t.delegate_task
-            AND (NOT $3 OR (t.protected_tool='record_work_item' AND EXISTS (SELECT 1 FROM birbcrew_ts.profiles p
-              WHERE p.name=$4 AND p.engine='pi' AND p.protected_tool='record_work_item')))`,
-        [target.profile, target.engine, proposals[index].profile.tools.length > 0, parent.profile])).rowCount) {
-          throw new ChildTargetError("ineligible_target");
-        }
+      for (const { proposal, target } of planned) {
+        if (target && !(await eligibleTarget(db, target, parent.profile, proposal.profile))) throw new ChildTargetError("ineligible_target");
       }
       await db.query(`INSERT INTO birbcrew_ts.delegations (conversation_id,request_id,parent_checkpoint)
         VALUES ($1,$2,$3)`, [...args, JSON.stringify(checkpoint)]);
-      for (const [index, proposal] of proposals.entries()) {
-        const target = targets[index];
+      for (const [index, { proposal, target }] of planned.entries()) {
         await db.query(`INSERT INTO birbcrew_ts.pi_children (conversation_id,request_id,native_call_id,ordinal,task,role_profile)
           VALUES ($1,$2,$3,$4,$5,$6)`, [...args, proposal.nativeCallId, index, proposal.task,
           JSON.stringify(target ? { ...proposal.profile, target } : proposal.profile)]);
