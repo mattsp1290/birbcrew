@@ -413,28 +413,27 @@ the mapping rules: cost kept only when billed, counts that go down or cannot be 
 
 `usage.test.ts` runs against PostgreSQL. It checks one row per launch, bound to the
 launch's execution, the CHECKs on `reported` and `unknown` rows, a refused row kept as
-`unknown`, and the append-only ledger; the totals, routine subtotal, pages,
-time ranges and strict queries of every route, with another owner seeing nothing and
-getting 404 for this owner's IDs; setting, repeating, changing and clearing a budget
-and their audit rows; refusal at both checks and through the gateway, one audit row
-per refused request, no refusal of an admitted or running request, the soft cap, the
-UTC day window, and the mapping of the admission activity's failure; a handoff to a
-target over its budget refused with nothing written, and a reserved request admitted
-and metered on the target under the handoff initiator although the target's budget ran
-out after the commit; requests refused as handed off, pending their handoff, over their
-conversation's request bound, over the prompt bound or reusing a routine firing's
-identity with other text, which get that refusal from both checks and no budget
-refusal; a seal, an admission, a started turn or the trusted lane that commits while the
-pre-check waits for the conversation, each seen under its lock;
-a request whose card expired, with both the segment that proposed the card and the one
-that resumed with the cancelled result metered and counted; a routine firing failing
-`usage_limit` until the routine is disabled, refused once by the pre-check and once on
-the race path, both naming the routine, and found by `eventType` and not by
-`initiatorId`; migration 31 on a version-30
-database, its locks, no rewrite, NOT VALID CHECKs, both CHECKs read back from
-PostgreSQL and compared clause for clause with 29's and 28's, and no wait for a running
-turn; `migrate()` refusing to apply a migration below one already applied, including on
-a database that ran this feature before 27 to 30, while a database that lacks migration
+`unknown`, and the append-only ledger; the totals, routine subtotal, pages, time ranges
+and strict queries of every route, with another owner seeing nothing and getting 404 for
+this owner's IDs; setting, repeating, changing and clearing a budget and their audit
+rows; refusal at both checks and through the gateway, one audit row per refused request,
+no refusal of an admitted or running request, the soft cap, the UTC day window, and the
+mapping of the admission activity's failure; a handoff to a target over its budget
+refused with nothing written, and a reserved request admitted and metered on the target
+under the handoff initiator although the target's budget ran out after the commit;
+requests refused as handed off, pending their handoff, over their conversation's request
+bound, over the prompt bound or reusing a routine firing's identity with other text,
+which get that refusal from both checks and no budget refusal; a seal, an admission, a
+started turn or the trusted lane that commits while the pre-check waits for the
+conversation, each seen under its lock; a request whose card expired, with both the
+segment that proposed the card and the one that resumed with the cancelled result
+metered and counted; a routine firing failing `usage_limit` until the routine is
+disabled, refused once by the pre-check and once on the race path, both naming the
+routine, and found by `eventType` and not by `initiatorId`; migration 31 on a version-30
+database, its locks, no rewrite, NOT VALID CHECKs, both CHECKs read back from PostgreSQL
+and compared clause for clause with 29's and 28's, and no wait for a running turn;
+`migrate()` refusing to apply a migration below one already applied, including on a
+database that ran this feature before 27 to 30, while a database that lacks migration
 22, as releases before 27 left some, still upgrades; every firing reason the dispatcher
 names being one the reason CHECK allows; and a held installation refusing usage writes.
 `audit.test.ts` runs every audit filter over two owners' usage rows in JSON and CSV.
