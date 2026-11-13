@@ -223,7 +223,9 @@ export class MemberStore {
   /** recordAcceptance's refusals of a new request, checked before MemberClient sends any workflow
    * update: the same refusal inside the workflow's admission activity fails the whole conversation.
    * recordAcceptance repeats them under the conversation's lock. The member's budget comes last,
-   * so a request refused for another reason records no budget refusal. */
+   * so a request refused for another reason records no budget refusal. A handoff's reserved
+   * request met its target's budget when the handoff committed (handoffs.ts) and is never
+   * refused by it afterwards: a refusal then would strand a sealed source. */
   async checkAdmission(input: z.input<typeof turnRequestSchema>): Promise<void> {
     const key = turnRequestSchema.parse(input);
     await conversationFor(this.pool, key, false);
@@ -231,7 +233,8 @@ export class MemberStore {
     const turn = await this.pool.query("SELECT 1 FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",
       [key.conversationId, key.requestId]);
     if (turn.rowCount) return;
-    if ((await handoffAdmission(this.pool, key))?.kind !== "handoff") submitSchema.parse(key);
+    if ((await handoffAdmission(this.pool, key))?.kind === "handoff") return;
+    submitSchema.parse(key);
     await checkUsageAdmission(this, key);
   }
 
@@ -268,8 +271,9 @@ export class MemberStore {
       const handoff=existingTurn?null:await handoffAdmission(db,key);
       const recorded=handoff??await firingInitiator(db,key,conversation)??attested;
       if(recorded.kind!=="handoff")submitSchema.parse(key);
-      // A request whose turn already started (a legacy non-durable submit) is running, never refused.
-      if(!existingTurn&&await refuseOverBudget(db,key,conversation.memberId,recorded.kind==="routine"?recorded.id:undefined))return true;
+      // A request whose turn already started (a legacy non-durable submit) is running, never refused,
+      // and a handoff's reserved request met its target's budget when the handoff committed.
+      if(!existingTurn&&recorded.kind!=="handoff"&&await refuseOverBudget(db,key,conversation.memberId,recorded.kind==="routine"?recorded.id:undefined))return true;
       const [initiatorKind,initiatorId]=initiatorColumns(recorded);
       await db.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest,initiator_kind,initiator_id,approval_deadline_seconds)
         VALUES($1,$2,$3,$4,$5,$6)`,[key.conversationId,key.requestId,digest,initiatorKind,initiatorId,key.approvalDeadlineSeconds??null]);

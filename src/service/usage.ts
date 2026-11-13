@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { appendAudit } from "./audit.ts";
-import { MemberStoreError, type TurnRequest } from "./domain.ts";
+import { initiatorFromColumns, MemberStoreError, type TurnRequest } from "./domain.ts";
 import type { MemberStore } from "./store.ts";
 import type { Launch } from "./supervisor.ts";
 import type { SegmentUsage } from "./usage-capture.ts";
@@ -74,6 +74,12 @@ async function exhaustedBudget(db: Queryable, ownerId: string, memberId: string)
     `SELECT b.token_limit, b.revision, ${windowUsed("b.member_id")} AS used, ${windowStart} AS window_start
        FROM birbcrew_ts.usage_budgets b WHERE b.owner_id=$1 AND b.member_id=$2 AND b.state='active'`, [ownerId, memberId]);
   return budget && BigInt(budget.used) >= BigInt(budget.token_limit) ? budget : null;
+}
+
+/** Whether the member's budget is used up. A handoff asks this of its target before it commits,
+ * because the request it reserves is never refused by the budget afterwards (handoffs.ts). */
+export async function overBudget(db: Queryable, ownerId: string, memberId: string) {
+  return await exhaustedBudget(db, ownerId, memberId) !== null;
 }
 
 /** The budget check of an admission, inside its transaction after the conversation is locked.
@@ -177,7 +183,7 @@ function recordView(row: LedgerRow) {
     requestId: row.request_id, childId: row.child_id, engine: row.engine, state: row.state, model: row.model,
     inputTokens: row.input_tokens, outputTokens: row.output_tokens, cachedInputTokens: row.cached_input_tokens,
     cacheWriteTokens: row.cache_write_tokens, reasoningTokens: row.reasoning_tokens, costUsd: decimal(row.cost_usd),
-    initiator: row.initiator_kind === "routine" ? { kind: "routine" as const, id: row.initiator_id } : { kind: "owner" as const },
+    initiator: row.initiator_kind === null ? { kind: "owner" as const } : initiatorFromColumns(row.initiator_kind, row.initiator_id),
   };
 }
 

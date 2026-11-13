@@ -12,6 +12,7 @@ import { MemberClient } from "../../src/service/client.ts";
 import { auditEvents, auditEventTypes } from "../../src/service/audit.ts";
 import { MemberStoreError, ownerInitiator, type Engine, type TurnRequest } from "../../src/service/domain.ts";
 import { createGateway } from "../../src/service/gateway.ts";
+import { HandoffApi } from "../../src/service/handoffs.ts";
 import { IntegrationApi } from "../../src/service/integration-api.ts";
 import { withNativeAdmission } from "../../src/service/native-admission.ts";
 import { InstallationRecovery } from "../../src/service/recovery.ts";
@@ -372,6 +373,62 @@ test("a member at or over its budget is refused at admission; an admitted or run
   const sibling = await member(store, owner.ownerId);
   await usage.setBudget(owner.ownerId, owner.memberId, { tokenLimit: 1 });
   await store.recordAcceptance({ ownerId: owner.ownerId, conversationId: await conversation(store, sibling), requestId: randomUUID(), text: "free" }, ownerInitiator);
+});
+
+test("a handoff meets its target's budget before it commits; its reserved request is metered and never refused afterwards", async (t) => {
+  const source = await member(store);
+  const target = await member(store, source.ownerId);
+  const usage = new UsageApi(store);
+  const g = await gateway(t, new MemberClient(store, unreachable), source.ownerId);
+  const sourceConversation = await conversation(store, source);
+  const prior = await launched(store, source.ownerId, sourceConversation, "carried prompt");
+  await prior.commit();
+  await spend(store, target, reported(90, 10));
+  await usage.setBudget(source.ownerId, target.memberId, { tokenLimit: 100 });
+  const trail = async () => (await pool.query("SELECT event_type FROM birbcrew_ts.audit_events WHERE owner_id=$1 ORDER BY event_id",
+    [source.ownerId])).rows.map(row => row.event_type);
+  const before = await trail();
+
+  // Over budget: refused inside the handoff's transaction, which writes nothing, and Temporal is never reached.
+  const refused = await g.api(`/v1/conversations/${sourceConversation}/handoffs`, { requestId: randomUUID(), memberId: target.memberId });
+  assert.deepEqual(refused, { status: 409, body: { error: "usage_limit" } });
+  assert.deepEqual(await trail(), before, "no handoff, target, seal or audit row");
+  assert.equal((await pool.query("SELECT 1 FROM birbcrew_ts.conversation_handoffs WHERE source_conversation_id=$1", [sourceConversation])).rowCount, 0);
+  await store.checkAdmission({ ownerId: source.ownerId, conversationId: sourceConversation, requestId: randomUUID(), text: "still open" });
+
+  // Under budget the handoff commits. The budget then runs out before the reserved request reaches
+  // admission: it is admitted anyway, since refusing it would leave the source sealed and the target pending.
+  await usage.setBudget(source.ownerId, target.memberId, { tokenLimit: 1000 });
+  const members = {
+    async open(input: Parameters<MemberStore["openConversation"]>[0]) { return store.openConversation(input); },
+    async accept(input: TurnRequest) {
+      await usage.setBudget(source.ownerId, target.memberId, { tokenLimit: 1 });
+      await store.checkAdmission(input);
+      await store.recordAcceptance(input, ownerInitiator);
+      return { requestId: input.requestId };
+    },
+  } as unknown as MemberClient;
+  const handoff = await new HandoffApi(store, members).create(source.ownerId, sourceConversation, { requestId: randomUUID(), memberId: target.memberId });
+  assert.equal(handoff.firstRequestAdmitted, true);
+  const reserved = { ownerId: source.ownerId, conversationId: handoff.target.conversationId, requestId: handoff.firstRequestId };
+  assert.equal((await audit(source.ownerId, "usage.request_refused")).length, 0);
+  // Every other request to the target still meets the budget.
+  const next = { ...reserved, requestId: randomUUID(), text: "after the handoff" };
+  await assert.rejects(store.checkAdmission(next), { code: "usage_limit" });
+  await assert.rejects(store.recordAcceptance(next, ownerInitiator), { code: "usage_limit" });
+
+  // The reserved request is a model call on the target member: metered there and named as the handoff's.
+  const { rows: [{ transcript }] } = await pool.query<{ transcript: string }>(
+    "SELECT transcript FROM birbcrew_ts.conversation_handoffs WHERE handoff_id=$1", [handoff.handoffId]);
+  const execution = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
+  const turn = await store.beginTurn({ ...reserved, text: transcript }, execution);
+  assert.equal(turn.kind, "start"); if (turn.kind !== "start") return;
+  await pool.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+    VALUES ($1,$2,$3,$4,$5,1)`, [reserved.conversationId, reserved.requestId, turn.token, execution.workflowRunId, execution.activityId]);
+  await recordSegmentUsage(pool, { ...reserved, text: transcript, token: turn.token, execution }, reported(16_000, 20));
+  const [record] = (await usage.records(source.ownerId, { conversationId: reserved.conversationId })).records;
+  assert.deepEqual([record.memberId, record.inputTokens, record.initiator], [target.memberId, 16_000, { kind: "handoff", id: handoff.handoffId }]);
+  assert.equal((await usage.budget(source.ownerId, target.memberId)).usedTokens, 16_120);
 });
 
 test("a routine firing refused by its member's budget fails with usage_limit and counts toward the switch-off", async (t) => {

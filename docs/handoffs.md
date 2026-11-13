@@ -20,16 +20,19 @@ this in one PostgreSQL transaction:
    off, or has nothing to carry (see [Errors](#errors)).
 3. Reads the source's committed turns and renders the transcript (see
    [What crosses](#what-crosses)).
-4. Opens the target exactly as `POST /v1/conversations` would for that member, with a
+4. Refuses a target member that has used its daily
+   [usage budget](usage-metering.md#budgets) (`409 usage_limit`). This is the only budget
+   check the reserved request gets (see [The reserved first request](#the-reserved-first-request)).
+5. Opens the target exactly as `POST /v1/conversations` would for that member, with a
    UUID the server draws: the project-notes capture, the
    [member memory](memories.md) snapshot, the `409 memory_limit` and
    `409 instructions_limit` refusals and the `conversation.opened` audit row. Every
    launch of the target gets its member's [instructions](member-instructions.md), as any
    conversation of that member does.
-5. Inserts an immutable `conversation_handoffs` row: the source, the target, the
+6. Inserts an immutable `conversation_handoffs` row: the source, the target, the
    client's `requestId`, a server-reserved `firstRequestId`, the transcript, its
    SHA-256 digest and the turn counts. The row seals the source.
-6. Appends a `conversation.handed_off` audit row on the source.
+7. Appends a `conversation.handed_off` audit row on the source.
 
 The target may be any member of the owner, including the source's own member. After
 the commit the handler submits the reserved request to the target through the normal
@@ -111,6 +114,7 @@ target's first user message in its snapshot, and the reserved request's receipt 
 | `409` | `history_unavailable` | the source predates the public event ledger, or a committed prompt does not match its turn's digest |
 | `409` | `memory_limit` | the project notes and the target member's instructions fit its engine but not with its memory, as for any open |
 | `409` | `instructions_limit` | the project notes fit the target member's engine but not with its instructions, as for any open |
+| `409` | `usage_limit` | the target member has used its daily [usage budget](usage-metering.md#budgets) |
 | `409` | `conflict` | the `requestId` was used with another source or member; on the target's request routes, the reserved request's ID sent with other text or with an approval deadline |
 | `409` | `handoff_pending` | on the target's request routes: its reserved request is not admitted yet |
 | `409` | `update_rejected` | after the commit: the target's workflow refused the reserved request's update, as a previous-release worker does with one over 16 KiB (see [Upgrade](#upgrade)); a retry with the same `requestId` succeeds only once that cause is removed |
@@ -178,6 +182,14 @@ The handoff row is the only authority for the target's first request. At admissi
 - Every other request to the target is `409 handoff_pending` until the reserved one is
   admitted: the owner's, the CLI's, and a routine firing's. Routines cannot name an
   existing conversation in any case: each firing draws a new conversation UUID.
+- It is a model call on the target member. Its segments are recorded in the
+  [usage ledger](usage-metering.md) under the target, with the initiator
+  `{ kind: "handoff", id: <handoffId> }`, and count toward the target's budget. The
+  POST checks that budget before the commit. After the commit no budget check refuses
+  the reserved request, even when the target's budget ran out in between: that refusal
+  would leave the source sealed and the target `handoff_pending`. So the reserved request
+  can take the target past its limit by one turn, as any admitted request can. Every
+  other request to the target meets the budget as usual.
 - Only the reserved request may carry more than 16,384 bytes. Every other request keeps
   the public limit: the gateway and integration API check it at the boundary, and
   admission checks it again by initiator, so the CLI or any internal caller is held to
@@ -266,6 +278,7 @@ do not see it.
 ## Costs
 
 A handoff costs one model call, the acknowledgement, and one of the target's 128 turns.
+That call is metered on the target member and counts toward its usage budget.
 The transcript stays in the target's native history, so engines that resend history
 send up to 64 KiB of it again with every later turn. A model with a small context window
 may refuse a large transcript; the reserved request then fails like any provider
@@ -412,7 +425,10 @@ immutability; a standing grant that does not cover the handoff turn, a sealed so
 conversation grant listed as closed, and a tripwire that the target has no cardless call
 any other conversation of the member would not, including for a request with no admission;
 migration 27's locks, that it never queues and does not wait for a native turn, and a turn
-admitted before the upgrade that can be handed off after it. `npm run test:recovery`
+admitted before the upgrade that can be handed off after it. `npm run test:usage` checks
+that a target over its budget refuses the POST with nothing written, and that a reserved
+request whose target's budget runs out after the commit is still admitted, then metered on
+the target under the handoff initiator while the target's other requests are refused. `npm run test:recovery`
 checks that capture counts `conversation_handoffs` and that a held installation refuses a
 handoff and a direct insert.
 
