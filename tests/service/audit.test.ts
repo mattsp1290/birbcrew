@@ -1245,7 +1245,13 @@ test("migration 30 indexes a version-29 trail without queueing for an open audit
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
   const { memberId } = await current.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
   await current.openConversation({ ownerId, memberId, conversationId });
-  await current.recordAcceptance({ ownerId, conversationId, requestId, text }, ownerInitiator);
+  // Admitted by the previous release, in SQL: this release's admission also reads the budgets 031 adds.
+  await current.transaction(async db => {
+    const digest = createHash("sha256").update(text).digest();
+    await db.query(`INSERT INTO birbcrew_ts.request_admissions (conversation_id,request_id,prompt_digest,initiator_kind)
+      VALUES ($1,$2,$3,'owner')`, [conversationId, requestId, digest]);
+    await appendAudit(db, { type: "request.accepted", ownerId, memberId, conversationId, requestId, payload: { promptDigest: digest.toString("hex") } });
+  });
 
   // It locks only audit_events, in SHARE mode, and rewrites nothing.
   const db = await upgraded.connect();
