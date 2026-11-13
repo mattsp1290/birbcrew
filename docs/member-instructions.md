@@ -116,7 +116,9 @@ BirbCrew member instructions v1. The owner gave this member the following instru
 {"instructions":"You review database migrations and never propose schema changes yourself."}
 ```
 
-then the project notes, then memory, one newline apart. Claude receives the whole
+then the project notes, then memory, one newline apart. A member spawned with
+[instruction packs](instruction-packs.md) gets their block first, before its instructions:
+the shared text before the member's own. Claude receives the whole
 context after `You are a BirbCrew coworker.` in its system prompt, Codex in
 `developer_instructions` after the same line, and Pi as its appended system prompt,
 after the profile's own instructions or that line. A member without instructions gets
@@ -207,7 +209,9 @@ writing nothing, when it would not fit the member's engine:
 | the notes and the instructions, but not the memory on top | `409 memory_limit` |
 | the notes, but not the instructions on top | `409 instructions_limit` |
 
-For a member without instructions this is the memory rule unchanged. With instructions,
+For a member without instructions this is the memory rule unchanged. A member's
+[instruction packs](instruction-packs.md#limits-and-context-size) count with its
+instructions here, so packs too large to sit beside the notes also fail `instructions_limit`. With instructions,
 `memory_limit` means deleting entries helps; `instructions_limit` means the project notes
 leave no room for this member's instructions, and only shorter notes or a member with
 shorter instructions will open. On Codex, the largest instructions with 17 full memory
@@ -277,7 +281,8 @@ them, so members with instructions lose their role until the release returns.
 ## Not covered
 
 - Replacing, editing or erasing instructions; per-conversation instructions.
-- Skills, reusable instruction packs shared by several members, templates or variables.
+- Skills, templates or variables. Instruction text shared by several members is an
+  [instruction pack](instruction-packs.md).
 - Instructions for Pi children and for the trusted-context lane.
 - Model writes: no tool reads or changes instructions.
 - Keeping the context out of the Codex command line.
