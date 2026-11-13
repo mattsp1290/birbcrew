@@ -24,6 +24,16 @@
 #ifndef LANDLOCK_ACCESS_FS_TRUNCATE
 #define LANDLOCK_ACCESS_FS_TRUNCATE (UINT64_C(1) << 14)
 #endif
+// Calls newer than those headers; their numbers are the same on every architecture.
+#ifndef SYS_fchmodat2
+#define SYS_fchmodat2 452
+#endif
+#ifndef SYS_setxattrat
+#define SYS_setxattrat 463
+#endif
+#ifndef SYS_removexattrat
+#define SYS_removexattrat 466
+#endif
 
 static void fail(void) { perror("Native member isolation"); _exit(126); }
 static void checked(long value) { if (value < 0) fail(); }
@@ -100,7 +110,8 @@ static void refuse_commands(uint32_t call, uint32_t first, uint32_t second) {
 // cannot open a socket, since its model traffic and tool calls cross descriptor 3 to the host; io_uring
 // could open one without the socket call. It cannot start a process, undo its death signal, or create
 // IPC objects that outlive it. It cannot signal, set limits on or reschedule any process but itself, nor
-// make the kernel signal one for it through a file owner.
+// make the kernel signal one for it through a file owner. Landlock does not mediate file metadata, so it
+// also cannot change the mode, times or extended attributes of a file by path.
 static void keep_group(int offline) {
     emit((struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)));
 #if defined(__aarch64__)
@@ -137,6 +148,23 @@ static void keep_group(int offline) {
         deny(SYS_msgget, EPERM);
         deny(SYS_semget, EPERM);
         deny(SYS_mq_open, EPERM);
+        deny(SYS_ptrace, EPERM);
+#if defined(__x86_64__)
+        deny(SYS_chmod, EPERM);
+        deny(SYS_utime, EPERM);
+        deny(SYS_utimes, EPERM);
+        deny(SYS_futimesat, EPERM);
+#endif
+        deny(SYS_fchmodat, EPERM);
+        deny(SYS_fchmodat2, EPERM);
+        // With an empty path utimensat also works on an O_PATH descriptor, which Landlock does not check.
+        deny(SYS_utimensat, EPERM);
+        deny(SYS_setxattr, EPERM);
+        deny(SYS_lsetxattr, EPERM);
+        deny(SYS_removexattr, EPERM);
+        deny(SYS_lremovexattr, EPERM);
+        deny(SYS_setxattrat, EPERM);
+        deny(SYS_removexattrat, EPERM);
         emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone, 0, 4));
         load(0);
         emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, CLONE_THREAD, 1, 0));
