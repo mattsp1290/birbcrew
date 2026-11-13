@@ -97,6 +97,14 @@ test("a target naming a delegating Pi profile is stored on the child row and nam
   // The queue comes from the row, never from what a key claims.
   assert.deepEqual(await children.target({ ...untargeted, target }), { engine: "pi", profile: names.crew });
   assert.deepEqual(await store.beginTurn(parent.request, parent.execution), { kind: "delegated", children: [targeted, untargeted] });
+
+  // A target this release cannot read, as a later release's might be, does not fail the parent's
+  // turn: the key leaves it off, and the child's own activity refuses it.
+  await pool.query(`UPDATE birbcrew_ts.pi_children SET role_profile=jsonb_set(role_profile,'{target,account}','"another"')
+    WHERE child_id=$1`, [targeted.childId]);
+  const { target: _unreadable, ...unread } = targeted;
+  assert.deepEqual(await store.beginTurn(parent.request, parent.execution), { kind: "delegated", children: [unread, untargeted] });
+  await assert.rejects(children.target(targeted), refused("invalid_target"));
 });
 
 test("a Claude or Codex target is refused with a typed error, and nothing is written", async () => {

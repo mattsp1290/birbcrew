@@ -20,7 +20,8 @@ export interface ChildKey {
   conversationId: string;
   requestId: string;
   childId: string;
-  /** Absent: the child runs on its parent's Pi profile, as every key recorded before targets. */
+  /** Absent: the child runs on its parent's Pi profile, as every key recorded before targets. A
+   * stored target this release cannot read is left off too, and the child's activity refuses it. */
   target?: ChildTarget;
 }
 interface ChildRow {

@@ -12,7 +12,7 @@ A delegated child can carry a target: the engine and registered profile it runs 
 
 `ChildStore.delegate` refuses any target but a registered delegating Pi profile, with a `ChildTargetError`. The target, and the parent too, must hold every tool the child gets. The target must also run the model its parent pinned on the child, which only the child's launch can check, because the profiles table has no model column. The Claude and Codex drivers refuse a child.
 
-The child activity refuses to run on any queue but the one its row names, and refuses a target that is not Pi, before it reserves a launch. Replay does not compare task queues, so without that check a workflow worker from before targets would quietly run a targeted child on its parent's queue. Two rules follow from that:
+The segment activity (`executeChildSegment`) refuses to run on any queue but the one its row names, and refuses a target that is not Pi or that it cannot read, before it reserves a launch. The card's settlement is not checked, since it only writes to the database. Replay does not compare task queues, so without that check a workflow worker from before targets would quietly run a targeted child on its parent's queue. Two rules follow from that:
 
 - Every worker must run this release or a later one before anything writes a target.
 - A release that has written targets must not be rolled back past this one.

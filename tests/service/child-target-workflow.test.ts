@@ -259,7 +259,8 @@ test("a workflow worker from before targets schedules a targeted child on its pa
 test("a targeted recorder's card is settled, and its resume runs, on the target's queue", { timeout: 180_000 }, async () => {
   const worker = await workflowWorker();
   try {
-    const { key, memberId, conversationId, requestId } = await delegated("record assigned cedar", target, "recorder");
+    const task = "record assigned " + randomUUID();
+    const { key, memberId, conversationId, requestId } = await delegated(task, target, "recorder");
     const { workflowId, handle } = await startChild(key);
     const card = await until(async () => (await ledger.pending({ ownerId, memberId, conversationId }))
       .find(approval => approval.invocationId === key.childId), "the child's card");
@@ -273,7 +274,9 @@ test("a targeted recorder's card is settled, and its resume runs, on the target'
     const outcome = row.outcome as { kind: string; text: string };
     assert.equal(outcome.kind, "completed");
     assert.equal(JSON.parse(outcome.text.slice("settled ".length)).kind, "recorded");
-    assert.ok((await prompts(logs.target)).includes("record assigned cedar"));
+    // Both segments, the proposal and the resume after the card, ran on the target's driver.
+    assert.equal((await prompts(logs.target)).filter(prompt => prompt === task).length, 2);
+    assert.equal((await prompts(logs.parent)).filter(prompt => prompt === task).length, 0);
     const replayed = await replay(workflowId);
     assert.deepEqual(replayed.queues, [activityQueue("pi", targetProfile), activityQueue("pi", targetProfile)]);
     assert.deepEqual(replayed.settled, [activityQueue("pi", targetProfile)]);
