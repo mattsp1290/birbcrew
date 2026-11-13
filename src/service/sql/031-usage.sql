@@ -4,9 +4,9 @@
 --
 -- Locks on existing tables, held until migrate() commits: SHARE ROW EXCLUSIVE on members and
 -- native_launches for the new foreign keys; ACCESS EXCLUSIVE on audit_events to replace its type
--- CHECK (dropped and re-added NOT VALID, so no row is scanned) and to build two empty partial
--- unique indexes, each of which reads audit_events once; ACCESS EXCLUSIVE on routine_firings to replace
--- its reason CHECK the same way. As in 025 to 030 they are taken together with NOWAIT and
+-- CHECK (dropped and re-added NOT VALID, so no row is scanned) and to build two empty
+-- partial unique indexes, each of which reads audit_events once; ACCESS EXCLUSIVE on
+-- routine_firings to replace its reason CHECK the same way. As in 025 to 030 they are taken together with NOWAIT and
 -- retried, so the migration never waits in a lock queue and never joins a deadlock. Applied
 -- alone, from version 30, it holds nothing while it retries; applied with earlier migrations in
 -- one transaction it retries while holding their locks, and admissions and audited writes wait.

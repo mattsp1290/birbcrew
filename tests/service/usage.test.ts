@@ -81,6 +81,34 @@ const constraintDefinitions = async (db: PoolClient) => Object.fromEntries((awai
   `SELECT conname AS name, pg_get_constraintdef(oid) AS definition FROM pg_constraint
     WHERE conname IN ('audit_events_type_check','routine_firings_reason_check')`)).rows.map(row => [row.name, row.definition]));
 
+/** Runs `during` while another transaction holds the conversation FOR UPDATE, as admission, a turn
+ * start, a handoff or the trusted lane does, with `writes` uncommitted; once `during` waits for the
+ * conversation, commits them. Returns what `during` settles to. */
+async function whileHeld<T>(conversationId: string, writes: (db: PoolClient) => Promise<unknown>, during: () => Promise<T>) {
+  const holder = await pool.connect();
+  try {
+    await holder.query("BEGIN");
+    await holder.query("SELECT 1 FROM birbcrew_ts.conversations WHERE conversation_id=$1 FOR UPDATE", [conversationId]);
+    await writes(holder);
+    const { rows: [{ pid }] } = await holder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+    const result = during();
+    void result.catch(() => {});
+    let waiting = false;
+    for (let i = 0; i < 1000 && !waiting; i++) {
+      waiting = Boolean((await pool.query("SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))", [pid])).rowCount);
+      if (!waiting) await delay(10);
+    }
+    assert.ok(waiting, "the pre-check waits for the conversation");
+    await holder.query("COMMIT");
+    holder.release();
+    return result;
+  } catch (error) {
+    // Never hand the pool a connection with this transaction still open.
+    holder.release(true);
+    throw error;
+  }
+}
+
 const reported = (input: number, output = 0, more: Partial<Extract<SegmentUsage, { state: "reported" }>> = {}): SegmentUsage => ({
   state: "reported", model: "fixture-model", inputTokens: input, outputTokens: output, cachedInputTokens: null,
   cacheWriteTokens: null, reasoningTokens: null, costUsd: null, ...more });
@@ -463,8 +491,10 @@ test("a request refused as handed off, pending its handoff or over the prompt bo
   }
   assert.equal((await audit(source.ownerId, "usage.request_refused")).length, 0);
   // The budget itself still refuses an ordinary request of either member.
-  await assert.rejects(store.checkAdmission({ ownerId: source.ownerId, conversationId: await conversation(store, source), requestId: randomUUID(),
-    text: "ordinary" }), { code: "usage_limit" });
+  for (const owner of [source, target]) {
+    await assert.rejects(store.checkAdmission({ ownerId: source.ownerId, conversationId: await conversation(store, owner), requestId: randomUUID(),
+      text: "ordinary" }), { code: "usage_limit" });
+  }
 });
 
 test("the budget pre-check repeats admission's earlier refusals under its lock before it refuses or audits", async () => {
@@ -492,29 +522,31 @@ test("the budget pre-check repeats admission's earlier refusals under its lock b
   await assert.rejects(store.recordAcceptance(firing, ownerInitiator), { code: "conflict" });
   assert.equal(await refusals(), 0);
 
-  // A handoff that seals the source after the pre-check's first, unlocked read and commits while
-  // the pre-check waits for the conversation: the pre-check sees the seal under its lock.
+  // Each of these commits after the pre-check's first, unlocked reads, while it waits for the
+  // conversation; under its lock it sees the commit. A handoff seals the source: handed_off.
   const source = await conversation(store, owner), target = await conversation(store, owner);
-  const holder = await pool.connect();
-  let checked: Promise<void> | undefined;
-  try {
-    await holder.query("BEGIN");
-    await holder.query("SELECT 1 FROM birbcrew_ts.conversations WHERE conversation_id=$1 FOR UPDATE", [source]);
-    await holder.query(`INSERT INTO birbcrew_ts.conversation_handoffs (owner_id,request_id,source_conversation_id,source_member_id,
-        target_conversation_id,target_member_id,transcript,transcript_digest,carried_turns,omitted_turns,uncertain_turns)
-      VALUES ($1,$2,$3,$4,$5,$4,'t',sha256(convert_to('t','UTF8')),1,0,0)`, [owner.ownerId, randomUUID(), source, owner.memberId, target]);
-    const { rows: [{ pid }] } = await holder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
-    checked = store.checkAdmission({ ownerId: owner.ownerId, conversationId: source, requestId: randomUUID(), text: "during the handoff" });
-    void checked.catch(() => {});
-    let waiting = false;
-    for (let i = 0; i < 200 && !waiting; i++) {
-      waiting = Boolean((await pool.query("SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))", [pid])).rowCount);
-      if (!waiting) await delay(10);
-    }
-    assert.ok(waiting, "the pre-check waits for the conversation");
-    await holder.query("COMMIT");
-  } finally { holder.release(); }
-  await assert.rejects(checked!, { code: "handed_off" });
+  await assert.rejects(whileHeld(source, db => db.query(`INSERT INTO birbcrew_ts.conversation_handoffs (owner_id,request_id,
+      source_conversation_id,source_member_id,target_conversation_id,target_member_id,transcript,transcript_digest,carried_turns,
+      omitted_turns,uncertain_turns) VALUES ($1,$2,$3,$4,$5,$4,'t',sha256(convert_to('t','UTF8')),1,0,0)`,
+  [owner.ownerId, randomUUID(), source, owner.memberId, target]),
+  () => store.checkAdmission({ ownerId: owner.ownerId, conversationId: source, requestId: randomUUID(), text: "during the handoff" })),
+  { code: "handed_off" });
+  // The same request admitted, or its turn started by a legacy submit: a retry is never refused.
+  const digest = (text: string) => createHash("sha256").update(text).digest();
+  const admitted = { ownerId: owner.ownerId, conversationId: await conversation(store, owner), requestId: randomUUID(), text: "admitted meanwhile" };
+  await whileHeld(admitted.conversationId, db => db.query(`INSERT INTO birbcrew_ts.request_admissions
+    (conversation_id,request_id,prompt_digest,initiator_kind) VALUES ($1,$2,$3,'owner')`,
+  [admitted.conversationId, admitted.requestId, digest(admitted.text)]), () => store.checkAdmission(admitted));
+  const started = { ownerId: owner.ownerId, conversationId: await conversation(store, owner), requestId: randomUUID(), text: "started meanwhile" };
+  await whileHeld(started.conversationId, db => db.query(`INSERT INTO birbcrew_ts.turns
+    (conversation_id,request_id,position,prompt_digest,attempt,phase) VALUES ($1,$2,1,$3,1,'started')`,
+  [started.conversationId, started.requestId, digest(started.text)]), () => store.checkAdmission(started));
+  // The trusted-context lane attaches: admission refuses the conversation itself, not the budget.
+  const trusted = await conversation(store, owner);
+  await whileHeld(trusted, db => db.query(`INSERT INTO birbcrew_ts.trusted_sessions
+    (conversation_id,owner_id,scope,context_version,context_text,application_digest) VALUES ($1,$2,'fixture','1','context',$3)`,
+  [trusted, owner.ownerId, "0".repeat(64)]),
+  () => store.checkAdmission({ ownerId: owner.ownerId, conversationId: trusted, requestId: randomUUID(), text: "on the trusted lane" }));
   assert.equal(await refusals(), 0);
   // An ordinary request of the member is still refused under its budget, once.
   await assert.rejects(store.checkAdmission({ ownerId: owner.ownerId, conversationId: await conversation(store, owner), requestId: randomUUID(),

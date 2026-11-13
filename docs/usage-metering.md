@@ -338,10 +338,10 @@ not delete its `schema_versions` row.
 
 A database that was at version 30 when it ran such a build is not refused: 31 applied
 above 30, with the CHECKs as they stood before 27 to 30, and this release finds 31
-applied and starts. Its audit rows of types `conversation.handed_off`,
-`approval.expired` and `member.instructions_set`, and firings that fail
-`approval_expired`, then fail with `23514`. On a database at version 31 this query
-returns `f` in either column in that case:
+applied and starts. From then on the database refuses, with `23514`, every
+`conversation.handed_off`, `approval.expired` and `member.instructions_set` audit row
+and every firing that fails `approval_expired`, so the actions that write them fail. On
+a database at version 31 this query returns `f` in either column in that case:
 
 ```sql
 SELECT bool_or(conname = 'routine_firings_reason_check' AND pg_get_constraintdef(oid) LIKE '%approval_expired%') AS reasons,
@@ -421,9 +421,16 @@ per refused request, no refusal of an admitted or running request, the soft cap,
 UTC day window, and the mapping of the admission activity's failure; a handoff to a
 target over its budget refused with nothing written, and a reserved request admitted
 and metered on the target under the handoff initiator although the target's budget ran
-out after the commit; a segment whose card then expired, still metered and counted;
-a routine firing failing `usage_limit` until the routine is disabled, with its
-refusals found by `eventType` and not by `initiatorId`; migration 31 on a version-30
+out after the commit; requests refused as handed off, pending their handoff, over their
+conversation's request bound, over the prompt bound or reusing a routine firing's
+identity with other text, which get that refusal from both checks and no budget
+refusal; a seal, an admission, a started turn or the trusted lane that commits while the
+pre-check waits for the conversation, each seen under its lock;
+a request whose card expired, with both the segment that proposed the card and the one
+that resumed with the cancelled result metered and counted; a routine firing failing
+`usage_limit` until the routine is disabled, refused once by the pre-check and once on
+the race path, both naming the routine, and found by `eventType` and not by
+`initiatorId`; migration 31 on a version-30
 database, its locks, no rewrite, NOT VALID CHECKs, both CHECKs read back from
 PostgreSQL and compared clause for clause with 29's and 28's, and no wait for a running
 turn; `migrate()` refusing to apply a migration below one already applied, including on

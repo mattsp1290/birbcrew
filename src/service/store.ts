@@ -266,6 +266,8 @@ export class MemberStore {
     const refused = await this.transaction(async db => {
       await db.query("SELECT 1 FROM birbcrew_ts.conversations WHERE owner_id=$1 AND conversation_id=$2 FOR KEY SHARE",
         [key.ownerId, key.conversationId]);
+      // Read again under the lock: the trusted lane may have attached, or the budget been cleared.
+      if (!await budgetApplies(db, key)) return false;
       const conversation = await conversationFor(db, key, false);
       const admitted = await db.query("SELECT 1 FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",
         [key.conversationId, key.requestId]);
