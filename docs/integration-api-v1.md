@@ -503,22 +503,22 @@ An owner can register up to 10 enabled HTTPS endpoints. Crew posts to an endpoin
 when an event it selected happens: a card or question became pending
 (`approval.pending`), a request finished (`request.finished`), a routine firing
 settled (`routine.firing_settled`), or Crew disabled a routine after ten failures
-(`routine.disabled`). Each is derived from a committed audit event. The body
-carries IDs, the kind, the time and a status only; fetch details with your token.
-Each request in the default `crew` format is signed with HMAC-SHA256 over a
-timestamp and the body, using a secret that only the create response returns. An
-endpoint can choose another `format` at creation, fixed for its life and returned
-by every read. `slack` posts `{"text": ...}`, which Slack, Mattermost and Discord's
+(`routine.disabled`). Each is derived from a committed audit event. The body carries
+IDs, the kind, the time and a status only; fetch details with your token. Each
+request in the default `crew` format is signed with HMAC-SHA256 over a timestamp and
+the body, using a secret that only the create response returns. An endpoint can
+choose another `format` at creation, fixed for its life and returned by every read.
+`slack` posts `{"text": ...}`, which Slack, Mattermost and Discord's
 Slack-compatible incoming webhooks show. `ntfy` posts plain text with a `Title`
 header to an ntfy topic. Both send a fixed template of the same IDs, status, tool
 name and time to a third-party service, unsigned, because those services check no
-signature. Such a URL is itself a credential: the routes return it to the owner's
-token only, and the audit trail keeps only its host. An unknown format fails
-`400 invalid_input`, and a replay with another format `409 conflict`. Delivery is at least once and
-unordered, with ten attempts over about three hours, and an endpoint that gives up
-ten deliveries in a row is disabled. Crew sends only to public addresses over
-HTTPS, unless the operator allows insecure targets for local testing, follows no
-redirect and sends no credential. `webhook.*` audit rows belong
+signature. A `slack` or `ntfy` URL is itself a credential: the routes return it to
+the owner's token only, and the audit trail keeps only its host. An unknown format
+fails `400 invalid_input`, and a replay with another format `409 conflict`. Delivery
+is at least once and unordered, with ten attempts over about three hours, and an
+endpoint that gives up ten deliveries in a row is disabled. Crew sends only to
+public addresses over HTTPS, unless the operator allows insecure targets for local
+testing, follows no redirect and sends no credential. `webhook.*` audit rows belong
 to no member, so their `memberId` is `null` and a `memberId` filter never matches
 them. An expired card, a handoff and a budget refusal add no kind: a handoff's
 reserved request and an expired card's request are sent as `request.finished`, and a

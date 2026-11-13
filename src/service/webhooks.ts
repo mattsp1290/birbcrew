@@ -48,7 +48,7 @@ type Message = { title: string; details: readonly (readonly [string, string])[] 
 type KindDefinition = { auditType: AuditEventType; when?: (row: AuditRow) => boolean; body: z.ZodType;
   fields: (row: AuditRow) => Record<string, unknown>; message(body: Readonly<Record<string, string>>): Message };
 /** Types a kind's template by that kind's own body, so it can only name fields the body has. */
-const kind = <S extends z.ZodType>(definition: Omit<KindDefinition, "body" | "message"> & { body: S; message: (body: z.output<S>) => Message }) =>
+const defineKind = <S extends z.ZodType>(definition: Omit<KindDefinition, "body" | "message"> & { body: S; message: (body: z.output<S>) => Message }) =>
   definition;
 
 /** What an endpoint can subscribe to. Each kind is one committed audit event type (and, for
@@ -58,25 +58,25 @@ const kind = <S extends z.ZodType>(definition: Omit<KindDefinition, "body" | "me
  * so a status the trail gains is delivered, not skipped. `message` is the fixed template the
  * readable formats send. 032-webhooks.sql repeats the names. */
 export const webhookKinds = {
-  "approval.pending": kind({ auditType: "approval.requested",
+  "approval.pending": defineKind({ auditType: "approval.requested",
     body: z.strictObject({ ...envelope, kind: z.literal("approval.pending"), conversationId: uuid, requestId: uuid,
       approvalId: uuid, toolName: toolNameSchema }),
     fields: row => ({ conversationId: row.conversationId, requestId: row.requestId, approvalId: row.payload.approvalId,
       toolName: row.payload.toolName }),
     message: body => ({ title: "Crew: approval pending", details: [["Tool", body.toolName], ["Conversation", body.conversationId],
       ["Request", body.requestId], ["Approval", body.approvalId]] }) }),
-  "request.finished": kind({ auditType: "request.finished",
+  "request.finished": defineKind({ auditType: "request.finished",
     body: z.strictObject({ ...envelope, kind: z.literal("request.finished"), conversationId: uuid, requestId: uuid,
       status: auditEvents["request.finished"].payload.shape.status }),
     fields: row => ({ conversationId: row.conversationId, requestId: row.requestId, status: row.payload.status }),
     message: body => ({ title: `Crew: request ${body.status}`, details: [["Conversation", body.conversationId], ["Request", body.requestId]] }) }),
-  "routine.firing_settled": kind({ auditType: "routine.firing_settled",
+  "routine.firing_settled": defineKind({ auditType: "routine.firing_settled",
     body: z.strictObject({ ...envelope, kind: z.literal("routine.firing_settled"), routineId: uuid, scheduledFor: z.iso.datetime().max(32),
       status: auditEvents["routine.firing_settled"].payload.shape.status }),
     fields: row => ({ routineId: row.payload.routineId, scheduledFor: row.payload.scheduledFor, status: row.payload.status }),
     message: body => ({ title: `Crew: routine firing ${body.status}`, details: [["Routine", body.routineId], ["Scheduled for", body.scheduledFor]] }) }),
   // Only Crew's own decision: an owner who disables a routine already knows.
-  "routine.disabled": kind({ auditType: "routine.disabled", when: row => row.payload.reason === "consecutive_failures",
+  "routine.disabled": defineKind({ auditType: "routine.disabled", when: row => row.payload.reason === "consecutive_failures",
     body: z.strictObject({ ...envelope, kind: z.literal("routine.disabled"), routineId: uuid, status: z.literal("consecutive_failures") }),
     fields: row => ({ routineId: row.payload.routineId, status: row.payload.reason }),
     message: body => ({ title: "Crew: routine disabled", details: [["Routine", body.routineId], ["Reason", body.status]] }) }),

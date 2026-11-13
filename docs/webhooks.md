@@ -57,7 +57,9 @@ the kinds, a different format is a different endpoint. `webhookFormats` in
 column's CHECK bounds only the shape of a name, so a later release can add a format
 without a migration. A gateway whose registry lacks an endpoint's format, because
 a later release added it, leaves that endpoint's deliveries `pending` and
-unattempted, as it does for an owner outside its token map.
+unattempted, as it does for an owner outside its token map. They are all due once
+a gateway that knows the format runs again, so a channel then gets the backlog at
+once, up to 100 messages per pass.
 
 | Format | `Content-Type` | Body | Signed | Made for |
 | --- | --- | --- | --- | --- |
@@ -108,8 +110,8 @@ show one event twice; the `Event` line tells a person it is the same event.
 The trust boundary moves, though. A `crew` body goes to a receiver the owner runs.
 A `slack` or `ntfy` message goes to a third-party service, which keeps it under its
 own terms, and to everyone who can read the channel or topic. They see the member,
-conversation, request, approval and routine IDs, the tool name, the status and the
-times. Crew cannot recall a message it has sent.
+conversation, request, approval and routine IDs, the event ID, the tool name, the
+status and the times. Crew cannot recall a message it has sent.
 
 The format changes only the body and headers of each attempt. Every format sends
 `User-Agent: Crew-Webhooks/1`. The audit source, the fan-out, the outbox row and
@@ -578,8 +580,8 @@ commits, the only application table it holds is `webhook_endpoints`, in
 `ACCESS EXCLUSIVE` (observed in `pg_locks` on PostgreSQL 17); it holds nothing on
 `audit_events`. No transaction that audits a request, card or routine touches a
 webhook table, so none waits for it. Only the webhook routes, the dispatcher and a
-restore do, and none of them runs while the earlier release's processes are
-stopped for the upgrade.
+restore do, and with the earlier release's processes stopped, none of them runs
+before `migrate()` commits.
 
 Three changes reach existing clients. Every route that returns an endpoint returns
 its `format`, `webhook.created` rows gain `format`, and `capabilities.webhooks` gains
@@ -718,7 +720,8 @@ receiver in the test process and a settable clock. It checks:
   body never sent while a well-formed one to the same endpoint is, and an endpoint
   whose format the gateway does not know left unattempted;
 - a `slack` endpoint made through the routes and delivered by the gateway's own
-  loop to a local stub that answers as Slack documents; the stub answering `ok`
+  loop to a local stub that follows Slack's documented answers (refusing a body that
+  is not JSON as `invalid_payload` is the stub's own rule); the stub answering `ok`
   to it, `no_text` to a `crew` endpoint at the same hook, `invalid_payload` to an
   `ntfy` one, and `no_service` to a revoked hook, each refusal an ordinary failed
   attempt; the
