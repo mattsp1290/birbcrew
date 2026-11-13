@@ -249,6 +249,38 @@ A gateway delivers only for owners in its token map, as the routine dispatcher
 fires only for them. An owner removed from every gateway's map keeps their rows
 `pending`, unattempted. Give every gateway the same map.
 
+## Handoffs, approval expiry and usage budgets
+
+These features add no kind. What each of their outcomes sends follows from the
+audit rows above:
+
+| Outcome | Audit rows | Sent |
+| --- | --- | --- |
+| A Claude or Pi card reaches its [approval deadline](approval-expiry.md) | `approval.expired`, then the request's `request.finished` | `approval.pending` was sent when the card became pending. Nothing is sent at the expiry. The turn goes on to its reply with a cancelled result, so `request.finished` follows with the status the request ends with, normally `completed` |
+| An owner cancels or decides a card | `request.cancellation_requested` or `approval.decided`, then `request.finished` | `request.finished` only |
+| A request is refused for its member's [usage budget](usage-metering.md) | `usage.request_refused` | Nothing: the request has no admission and never finishes. The submit itself answered `409 usage_limit` or `409 usage_limit_closed` |
+| A routine firing fails with `usage_limit` or `approval_expired` | `routine.firing_settled` with that reason | `routine.firing_settled` with status `failed`; the tenth failure in a row also sends `routine.disabled` |
+| A [conversation handoff](handoffs.md) commits | `conversation.handed_off`, the target's `conversation.opened` | Nothing |
+| The handoff's reserved first request finishes | `request.finished` on the target, with the handoff as initiator | `request.finished` with the target's `memberId`, `conversationId` and the reserved `requestId` |
+| A member is spawned with [instructions](member-instructions.md) | `member.instructions_set` | Nothing |
+
+No kind says that a card stopped being pending, whether by a decision, a cancel or
+an expiry; the request's `request.finished` follows each. Its body does not say
+which: a finish after an expiry looks like a finish after an owner's cancel. The
+request receipt's `expiredApproval` tells them apart. A routine firing's body
+carries its status, not its reason; `GET /v1/routines/{routineId}/firings` has the
+reason. No body names an initiator, so a handoff's first request looks like any
+other request of the target; its receipt and audit rows name the handoff. No body
+carries a handoff transcript, member instructions or memory text. A body's
+`status` takes the values its audit event's payload allows, so a status the trail
+gains is delivered rather than skipped.
+
+The handoff transaction, the expiry that the conversation workflow's timer
+settles, and request admission, including a budget refusal, write only their
+audit rows. None of them reads or writes a webhook table, so a stalled delivery
+path never delays or fails them; the dispatcher reads their rows after they
+commit.
+
 ## Network safety
 
 A webhook is a request from inside the installation to an address an owner
@@ -315,8 +347,9 @@ Node's bundled certificate authorities, plus any the operator adds through
 `host` is the URL's host and port. The trail never holds the path, the query or the
 secret: a URL path can itself be a credential. Endpoints belong to the owner, not
 to a member, so `webhook.*` rows are the only audit rows whose `memberId` is
-`null`, and their CSV cell is empty. Deliveries are not audited; their rows are the
-record.
+`null`, and their CSV cell is empty. A [`memberId` filter](audit-filters.md) never
+matches them; select them with `eventType`. Deliveries are not audited; their rows
+are the record.
 
 ## Recovery
 
@@ -370,6 +403,11 @@ lock. A running native turn's admission transaction holds nothing on
 it fails with `55P03`, applies nothing, and the process exits. The cursor starts at
 the newest audit event, so no event from before the upgrade is ever sent.
 
+A development database that ran this feature's earlier `030-webhooks.sql`, before
+it was renumbered, records version 30 without 27 to 29. `migrate()` refuses it with
+`Migration 27 would apply after migration 30` and applies nothing; recreate it, or
+restore a backup taken before that build. No release shipped that file.
+
 Two changes reach existing clients. `GET /v1/audit` gains five event types, and
 `memberId` is `null` on the `webhook.*` rows; a consumer that requires a member on
 every row must accept `null` for those types. And every pending card or question
@@ -395,7 +433,9 @@ migration (see [persistent deployment](persistent-deployment.md#upgrades)).
 ## Not covered
 
 - Other audit types are not deliverable: spawns, opens, admissions, decisions,
-  grants, routine lifecycle changes by the owner, memory and webhook changes.
+  grants, routine lifecycle changes by the owner, memory and webhook changes,
+  approval expiries, handoffs, member instructions, budget changes and budget
+  refusals (see [what they send](#handoffs-approval-expiry-and-usage-budgets)).
   Adding a kind means adding it to `webhookKinds` and to the two CHECKs in a
   migration.
 - Inbound webhooks that start a request (row 24 of the comparison).
@@ -444,6 +484,17 @@ receiver in the test process and a settable clock. It checks:
   proposal and commit paths, with the exact body, a signature the test verifies
   independently, and no prompt, reply, note or secret; nothing for an event before
   the endpoint existed or for an owner's own routine disable;
+- a card that expires: `approval.pending`, then `request.finished` with status
+  `completed` and no expiry mark, nothing for `approval.expired`, and the expiry
+  settling while every webhook table is locked;
+- a handoff: nothing for the handoff, and the reserved request's finish sent for
+  the target with its member, conversation and request and no initiator, the
+  handoff and the reserved request's admission committing while every webhook
+  table is locked; neither path's bodies or headers carry the prompt, reply, note,
+  transcript, member instructions, memory text or secret;
+- a request refused for its budget, refused while every webhook table is locked,
+  sending nothing, and a routine's two refused firings sent as failed, then its
+  switch-off; every firing status and reason the dispatcher names delivered;
 - a non-`2xx` answer retried on the backoff schedule until it gives up after ten
   attempts, and a later success resetting the count;
 - ten deliveries given up in a row disabling the endpoint, with a system
@@ -476,7 +527,9 @@ receiver in the test process and a settable clock. It checks:
   `recovery.test.ts` does without `pg_dump`) disabling them, cancelling the pending
   row, moving the cursor and sending only later events after an enable;
 - the tombstone, history and cursor triggers, and the audit member CHECK;
-- migration 32 on a version-31 database: its locks, no rewrite, `NOT VALID` CHECKs,
+- migration 32 on a version-31 database: every constraint and trigger it finds
+  kept, and its type CHECK keeping every clause of 031's, as PostgreSQL stores
+  them, unchanged and in order; its locks, no rewrite, `NOT VALID` CHECKs,
   the cursor at the newest event, that it retries instead of queueing behind an
   audited writer, and that it completes while a native turn holds its admission.
 

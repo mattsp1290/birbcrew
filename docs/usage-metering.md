@@ -302,6 +302,10 @@ The [audit filters](audit-filters.md) take the three types like any other:
 `initiatorKind=routine` and `initiatorId=<routineId>` do not return a routine's
 refusals; no filter reads `routineId` from the payload.
 
+A refused request sends no [outbound webhook](webhooks.md#handoffs-approval-expiry-and-usage-budgets),
+because it never finishes; a routine's refused firing is sent as
+`routine.firing_settled` with status `failed`.
+
 ## Telemetry
 
 The `model.invoke` span gains `usage.state` and, when the segment reported counts,

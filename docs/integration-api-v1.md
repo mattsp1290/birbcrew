@@ -509,8 +509,13 @@ unordered, with ten attempts over about three hours, and an endpoint that gives 
 ten deliveries in a row is disabled. Crew sends only to public addresses over
 HTTPS, unless the operator allows insecure targets for local testing, follows no
 redirect and sends no credential. `webhook.*` audit rows belong
-to no member, so their `memberId` is `null`. See [outbound webhooks](webhooks.md)
-for the receiver's checks, the secret's storage and the restore behaviour.
+to no member, so their `memberId` is `null` and a `memberId` filter never matches
+them. An expired card, a handoff and a budget refusal add no kind: a handoff's
+reserved request and an expired card's request are sent as `request.finished`, and a
+refused request sends nothing (see
+[what they send](webhooks.md#handoffs-approval-expiry-and-usage-budgets)). See
+[outbound webhooks](webhooks.md) for the receiver's checks, the secret's storage and
+the restore behaviour.
 
 ## Validation
 
