@@ -24,7 +24,7 @@ import { failReasons, RoutineApi, RoutineDispatcher, skipReasons } from "../../s
 import { MemberStore } from "../../src/service/store.ts";
 import { recordSegmentUsage, UsageApi } from "../../src/service/usage.ts";
 import type { ResolvedAddress, TargetPolicy } from "../../src/service/webhook-target.ts";
-import { retryDelayMs, WebhookApi, WebhookDispatcher, webhookKindNames, webhookLimits, type Clock } from "../../src/service/webhooks.ts";
+import { retryDelayMs, WebhookApi, WebhookDispatcher, webhookKindNames, webhookKinds, webhookLimits, type Clock } from "../../src/service/webhooks.ts";
 
 const url = process.env.BIRBCREW_TEST_DATABASE_URL;
 if (!url) throw new Error("Set BIRBCREW_TEST_DATABASE_URL to a disposable PostgreSQL database.");
@@ -397,7 +397,8 @@ async function whileWebhookTablesLocked<T>(h: Harness, change: () => Promise<T>)
   try {
     await blocker.query("BEGIN");
     await blocker.query("LOCK TABLE birbcrew_ts.webhook_deliveries, birbcrew_ts.webhook_endpoints, birbcrew_ts.webhook_cursor IN ACCESS EXCLUSIVE MODE");
-    return await Promise.race([change(), delay(5_000).then((): never => { throw new Error("the change waited on a webhook table"); })]);
+    return await Promise.race([change(),
+      delay(5_000, undefined, { ref: false }).then((): never => { throw new Error("the change waited on a webhook table"); })]);
   } finally {
     await blocker.query("ROLLBACK");
     blocker.release();
@@ -546,10 +547,13 @@ test("a request refused for its budget sends nothing; a routine's refused firing
   await h.db.query("UPDATE birbcrew_ts.routines SET consecutive_failures=8 WHERE routine_id=$1", [routineId]);
   const routines = new RoutineDispatcher({ store: h.store, members, integration: new IntegrationApi(h.store, members), owners: [h.ownerId], clock });
   t.after(() => routines.stop());
-  for (const minutes of [15, 30]) {
-    now = new Date(Date.parse("2031-01-06T10:00:00.000Z") + minutes * 60_000);
-    await routines.tick();
-  }
+  // The budget pre-check, each firing's settlement and the switch-off commit while every webhook table is locked.
+  await whileWebhookTablesLocked(h, async () => {
+    for (const minutes of [15, 30]) {
+      now = new Date(Date.parse("2031-01-06T10:00:00.000Z") + minutes * 60_000);
+      await routines.tick();
+    }
+  });
   await pass(h.dispatcher());
 
   const { rows: refusals } = await h.db.query("SELECT count(*)::integer AS n FROM birbcrew_ts.audit_events WHERE event_type='usage.request_refused'");
@@ -585,6 +589,10 @@ test("every routine firing outcome the trail records is delivered with its statu
   });
   await pass(h.dispatcher());
   assert.deepEqual(r.received.map(item => JSON.parse(item.body).status), outcomes.map(([status]) => status));
+  // The statuses come from the audit registry; a value it gains changes what receivers get, so it must change this list
+  // and docs/webhooks.md with it.
+  assert.deepEqual([webhookKinds["request.finished"].body.shape.status.options, webhookKinds["routine.firing_settled"].body.shape.status.options],
+    [["completed", "failed", "cancelled", "uncertain"], ["succeeded", "failed", "skipped"]]);
 });
 
 test("a failed attempt is retried with exponential backoff; the tenth gives up; a success resets the count", async (t) => {
@@ -1052,25 +1060,39 @@ function orClauses(definition: string) {
   return [...clauses, body.slice(start)];
 }
 
-test("the webhook migration keeps every constraint and trigger it finds, and its type CHECK every clause of the one it replaces", async (t) => {
+test("the webhook migration keeps every constraint, trigger, function, index and column it finds, and its type CHECK every clause of the one it replaces", async (t) => {
   const upgraded = await databaseAt(t, webhookVersion - 1);
-  const catalog = async () => {
-    const { rows: constraints } = await upgraded.query<{ name: string; definition: string }>(`SELECT conrelid::regclass::text || '/' || conname AS name,
-      pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE connamespace='birbcrew_ts'::regnamespace`);
-    const { rows: triggers } = await upgraded.query<{ name: string; definition: string }>(`SELECT tgrelid::regclass::text || '/' || tgname AS name,
-      pg_get_triggerdef(oid) AS definition FROM pg_trigger WHERE NOT tgisinternal
-        AND tgrelid IN (SELECT oid FROM pg_class WHERE relnamespace='birbcrew_ts'::regnamespace)`);
-    return Object.fromEntries([...constraints, ...triggers].map(row => [row.name, row.definition]));
-  };
+  // Everything in the schema that a migration could replace or drop, as PostgreSQL prints it. NOT NULL
+  // is read from the column, not from pg_constraint, which holds it only from PostgreSQL 18.
+  const catalog = async () => Object.fromEntries((await upgraded.query<{ name: string; definition: string }>(`
+    SELECT conrelid::regclass::text || '/' || conname AS name, pg_get_constraintdef(oid) AS definition FROM pg_constraint
+      WHERE connamespace='birbcrew_ts'::regnamespace AND contype <> 'n'
+    UNION ALL SELECT tgrelid::regclass::text || '/' || tgname, pg_get_triggerdef(oid) FROM pg_trigger
+      WHERE NOT tgisinternal AND tgrelid IN (SELECT oid FROM pg_class WHERE relnamespace='birbcrew_ts'::regnamespace)
+    UNION ALL SELECT 'function/' || oid::regprocedure::text, pg_get_functiondef(oid) FROM pg_proc
+      WHERE pronamespace='birbcrew_ts'::regnamespace AND prokind='f'
+    UNION ALL SELECT 'index/' || indexrelid::regclass::text, pg_get_indexdef(indexrelid) FROM pg_index
+      WHERE indrelid IN (SELECT oid FROM pg_class WHERE relnamespace='birbcrew_ts'::regnamespace)
+    UNION ALL SELECT 'column/' || a.attrelid::regclass::text || '.' || a.attname, format_type(a.atttypid, a.atttypmod)
+        || CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END || coalesce(' DEFAULT ' || pg_get_expr(d.adbin, d.adrelid), '')
+      FROM pg_attribute a LEFT JOIN pg_attrdef d ON (d.adrelid, d.adnum) = (a.attrelid, a.attnum)
+      WHERE a.attnum > 0 AND NOT a.attisdropped
+        AND a.attrelid IN (SELECT oid FROM pg_class WHERE relnamespace='birbcrew_ts'::regnamespace AND relkind='r')`)).rows
+    .map(row => [row.name, row.definition]));
   const before = await catalog();
   await upgraded.query(await readFile(new URL(webhookMigration, sql), "utf8"));
   const after = await catalog();
-  const typeCheck = "birbcrew_ts.audit_events/audit_events_type_check";
+  const typeCheck = "birbcrew_ts.audit_events/audit_events_type_check", member = "column/birbcrew_ts.audit_events.member_id";
+  assert.deepEqual([before[member], after[member]], ["uuid NOT NULL", "uuid"], "webhook rows name no member");
   for (const [name, definition] of Object.entries(before)) {
-    if (name !== typeCheck) assert.equal(after[name], definition, name);
+    if (name !== typeCheck && name !== member) assert.equal(after[name], definition, name);
   }
-  assert.deepEqual(Object.keys(after).filter(name => !(name in before) && !name.startsWith("birbcrew_ts.webhook_")),
-    ["birbcrew_ts.audit_events/audit_events_member_check"], "the only new constraint or trigger on an existing table");
+  assert.deepEqual(Object.keys(after).filter(name => !(name in before) && !name.includes("birbcrew_ts.webhook_")).sort(), [
+    "birbcrew_ts.audit_events/audit_events_member_check", "function/birbcrew_ts.guard_webhook_cursor()",
+    "function/birbcrew_ts.guard_webhook_delivery()", "function/birbcrew_ts.guard_webhook_endpoint()",
+    "function/birbcrew_ts.limit_enabled_webhooks()", "function/birbcrew_ts.reject_webhook_truncate()",
+    "index/birbcrew_ts.audit_events_approval_request_fact", "index/birbcrew_ts.audit_events_webhook_fact",
+  ], "what it adds outside its own tables");
   // Clause for clause as PostgreSQL stores them: everything the replaced CHECK held, unchanged and in order, then this feature's own.
   const [kept, replaced] = [orClauses(before[typeCheck]), orClauses(after[typeCheck])];
   const types = (clauses: string[]) => clauses.flatMap(clause => [...clause.matchAll(/'([a-z_]+\.[a-z_]+)'::text/g)].map(match => match[1]));

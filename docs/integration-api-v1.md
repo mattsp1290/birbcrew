@@ -495,6 +495,7 @@ request fails `409 usage_limit` (or `409 usage_limit_closed` when the refusal al
 the conversation), and a routine's firing fails with reason `usage_limit`; a request already
 admitted is never refused or interrupted, so the cap can be passed by what running
 requests use. See [usage metering](usage-metering.md).
+
 ## Outbound webhooks
 
 An owner can register up to 10 enabled HTTPS endpoints. Crew posts to an endpoint

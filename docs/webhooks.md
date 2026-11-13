@@ -31,7 +31,9 @@ microseconds) and `memberId`. For example:
  "occurredAt": "2026-11-12T08:15:30.123456Z", "conversationId": "UUID"}
 ```
 
-Key order is not significant. A body is at most 1 KiB.
+Key order is not significant. A body is at most 1 KiB. A `status` takes the values
+its audit event allows, and a value that event gains later is sent as it is, so
+accept a `status` you do not know and fetch the details.
 
 **A body carries identifiers, the kind, the time and a status only.** It never
 carries prompt text, reply text, a work-item note, tool arguments, member memory
@@ -261,6 +263,7 @@ audit rows above:
 | A request is refused for its member's [usage budget](usage-metering.md) | `usage.request_refused` | Nothing: the request has no admission and never finishes. The submit itself answered `409 usage_limit` or `409 usage_limit_closed` |
 | A routine firing fails with `usage_limit` or `approval_expired` | `routine.firing_settled` with that reason | `routine.firing_settled` with status `failed`; the tenth failure in a row also sends `routine.disabled` |
 | A [conversation handoff](handoffs.md) commits | `conversation.handed_off`, the target's `conversation.opened` | Nothing |
+| A handoff is refused for its target's budget | None: the handoff writes nothing | Nothing |
 | The handoff's reserved first request finishes | `request.finished` on the target, with the handoff as initiator | `request.finished` with the target's `memberId`, `conversationId` and the reserved `requestId` |
 | A member is spawned with [instructions](member-instructions.md) | `member.instructions_set` | Nothing |
 
@@ -276,10 +279,10 @@ carries a handoff transcript, member instructions or memory text. A body's
 gains is delivered rather than skipped.
 
 The handoff transaction, the expiry that the conversation workflow's timer
-settles, and request admission, including a budget refusal, write only their
-audit rows. None of them reads or writes a webhook table, so a stalled delivery
-path never delays or fails them; the dispatcher reads their rows after they
-commit.
+settles, request admission, including a budget refusal, and a routine firing's
+settlement write their audit rows and nothing to a webhook table, so a stalled
+delivery path never delays or fails them; the dispatcher reads their rows after
+they commit.
 
 ## Network safety
 
@@ -403,10 +406,14 @@ lock. A running native turn's admission transaction holds nothing on
 it fails with `55P03`, applies nothing, and the process exits. The cursor starts at
 the newest audit event, so no event from before the upgrade is ever sent.
 
-A development database that ran this feature's earlier `030-webhooks.sql`, before
-it was renumbered, records version 30 without 27 to 29. `migrate()` refuses it with
-`Migration 27 would apply after migration 30` and applies nothing; recreate it, or
-restore a backup taken before that build. No release shipped that file.
+Recreate any development database that ran this feature's earlier
+`030-webhooks.sql`, before it was renumbered, or restore a backup taken before that
+build; no release shipped that file. One that ran only this feature records
+version 30 without 27 to 29, and `migrate()` refuses it with
+`Migration 27 would apply after migration 30`. One that had 27 to 29 from main
+records version 30, which `migrate()` takes for the audit filters, and migration 32
+then fails because `webhook_endpoints` already exists. Either way nothing is
+applied.
 
 Two changes reach existing clients. `GET /v1/audit` gains five event types, and
 `memberId` is `null` on the `webhook.*` rows; a consumer that requires a member on
@@ -444,8 +451,9 @@ migration (see [persistent deployment](persistent-deployment.md#upgrades)).
   endpoint, client certificates and egress through a proxy.
 - Ordering, a manual redelivery route, and retention of delivery rows, which grow
   with events times endpoints, as routine firings do.
-- A Codex card expires after its live-call deadline (at most 170 s), so its
-  `approval.pending` delivery can arrive after the card is gone. A Claude turn
+- A card can be gone before its `approval.pending` delivery arrives: a Codex card
+  after its live-call deadline (at most 170 s), and a Claude or Pi card after its
+  approval deadline (at least 60 s), while retries span about three hours. A Claude turn
   recovered to a pending decision is not finished, so no `request.finished` is
   sent for it until reconciliation closes recovery.
 - An event that occurs while an endpoint is disabled is never sent to it, even
