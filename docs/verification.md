@@ -84,7 +84,14 @@ For Pi the seccomp filter also refuses:
   process, and `clone3`, so that threads use `clone`;
 - `prctl(PR_SET_PDEATHSIG)`, so it cannot undo its death signal;
 - `kill` and `tgkill` to any process but itself, and `tkill`,
-  `pidfd_send_signal`, `rt_sigqueueinfo` and `rt_tgsigqueueinfo`.
+  `pidfd_send_signal`, `rt_sigqueueinfo` and `rt_tgsigqueueinfo`;
+- `prlimit64`, `sched_setaffinity`, `sched_setattr`, `sched_setparam`,
+  `sched_setscheduler`, `setpriority` and `ioprio_set` on any process but
+  itself, since a lowered limit or priority also reaches another process of the
+  same user;
+- `fcntl(F_SETOWN)`, `fcntl(F_SETOWN_EX)`, `ioctl(FIOSETOWN)` and
+  `ioctl(SIOCSPGRP)`, which would make the kernel signal another process;
+- `shmget`, `msgget`, `semget` and `mq_open`, whose objects outlive the worker.
 
 The worker's environment holds only `HOME` and `TMPDIR`: no database URL and no
 provider key. The host makes each model request for the worker with the
@@ -93,21 +100,31 @@ with provider retries off. Of the worker's request options it takes only the
 session ID, transport and bounded timeouts; it ignores any model, key, headers,
 identity or environment. A member segment may make one model request and a
 trusted application turn 17, one for each of at most 16 tool calls and one for
-the reply. The host runs each trusted application tool, and only for a tool
-call that the model sent through it. It reads the worker's frames with a size
-limit and stops acting on them after the first failure. It counts the text the
-worker publishes, at most 65,536 bytes.
+the reply, never two at once. The host publishes the reply text and the
+argument previews itself, from the events it relays, and fails the turn past
+65,536 bytes of text; the worker reports neither. The host runs each trusted
+application tool only for a call that the model sent through it in a reply that
+asks for tools, with the model's arguments coerced against the tool's schema as
+the agent does, and a failed dispatch fails the turn, as it did in process. It
+reads the worker's frames with a limit of 16 Mi characters, fails the turn if
+the worker leaves 64 MiB unread, and stops acting on frames after the first
+failure.
 
 The host checks the worker's result before it returns it. A member segment's
-checkpoint must keep the thread, the session and every earlier turn, add exactly
-this request's turn or pending call, and hold the reply or tool calls exactly
-as the model sent them through the host; the committed text must equal both
-that reply and the published text. A proposal must name the segment's tool and
-its request. Delegated child profiles come from the `@birbcrew/pi-subagents`
-role table on the host, not from the worker. A trusted turn's reply must equal
-the text the model sent, and its checkpoint must extend the prior one. The host
-records a member segment's usage from the replies it relayed, not from the
-worker. A Pi profile's `prepare` runs on the host. Its extension may register
+checkpoint must keep the thread, the session and every earlier turn, and add
+only this request's turn or pending call. That turn must hold this request's
+prompt, the reply or tool calls exactly as the model sent them through the
+host, and system entries that the SDK itself writes: the instructions, the
+project context, the worker's own working directory, and the declarations of
+the segment's tools. A resumed turn's tool results must be the ones the host
+builds from the owner's decision or the children's outcomes. The committed text
+must equal the model's reply and the published text. A proposal must name the
+segment's tool and its request. Delegated child profiles come from the
+`@birbcrew/pi-subagents` role table on the host, not from the worker. A trusted
+turn's reply must equal the text the model sent, and its checkpoint must extend
+the prior one by this request's prompt, the replies the model sent, the results
+the host delivered, and the SDK's own system entries. The host records a member
+segment's usage from the replies it relayed, not from the worker. A Pi profile's `prepare` runs on the host. Its extension may register
 only the `before_provider_headers`, `before_provider_request`,
 `after_provider_response` and `provider_stream_event` hooks; any other
 extension call fails the turn, and so does an error from a hook, which the Pi
