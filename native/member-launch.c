@@ -46,8 +46,17 @@ static void port(int rules, const char *value) {
     checked(syscall(SYS_landlock_add_rule, rules, 2 /* LANDLOCK_RULE_NET_PORT */, &attr, 0));
 }
 
-// Descendants stay in the invocation process group supervised by the host.
-static void keep_group(void) {
+static void permit_under(int rules, const char *root, const char *child, uint64_t access) {
+    char path[PATH_MAX];
+    int length = snprintf(path, sizeof path, "%s/%s", root, child);
+    if (length < 0 || (size_t)length >= sizeof path) _exit(126);
+    permit(rules, path, access, 0);
+}
+
+// Descendants stay in the invocation process group supervised by the host. An offline member (Pi) also
+// cannot create sockets: its model traffic and tool calls cross the inherited IPC channel to the host.
+// io_uring is denied with them because it can open and connect sockets without the socket syscall.
+static void keep_group(int offline) {
     struct sock_filter code[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
 #if defined(__aarch64__)
@@ -59,8 +68,15 @@ static void keep_group(void) {
 #endif
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_setsid, 2, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_setpgid, 1, 0),
+#if defined(__x86_64__)
+        // x32 numbers carry this bit and would otherwise miss every comparison below.
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000, 5, 0),
+#endif
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_setsid, 4, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_setpgid, 3, 0),
+        // Without the offline policy these repeat the setsid comparison and change nothing.
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, offline ? SYS_socket : SYS_setsid, 2, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, offline ? SYS_io_uring_setup : SYS_setsid, 1, 0),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
     };
@@ -70,6 +86,8 @@ static void keep_group(void) {
 
 int main(int argc, char **argv) {
     const char *codex = getenv("BIRBCREW_NATIVE_BINARY");
+    // Pi runs its SDK in a Node worker that loads Crew's code from this checkout and talks only to its host.
+    const char *source = codex ? NULL : getenv("BIRBCREW_NATIVE_SOURCE");
     if (!codex && argc < 3) return 126;
     pid_t parent = number(codex ? getenv("BIRBCREW_NATIVE_PARENT") : argv[1], INT_MAX);
     checked(prctl(PR_SET_PDEATHSIG, SIGKILL));
@@ -110,13 +128,23 @@ int main(int argc, char **argv) {
         const char *lib[] = {"/usr/lib","/usr/lib64","/lib64",NULL};
         for (int i = 0; lib[i]; i++) permit(rules, lib[i], read | list | exec, 1);
         permit(rules, ".", private, 0);
+        if (source) {
+            // The Node IPC channel is the worker's only route out; every other inherited descriptor closes below.
+            const char *channel = getenv("NODE_CHANNEL_FD");
+            struct stat ipc;
+            if (!channel || strcmp(channel, "3") || fstat(3, &ipc) || !S_ISSOCK(ipc.st_mode)) return 126;
+            permit_under(rules, source, "package.json", read);
+            permit_under(rules, source, "node_modules", read | list);
+            permit_under(rules, source, "src/service", read | list);
+            unsetenv("BIRBCREW_NATIVE_SOURCE");
+        }
         argv += 2;
     }
     checked(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
-    keep_group();
+    keep_group(source != NULL);
     checked(syscall(SYS_landlock_restrict_self, rules, 0));
     umask(0077);
-    checked(syscall(SYS_close_range, 3, UINT_MAX, 0));
+    checked(syscall(SYS_close_range, source ? 4 : 3, UINT_MAX, 0));
     execv(executable, argv);
     fail();
 }
