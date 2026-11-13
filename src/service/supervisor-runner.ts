@@ -14,6 +14,7 @@ import type { DriverInput } from "./activities.ts";
 import type { Conversation, Checkpoint } from "./domain.ts";
 import { temporalSettings } from "./temporal-config.ts";
 import { usageAttributes } from "./usage-capture.ts";
+import { errorSummary, forwardWarnings, warn } from "./diagnostics.ts";
 
 interface AdmittedTurn {
   launch: Launch;
@@ -28,6 +29,8 @@ interface AdmittedTurn {
 }
 
 const controller = new AbortController();
+// This process's stderr is closed. The supervisor host writes what it is sent.
+forwardWarnings((line) => { if (process.connected) process.send?.({ warning: line }); });
 process.once("disconnect", () => process.exit(1));
 process.on("message", (message) => {
   if (message === "stop") controller.abort();
@@ -75,7 +78,8 @@ process.once("message", async (command: AdmittedTurn) => {
     } finally {
       await close?.();
     }
-  } catch {
+  } catch (error) {
+    warn("native_turn_failed", { conversationId: command?.launch?.conversationId, requestId: command?.launch?.requestId, ...errorSummary(error) });
     reply = { error: "Native SDK turn failed" };
   } finally {
     // Batched spans would be lost at process.exit below. A failing pool.end() still crashes the runner

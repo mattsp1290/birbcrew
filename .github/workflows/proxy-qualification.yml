@@ -31,6 +31,8 @@ jobs:
       - run: npm run test:proxy
       - run: npm run test:telemetry
       - run: npm test
+      - name: Codex sign-in and turn failure diagnostics
+        run: node --test tests/service/codex-subscription.test.ts tests/service/native-diagnostics.test.ts
   proxy-service-restart:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

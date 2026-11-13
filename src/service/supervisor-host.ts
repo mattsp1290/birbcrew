@@ -16,6 +16,7 @@ import { MemberStore } from "./store.ts";
 import { commandSchema, type Launch } from "./supervisor.ts";
 import { recordSegmentUsage } from "./usage.ts";
 import { segmentUsage } from "./usage-capture.ts";
+import { errorSummary, relayWarning, warn } from "./diagnostics.ts";
 
 const pool = new Pool({ connectionString: process.env.BIRBCREW_DATABASE_URL });
 const store = new MemberStore(pool);
@@ -175,6 +176,9 @@ async function start(launch: Launch): Promise<SegmentResult> {
           const matched = "matchedOperation" in value && value.matchedOperation === true;
           preview = (preview ?? stream.drain()).then(() => store.previewTool(launch, id, matched));
           void preview.catch(() => { });
+        } else if (value && typeof value === "object" && "warning" in value && typeof value.warning === "string") {
+          // A runner's warning was redacted where it was written. Only its length is bounded here.
+          if (value.warning.length <= 8192) relayWarning(value.warning);
         } else {
           reply = value;
         }
@@ -197,7 +201,8 @@ async function start(launch: Launch): Promise<SegmentResult> {
     if (!confirmed || !reaped) throw new Error("SDK process stopped without a confirmed result");
     const {ownerId,conversationId,requestId,token} = launch;
     const childKey = launch.childId ? {ownerId,conversationId,requestId,memberId:member.conversation.memberId,childId:launch.childId} : undefined;
-    if (childKey && z.strictObject({error:z.literal("Native SDK turn failed")}).safeParse(reply).success) {
+    if (z.strictObject({error:z.literal("Native SDK turn failed")}).safeParse(reply).success) {
+      if (!childKey) throw new Error("Native runner reported a failed turn");
       await children.finish(childKey,token,null);
       return {kind:"childDone"};
     }
@@ -318,7 +323,8 @@ process.on("message", async (message) => {
   let response;
   try {
     response = { id, ok: true, reply: await handle(launch, action) };
-  } catch {
+  } catch (error) {
+    warn("native_turn_unconfirmed", { action, conversationId: launch.conversationId, requestId: launch.requestId, ...errorSummary(error) });
     response = { id, ok: false, error: "Native turn denied or outcome uncertain" };
   }
   if (process.connected) process.send?.(response, () => {});
