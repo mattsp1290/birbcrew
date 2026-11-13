@@ -191,9 +191,10 @@ export class MemberStore {
         [ownerId, requestId, engine, profile],
       );
       if (created) {
-        // This call made the member: it writes what it was given, then records it. It reads no
-        // table it did not write, so a spawn without packs or instructions works on a database
-        // migrated before them.
+        // This call made the member: it writes what it was given, then records it. Only
+        // attachPacks reads a table it did not write (instruction_packs, to check and lock the
+        // named packs), so a spawn without packs or instructions works on a database migrated
+        // before them.
         if (instructions !== undefined) await db.query(
           "INSERT INTO birbcrew_ts.member_instructions (owner_id, member_id, body) VALUES ($1, $2, $3)",
           [ownerId, created.memberId, instructions]);
