@@ -64,12 +64,12 @@ export const packListParameterNames: readonly string[] = Object.keys(listParamet
 const listQuery = z.strictObject(listParameters);
 
 type PackRow = {
-  pack_id: string; owner_id: string; create_request_id: string; name: string | null; description: string | null; body: string | null;
+  pack_id: string; name: string | null; description: string | null; body: string | null;
   state: "active" | "deleted"; created_at: Date; deleted_at: Date | null; member_count: number; summary: InstructionsSummary | null;
 };
 // The members a pack is attached to, and its byte count and digest while it has text. A listing
 // leaves the text in the database: a page of 100 full packs would carry 1.6 MB the gateway drops.
-const packSelection = (withText: boolean) => `SELECT i.pack_id, i.owner_id, i.create_request_id, i.name, i.description,
+const packSelection = (withText: boolean) => `SELECT i.pack_id, i.name, i.description,
     ${withText ? "i.body" : "NULL::text AS body"}, i.state, i.created_at, i.deleted_at,
     (SELECT count(*)::integer FROM birbcrew_ts.member_instruction_packs a WHERE a.pack_id=i.pack_id) AS member_count,
     CASE WHEN i.body IS NOT NULL THEN ${instructionsSummarySql} END AS summary
@@ -147,8 +147,12 @@ export class PackApi {
     return this.store.transaction(async db => {
       const row = await this.owned(db, ownerId, packId, true);
       if (row.state === "deleted") return packView(row, true);
-      // guard_instruction_pack refuses a pack any member has (pack_in_use). Its check runs after
-      // the lock above, so it sees a spawn that held the pack and committed.
+      // guard_instruction_pack makes the same check, but the UPDATE's statement-level recovery
+      // barrier fires before it, so only this check answers pack_in_use while recovery holds
+      // writes. A later statement than the lock, so it sees a spawn that held the pack and committed.
+      const { rows: [{ attached }] } = await db.query<{ attached: boolean }>(
+        "SELECT EXISTS (SELECT 1 FROM birbcrew_ts.member_instruction_packs WHERE pack_id=$1) AS attached", [row.pack_id]);
+      if (attached) throw new MemberStoreError("pack_in_use");
       await db.query(`UPDATE birbcrew_ts.instruction_packs SET state='deleted', name=NULL, description=NULL, body=NULL,
         deleted_at=clock_timestamp() WHERE pack_id=$1`, [row.pack_id]).catch(constraintError);
       await appendAudit(db, { type: "instruction_pack.deleted", ownerId, memberId: null, payload: { packId: row.pack_id } });

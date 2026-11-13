@@ -604,6 +604,8 @@ test('capture counts instruction packs, a held installation refuses every pack w
   ()=>t.pool.query(`INSERT INTO birbcrew_ts.member_instruction_packs(member_id,position,owner_id,pack_id) VALUES($1,2,'owner',$2)`,[member.memberId,spare.packId])]) {
   await assert.rejects(write(),{code:'55000'});
  }
+ // Deleting an attached pack is refused as in use before the barrier is reached, held or not.
+ await assert.rejects(packs.delete('owner',used.packId),{code:'pack_in_use'});
  assert.equal((await packs.get('owner',used.packId)).text,style,'reads still work');
  await t.recovery.resume(t.hooks);
  // After the recovery point: the spare pack is deleted, and a new pack and member appear.
