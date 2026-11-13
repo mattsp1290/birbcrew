@@ -99,7 +99,7 @@ audit version may switch to a keyed per-owner digest.
 The registry is the `auditEvents` object in `src/service/audit.ts`.
 `audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
 `024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql`, `027-handoffs.sql`, `028-approval-expiry.sql` and then `029-member-instructions.sql`, lists the same types.
-Each widening replaces the whole constraint, so the latest migration lists every type.
+Each widening replaces the whole constraint, so the last widening lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
 

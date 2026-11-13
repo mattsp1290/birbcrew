@@ -1036,6 +1036,112 @@ test("filter values are validated at the gateway: unknown types and kinds and ma
   }
 });
 
+test("handoff, expiry and instructions rows answer every filter alike in JSON and CSV, and only to their owner", async (t) => {
+  const f = await fixture(); t.after(f.stop);
+  const checkpoint = { version: 1 as const, engine: "pi" as const, state: {} };
+  async function created(response: Response, status: number) {
+    assert.equal(response.status, status, await response.clone().text());
+    return response.json();
+  }
+  /** One owner's trail: a member spawned with instructions, a card on it that expires, and a handoff of
+   * another of its conversations to a second member, whose reserved request then completes. */
+  async function trail(ownerId: string, credential: string) {
+    const spawn = async (instructions?: string) => (await created(await f.api("/v1/members",
+      { requestId: randomUUID(), engine: "pi", profile, ...(instructions ? { instructions } : {}) }, credential), 201)).memberId as string;
+    const instructed = await spawn("Answer in one sentence."), target = await spawn();
+    async function started(terms: { approvalDeadlineSeconds?: number } = {}) {
+      const conversationId = randomUUID(), request = { ownerId, conversationId, requestId: randomUUID(), text: "audited prompt", ...terms };
+      await created(await f.api("/v1/conversations", { conversationId, memberId: instructed }, credential), 201);
+      await created(await f.api(`/v1/conversations/${conversationId}/requests`, { requestId: request.requestId, text: request.text, ...terms },
+        credential), 202);
+      const turn = await store.beginTurn(request);
+      assert.equal(turn.kind, "start"); if (turn.kind !== "start") throw new Error("unreachable");
+      return { ownerId, conversationId, requestId: request.requestId, token: turn.token };
+    }
+    const expiring = await started({ approvalDeadlineSeconds: 60 });
+    const card = await approvals.propose({ ...expiring, memberId: instructed, invocationId: expiring.requestId,
+      nativeCallId: "expiring-call", toolName: "record_work_item", arguments: { operation_id: expiring.requestId } });
+    await pool.query("UPDATE birbcrew_ts.deferred_calls SET expires_at=clock_timestamp() WHERE approval_id=$1", [card.approvalId]);
+    assert.deepEqual(await approvals.expireTurn(card), { kind: "expired" });
+    const source = await started();
+    await store.commitTurn({ ...source, reply: "done", checkpoint });
+    const handoff = await created(await f.api(`/v1/conversations/${source.conversationId}/handoffs`,
+      { requestId: randomUUID(), memberId: target }, credential), 201);
+    assert.equal(handoff.firstRequestAdmitted, true);
+    const { rows: [{ transcript }] } = await pool.query<{ transcript: string }>(
+      "SELECT transcript FROM birbcrew_ts.conversation_handoffs WHERE handoff_id=$1", [handoff.handoffId]);
+    const reserved = { ownerId, conversationId: handoff.target.conversationId as string, requestId: handoff.firstRequestId as string };
+    const delivered = await store.beginTurn({ ...reserved, text: transcript });
+    assert.equal(delivered.kind, "start"); if (delivered.kind !== "start") throw new Error("unreachable");
+    await store.commitTurn({ ...reserved, token: delivered.token, reply: "acknowledged", checkpoint });
+    return { ownerId, credential, instructed, target, expiring: expiring.conversationId, source: source.conversationId,
+      handoffId: handoff.handoffId as string, targetConversation: reserved.conversationId };
+  }
+  const owners = [await trail(f.ownerId, f.token), await trail(f.strangerId, f.stranger)];
+
+  for (const [mine, theirs] of [owners, [...owners].reverse()]) {
+    const all = (await f.audit("", mine.credential)).events;
+    // Who each row names. The handoff row is on the source's member and conversation and names the
+    // owner as its initiator; only the reserved request's rows name the handoff.
+    const owner = { kind: "owner", id: mine.ownerId }, handoff = { kind: "handoff", id: mine.handoffId };
+    assert.deepEqual(all.map(event => [event.type, event.memberId, event.conversationId, event.actor.kind, event.initiator]), [
+      ["member.spawned", mine.instructed, null, "owner", owner],
+      ["member.instructions_set", mine.instructed, null, "owner", owner],
+      ["member.spawned", mine.target, null, "owner", owner],
+      ["conversation.opened", mine.instructed, mine.expiring, "owner", owner],
+      ["request.accepted", mine.instructed, mine.expiring, "owner", owner],
+      ["approval.expired", mine.instructed, mine.expiring, "system", owner],
+      ["conversation.opened", mine.instructed, mine.source, "owner", owner],
+      ["request.accepted", mine.instructed, mine.source, "owner", owner],
+      ["request.finished", mine.instructed, mine.source, "system", owner],
+      ["conversation.opened", mine.target, mine.targetConversation, "owner", owner],
+      ["conversation.handed_off", mine.instructed, mine.source, "owner", owner],
+      ["request.accepted", mine.target, mine.targetConversation, "owner", handoff],
+      ["request.finished", mine.target, mine.targetConversation, "system", handoff],
+    ], mine.ownerId);
+    const cases: [string, (event: Event) => boolean][] = [
+      ["eventType=member.instructions_set", event => event.type === "member.instructions_set"],
+      ["eventType=approval.expired", event => event.type === "approval.expired"],
+      ["eventType=conversation.handed_off", event => event.type === "conversation.handed_off"],
+      ["eventType=conversation.handed_off,approval.expired,member.instructions_set",
+        event => ["conversation.handed_off", "approval.expired", "member.instructions_set"].includes(event.type)],
+      ["actorKind=system", event => event.actor.kind === "system"],
+      ["actorKind=system&eventType=approval.expired", event => event.type === "approval.expired"],
+      ["actorKind=owner&eventType=approval.expired", () => false],
+      ["initiatorKind=handoff", event => event.initiator.kind === "handoff"],
+      ["initiatorId=" + mine.handoffId.toUpperCase(), event => event.initiator.kind === "handoff"],
+      [`initiatorKind=handoff&initiatorId=${mine.handoffId}`, event => event.initiator.kind === "handoff"],
+      [`initiatorKind=routine&initiatorId=${mine.handoffId}`, () => false],
+      ["initiatorKind=owner&eventType=conversation.handed_off", event => event.type === "conversation.handed_off"],
+      ["memberId=" + mine.instructed, event => event.memberId === mine.instructed],
+      ["memberId=" + mine.target, event => event.memberId === mine.target],
+      [`memberId=${mine.target}&eventType=conversation.handed_off`, () => false],
+      [`memberId=${mine.instructed}&eventType=member.instructions_set`, event => event.type === "member.instructions_set"],
+      [`memberId=${mine.target}&eventType=member.instructions_set`, () => false],
+      [`conversationId=${mine.source}&eventType=conversation.handed_off`, event => event.type === "conversation.handed_off"],
+      [`conversationId=${mine.targetConversation}&initiatorKind=handoff`, event => event.initiator.kind === "handoff"],
+      // The other owner's members, handoff and conversations are empty pages.
+      ["memberId=" + theirs.instructed, () => false],
+      ["memberId=" + theirs.target, () => false],
+      ["initiatorId=" + theirs.handoffId, () => false],
+      [`initiatorKind=handoff&initiatorId=${theirs.handoffId}`, () => false],
+      ["conversationId=" + theirs.expiring, () => false],
+      ["conversationId=" + theirs.source, () => false],
+      ["conversationId=" + theirs.targetConversation, () => false],
+      ...auditEventTypes.map((type): [string, (event: Event) => boolean] => ["eventType=" + type, event => event.type === type]),
+    ];
+    for (const [query, keep] of cases) {
+      const page = await f.audit("?" + query, mine.credential);
+      assert.deepEqual(page.events.map(event => event.eventId), all.filter(keep).map(event => event.eventId), query);
+      // CSV carries the same rows, cell for cell, and the same cursor.
+      const csv = await f.api("/v1/audit?format=csv&" + query, undefined, mine.credential);
+      assert.equal(csv.status, 200, query);
+      assert.equal(csv.headers.get("audit-next-after"), page.nextAfter, query);
+      assert.equal(await csv.text(), auditCsv(page.events as unknown as AuditEvent[]), query);
+    }
+  }
+});
+
 test("migration 30 indexes a version-29 trail without queueing for an open audited write or waiting for a native turn", async (t) => {
   const upgraded = await databaseAt(t, 29);
   const current = new MemberStore(upgraded);

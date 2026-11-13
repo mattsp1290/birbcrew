@@ -4,12 +4,13 @@
 -- sparse it reaches the horizon, and an empty page leaves the cursor where it was, so a client
 -- that polls such a filter walks the owner's trail from its last match on every poll. Each index
 -- below lets one such filter read only its matching rows, as audit_events_conversation_page does
--- for conversationId. One member, one type or one routine is a single (owner, value) range already
--- in event_id order; several types, or initiatorKind=routine alone, read their few rows and sort them.
+-- for conversationId. One member, one type, one routine or one handoff is a single (owner, value) range
+-- already in event_id order; several types, or initiatorKind=routine or handoff alone, read their few
+-- rows and sort them.
 --   member_page: one member among all the owner's members.
 --   type_page: one or a few of the event types; grants, memories, spawns and routine changes are rare.
---   initiator_page: one routine's requests. Partial, so it holds only rows that a routine (or a
---   later non-owner kind) started; an owner row stores the owner ID as initiator_id.
+--   initiator_page: one routine's or one handoff's requests. Partial, so it holds only rows that a
+--   routine or a handoff started; an owner row stores the owner ID as initiator_id.
 -- No index for actorKind or initiatorKind=owner: in a typical trail each matches a large share
 -- (every spawn, open and routine change names the owner; every finish and commit names the system),
 -- so the walk finds its matches quickly.

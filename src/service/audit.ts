@@ -164,8 +164,9 @@ const auditFilters = {
   },
   actorKind: { value: z.enum(actorKinds), where: (p: string) => `actor_kind = ${p}` },
   initiatorKind: { value: z.enum(initiatorKinds), where: (p: string) => `initiator_kind = ${p}` },
-  // An owner row stores the owner ID here, so this names the other initiators: today a routine, by its ID.
-  // The kind test is also what lets the planner use the partial audit_events_initiator_page.
+  // An owner row stores the owner ID here, so this names the other initiators: a routine or a handoff, by
+  // its ID, and combines with initiatorKind like any filter. The kind test is also what lets the planner use
+  // the partial audit_events_initiator_page.
   initiatorId: { value: lowerUuid, where: (p: string) => `initiator_kind <> 'owner' AND initiator_id = ${p}` },
   // A half-open window on occurred_at: from inclusive, to exclusive.
   from: { value: instant, where: (p: string) => `occurred_at >= ${p}::timestamptz` },

@@ -16,8 +16,8 @@ three indexes so that the selective filters do not walk an owner's whole trail.
 | `memberId` | member is this one | a UUID, any case |
 | `eventType` | type is one of these | registered types, comma-separated, each at most once |
 | `actorKind` | actor kind is this | `owner` or `system` |
-| `initiatorKind` | initiator kind is this | `owner` or `routine` |
-| `initiatorId` | request was started by this non-owner initiator | a UUID, any case: today a routine ID |
+| `initiatorKind` | initiator kind is this | `owner`, `routine` or `handoff` |
+| `initiatorId` | request was started by this non-owner initiator | a UUID, any case: a routine ID or a handoff ID |
 | `from` | `occurredAt` is at or after this instant | an RFC 3339 timestamp |
 | `to` | `occurredAt` is before this instant | an RFC 3339 timestamp |
 
@@ -38,27 +38,35 @@ GET /v1/audit?eventType=grant.created,grant.revoked,memory.created,memory.delete
 ## What each filter matches
 
 The owner comes only from the bearer token, and every filter narrows that
-owner's rows. Another owner's member, conversation or routine returns `200` with
-an empty page, never `404`, so a filter cannot confirm that an ID exists. This is
-how `conversationId` already behaved.
+owner's rows. Another owner's member, conversation, routine or handoff returns
+`200` with an empty page, never `404`, so a filter cannot confirm that an ID
+exists. This is how `conversationId` already behaved.
 
 - `memberId` matches every row of the member, including the routine and memory
-  rows, which name the routine's or the entry's member.
+  rows, which name the routine's or the entry's member, and
+  `member.instructions_set`. A `conversation.handed_off` row names the source
+  conversation and its member, so the target member's ID does not match it. That
+  ID matches the target's `conversation.opened` row and its reserved request's
+  rows.
 - `eventType` takes names from `audit.eventTypes`. A name is case-sensitive. A
   registered type with no rows yet returns an empty page.
 - `actorKind` and `initiatorKind` match the `actor.kind` and `initiator.kind`
   fields of each event. See [the audit trail](audit-trail.md#contract) for who is
   named in each.
-- `initiatorId` matches the rows tied to the requests that a routine started,
-  such as `request.accepted`, `approval.decided`, `work_item.committed`,
-  `request.cancellation_requested` and `request.finished`. It does not match the
-  routine's own rows (`routine.created`, `routine.enabled`, `routine.disabled`,
-  `routine.deleted`, `routine.firing_settled`) or the `conversation.opened` row of
-  a firing. Those rows name the owner as initiator and carry `routineId` in their
-  payload, which no filter reads. An owner-initiated row stores the owner ID as
-  its initiator ID, so `initiatorId` never matches it. Select the owner's own rows
-  with `initiatorKind=owner`. `initiatorKind=owner&initiatorId=...` matches
-  nothing.
+- `initiatorId` matches the rows tied to the requests that a routine or a
+  handoff started, such as `request.accepted`, `approval.decided`,
+  `approval.expired`, `work_item.committed`, `request.cancellation_requested` and
+  `request.finished`. A handoff ID matches the rows of the one request it
+  reserved in the target. `initiatorId` does not match the routine's own rows
+  (`routine.created`, `routine.enabled`, `routine.disabled`, `routine.deleted`,
+  `routine.firing_settled`), the `conversation.opened` row of a firing or of a
+  handoff's target, or the `conversation.handed_off` row. Those rows name the
+  owner as initiator, and the routine and handoff rows carry `routineId` or
+  `handoffId` in their payload, which no filter reads. An owner-initiated row
+  stores the owner ID as its initiator ID, so `initiatorId` never matches it.
+  Select the owner's own rows with `initiatorKind=owner`. `initiatorId` combines
+  with `initiatorKind` like any filter, so `initiatorKind=owner&initiatorId=...`
+  matches nothing, and `initiatorKind=routine` with a handoff ID matches nothing.
 - `from` and `to` form a half-open window: `from` is inclusive and `to` is
   exclusive, so consecutive windows never share a row. Either may be given alone.
   A window whose `to` is not after its `from` returns an empty page.
@@ -118,15 +126,15 @@ walk. When a filter's rows are rare, the walk reaches the horizon. An empty page
 leaves the cursor where it was, so a client polling such a filter would walk the
 owner's trail from its last match on every poll. Migration 30 adds an index for
 each filter where that happens, so the read touches only matching rows. One
-member, one type or one routine reads a single range that is already in event ID
-order. Several types, or `initiatorKind=routine` alone, read their matching rows
-and sort them.
+member, one type, one routine or one handoff reads a single range that is already
+in event ID order. Several types, or `initiatorKind=routine` or
+`initiatorKind=handoff` alone, read their matching rows and sort them.
 
 | Index | Columns | Serves |
 | --- | --- | --- |
 | `audit_events_member_page` | `owner_id, member_id, event_id` | `memberId` |
 | `audit_events_type_page` | `owner_id, event_type, event_id` | `eventType`; grant, memory, spawn and routine changes are rare |
-| `audit_events_initiator_page` | `owner_id, initiator_id, event_id`, only rows whose initiator is not the owner | `initiatorId`, and `initiatorKind=routine` |
+| `audit_events_initiator_page` | `owner_id, initiator_id, event_id`, only rows whose initiator is not the owner | `initiatorId`, and `initiatorKind=routine` or `handoff` |
 
 `conversationId` already had `audit_events_conversation_page`. Each index leads
 with `owner_id`, so another owner's ID reads an empty range. The other filters
@@ -152,7 +160,9 @@ in page order without a sort. Several types read their rows and sorted them. On
 that trail (58 MB of heap) the migration built all three indexes in 0.4 s. The
 member and type indexes took 18 MB each, against 15 MB for the existing owner
 index. Each audited insert now also writes those two indexes, and writes the
-routine index when a routine started the request.
+initiator index when a routine or a handoff started the request. On a small
+trail with sequential scans disabled, a handoff's ID and `initiatorKind=handoff`
+read the initiator index as a routine's do.
 
 ## Upgrade and recovery
 
@@ -201,8 +211,9 @@ apply to filtered reads too.
 
 - Payload fields: a routine's `routineId` on its own rows, an approval's
   `choice`, a request's `status`, a tool name. Filter those on the client.
-- One filter for everything about a routine: its requests through `initiatorId`
-  together with its lifecycle and firing rows.
+- One filter for everything about a routine or a handoff: its requests through
+  `initiatorId` together with the routine's lifecycle and firing rows, or the
+  handoff's `conversation.handed_off` row.
 - OR across different filters, negation, and filters on `requestId` or `actorId`.
 - Pages in time order, counts and other aggregates.
 - Indexes for time windows and kinds, for the reasons above.
@@ -232,6 +243,12 @@ members, a denied card and a routine that fires and completes:
   replayed spawn that still shows as one row, and the JSON and CSV limits;
 - another owner's member, routine and conversation return empty pages, and their
   rows never appear in this owner's pages;
+- two owners, each with a member spawned with instructions, a card that expires
+  and a delivered handoff: `initiatorKind=handoff`, a handoff's `initiatorId`,
+  `actorKind=system`, each registered event type, and the member, conversation
+  and kind combinations around them return exactly the matching rows of the
+  reading owner, with CSV equal cell for cell to JSON, and the other owner's
+  members, handoff and conversations return empty pages;
 - a filtered read waits for a late commit like an unfiltered one, and answers
   `503 audit_unsettled` when a writer stays open;
 - each malformed value above returns `400 invalid_input`;

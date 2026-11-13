@@ -375,8 +375,8 @@ upgrade without them.
 | `conversationId` | Restrict to one conversation. Another owner's ID yields an empty page. |
 | `memberId` | Restrict to one member. Another owner's ID yields an empty page. |
 | `eventType` | Comma-separated registered event types. |
-| `actorKind`, `initiatorKind` | `owner` or `system`; `owner` or `routine`. |
-| `initiatorId` | Requests a routine started, by routine ID. Another owner's ID yields an empty page. |
+| `actorKind`, `initiatorKind` | `owner` or `system`; one of `initiatorKinds`. |
+| `initiatorId` | Requests a routine or a handoff started, by routine or handoff ID. Another owner's ID yields an empty page. |
 | `from`, `to` | RFC 3339 timestamps with an offset, at most six fractional digits, no leap second, offsets within ±15:59; `occurredAt` at or after `from` and before `to`. Encode `+` as `%2B`. |
 | `format` | `json` (default) or `csv`. |
 
