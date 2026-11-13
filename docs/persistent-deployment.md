@@ -227,6 +227,10 @@ holding their locks, and a running native turn never delays it (see
 [usage metering](usage-metering.md#upgrade-and-recovery)). Migration 32 (outbound
 webhooks) takes `audit_events` alone in `ACCESS EXCLUSIVE` the same way; after 31 in
 one transaction it already holds it (see [outbound webhooks](webhooks.md#upgrade)).
+Migration 34 (instruction packs) takes `members` in `SHARE ROW EXCLUSIVE` and
+`audit_events` in `ACCESS EXCLUSIVE` the same way; from version 31 it retries for
+`members` while holding 32's lock, and a spawn of the previous release still in flight
+makes it fail after the 60 s (see [instruction packs](instruction-packs.md#upgrade)).
 From the release that adds migration 31 on, every gateway, worker and CLI process
 refuses to start with
 `Migration N would apply after migration M` when it would apply a migration numbered 27

@@ -13,7 +13,9 @@ the member can do: its tools, approvals and limits stay as the profile sets them
 ## Packs
 
 All routes need the bearer token. The owner comes only from it. A pack is the owner's:
-another owner cannot read, list, delete or attach it.
+another owner cannot read, list, delete or attach it, and gets `404 not_found` for its ID.
+The routes exist only under `/v1`. A malformed `packId`, or a query string on any route but
+the listing, fails `400 invalid_input`; any other method fails `405`.
 
 | Route | Purpose |
 | --- | --- |
@@ -37,8 +39,8 @@ The name and the description are labels for the owner. Neither reaches the model
 decodes its body strictly, so bytes that are not UTF-8 fail `400 invalid_json`. Unknown
 fields fail `400 invalid_input`.
 
-A create is idempotent by `requestId`. A replay with the same name, description and text
-returns the pack again; any difference fails `409 conflict`, and a replay of a pack deleted
+A create returns `201`. It is idempotent by `requestId`: a replay with the same name,
+description and text returns the pack again, also with `201`; any difference fails `409 conflict`, and a replay of a pack deleted
 since fails `409 pack_deleted`. An owner has at most 32 active packs; the 33rd fails
 `409 pack_limit`. Deleted packs do not count.
 
@@ -79,7 +81,8 @@ identifier and a version route and give nothing a new pack does not.
 `DELETE /v1/instruction-packs/{packId}` erases the pack's name, description and text and
 keeps a tombstone, so a replayed create can be answered. Repeating it returns the
 tombstone: `state` is `deleted`, `name`, `description`, `text`, `bytes` and `digest` are
-`null`, and it keeps its `packId`, `createdAt` and `deletedAt`.
+`null`, and it keeps its `packId`, `createdAt` and `deletedAt`. Reading a deleted pack
+returns its tombstone with `200`.
 
 A pack that any member has cannot be deleted: the delete fails `409 pack_in_use`, and the
 database refuses a direct `UPDATE` that would delete it. Members are never removed, so a
@@ -90,8 +93,10 @@ This is the second design choice. The alternative was a copy of the text kept fo
 member, so that deleting a pack would only stop new spawns from using it. That was rejected
 because a delete would then erase the pack's text while every member that had it kept a
 copy that can never be erased: the delete would look like erasure and not be one. With the
-refusal, a deleted pack's text is gone from the database, and an attached pack's text is
-stored once and stays readable through the pack route.
+refusal, a deleted pack's text is gone from the live tables and, never having been
+attached, reached no model or native session; an attached pack's text is stored once and
+stays readable through the pack route. Old row versions until vacuum, the write-ahead log,
+backups and recovery generations keep a deleted pack's text until they are removed.
 
 ## Spawning a member with packs
 
@@ -116,12 +121,12 @@ takes one more optional field:
 
 The response adds `instructionPacks`, the IDs in order, only when the member has packs.
 `requestId` keeps spawn idempotent: a replay must name the same packs in the same order, or
-leave the field out exactly when the first spawn did, or it fails `409 conflict`, as other
+leave the field out exactly when the first spawn did, or it fails `409 conflict`, as
 instructions do. Leaving the field out spawns a member exactly as before: same response,
 same audit rows, no packs.
 
-Packs are attached only in the transaction that inserts the member, before its first
-conversation. Database triggers enforce this whoever writes:
+Spawn attaches packs only in the transaction that inserts the member. Database triggers
+enforce the rest whoever writes:
 
 - `UPDATE`, `DELETE` and `TRUNCATE` of a member's packs are refused, even when no row matches.
 - An attachment is refused once the member has a conversation, as an instructions insert is.
@@ -129,6 +134,9 @@ conversation. Database triggers enforce this whoever writes:
   `FOR SHARE` until it commits, so a delete running at the same time either commits first,
   and the spawn fails `409 pack_deleted`, or waits and then fails `409 pack_in_use`.
 - A member has each pack at most once and at most eight.
+
+The shared byte budget is checked by the API only, not by the database. A direct database
+writer that exceeds it still meets the open-time size check below.
 
 `GET /v1/members` lists each member's `instructionPacks` IDs, in order, beside its
 instructions summary; members without packs are listed exactly as before.
@@ -145,7 +153,9 @@ text:
 }
 ```
 
-`GET /v1/capabilities` describes the feature under `instructionPacks`:
+`GET /v1/capabilities` describes the feature under `instructionPacks`. Its `order` is the
+whole fixed order; `memberInstructions.order` keeps listing only the blocks it had, whose
+relative order is unchanged.
 
 ```json
 {
@@ -221,8 +231,9 @@ instructions, and the model is expected to follow them.
   prompt. Review a pack as you would the profile's own prompt, and do not build packs from
   content you have not read. Crew does not scan packs for injected instructions.
 - **Who reads them back.** The owner, through the pack route and the member's instructions
-  route. Other owners get `404`. Listings, spawn responses and the audit trail carry IDs,
-  byte counts and digests at most. Observers, snapshots and request receipts never carry
+  route. Other owners get `404`. No listing, spawn response or audit row carries pack text:
+  the pack listing carries names, descriptions, byte counts and digests, the member listing
+  and spawn responses carry pack IDs, and audit rows carry IDs only. Observers, snapshots and request receipts never carry
   the text, unless the model quotes it in a reply, which is stored and published like any
   other.
 - **Who else on the host can see them.** As with instructions, a Codex launch carries the
@@ -281,8 +292,9 @@ be deleted. A member spawned after the recovery point is gone with its attachmen
 A pack deleted after the recovery point comes back, text and all, unattached. Resuming does
 not suspend or delete it. Unlike memory, which every new conversation of the member picks
 up by itself, standing grants, which approve calls by themselves, and webhooks, which send
-by themselves, a restored pack does nothing until a spawn names its ID, so it cannot
-silently change what any model is told. Suspending every pack instead would make every
+by themselves, a restored pack does nothing until a spawn names its ID. A client that still
+names it, such as a stored spawn request, then gets the restored text instead of
+`409 pack_deleted`. Suspending every pack instead would make every
 spawn that names a pack fail until the owner created each one again under a new ID. After a
 restore, list your packs and delete again any you had deleted after the recovery point.
 
@@ -305,11 +317,12 @@ It takes both with `LOCK ... NOWAIT` together and retries every 20 to 100 ms, as
 60 s without the locks it fails with `55P03`, applies nothing, and the process exits.
 
 `migrate()` applies every pending migration in one transaction. From version 32, 34 holds
-nothing while it retries, so a spawn in flight commits and 34 then proceeds. From version 31
-or earlier, 34 retries for `members` while holding 32's `ACCESS EXCLUSIVE` lock on
-`audit_events`, so every audited write waits for it, and a spawn that started before the
-upgrade, which holds `members` and must append its audit row before it can commit, makes it
-fail after 60 s with `55P03`, earlier migrations included. Stop every process of the
+nothing while it retries, so a spawn in flight commits and 34 then proceeds. From version
+31, 34 retries for `members` while holding 32's `ACCESS EXCLUSIVE` lock on `audit_events`,
+so every audited write waits for it, and a spawn that started before the upgrade, which
+holds `members` and must append its audit row before it can commit, makes it fail after
+60 s with `55P03`, 32 included. From version 30 or earlier, 31 already holds both tables
+when 34 runs, so 34 never retries; the earlier migrations decide whether the upgrade waits. Stop every process of the
 previous release first, as for every migration; then no spawn is in flight.
 
 The migration is numbered 34 because another change in review claims 33. Whichever of the
@@ -317,7 +330,7 @@ two merges second repeats the other's audit types in its CHECKs and may be renum
 `migrate()` refuses to apply a migration numbered below one already applied, so a database
 that ran this branch before 33 merged needs a fresh database.
 
-Members spawned before the upgrade have no packs and cannot be given any. After a rollback
+Members spawned before the upgrade have no packs, and the API cannot give them any. After a rollback
 to a release without migration 34, the rows stay but launches no longer include them, so
 members with packs lose them until the release returns.
 
@@ -335,7 +348,8 @@ members with packs lose them until the release returns.
 ## Validation
 
 Use Node 22.23.3 on Linux and a disposable PostgreSQL 17 database whose role may create
-databases.
+databases. `BIRBCREW_PG_BIN` must name PostgreSQL 17 `pg_dump`/`pg_restore` for the recovery
+suite (or set `BIRBCREW_RECOVERY_POSTGRES_CONTAINER` to a PostgreSQL 17 container to run them in).
 
 ```sh
 npm ci

@@ -74,8 +74,8 @@ All routes need the bearer token. The owner comes only from it.
 | Route | Purpose |
 | --- | --- |
 | `POST /v1/members` | Spawn, with optional `instructions` |
-| `GET /v1/members/{memberId}/instructions` | The text, its byte count, its digest and when it was set |
-| `GET /v1/members` | Each member with instructions carries `instructions: { bytes, digest }` |
+| `GET /v1/members/{memberId}/instructions` | The text, its byte count, its digest and when it was set; a member with [instruction packs](instruction-packs.md) also carries `instructionPacks` |
+| `GET /v1/members` | Each member with instructions carries `instructions: { bytes, digest }`, and each with packs `instructionPacks` |
 
 ```json
 {
@@ -214,7 +214,7 @@ For a member without instructions this is the memory rule unchanged. A member's
 instructions here, so packs too large to sit beside the notes also fail `instructions_limit`. With instructions,
 `memory_limit` means deleting entries helps; `instructions_limit` means the project notes
 leave no room for this member's instructions, and only shorter notes or a member with
-shorter instructions will open. On Codex, the largest instructions with 17 full memory
+shorter instructions, or fewer or shorter packs, will open. On Codex, the largest instructions with 17 full memory
 entries are refused with `memory_limit`, though either alone fits. On Claude, the largest
 instructions fit beside the largest notes capture allows (257,500 code units) and three
 full memory entries more do not. A routine firing whose open is refused fails with

@@ -503,7 +503,9 @@ cannot be deleted (`409 pack_in_use`); deleting another erases its text. Packs n
 member's tools, approvals or limits, and the model follows their text as the owner's
 instructions, so text pasted into a pack from an untrusted source is a prompt-injection path to
 every member that has it. `instruction_pack.*` audit rows belong to no member, like
-`webhook.*`. A restore keeps packs as they were. See [instruction packs](instruction-packs.md).
+`webhook.*`. Packs count with instructions toward `409 instructions_limit` when a
+conversation opens. A restore keeps packs as they were at the recovery point, so a pack
+deleted after it comes back, unattached. See [instruction packs](instruction-packs.md).
 
 ## Usage metering
 
