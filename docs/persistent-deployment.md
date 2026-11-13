@@ -186,8 +186,43 @@ without applying anything. Restart it once the other sessions are done (see
 From version 24 both run in one transaction, and 26 retries while holding 25's
 locks, so admissions and audited writes wait meanwhile; an open of the previous
 release still in flight makes it fail after the 60 s (see
-[member memory](memories.md#upgrade)). Migration 30 (outbound webhooks) does the
-same for `audit_events` alone (see [outbound webhooks](webhooks.md#upgrade)).
+[member memory](memories.md#upgrade)). Migration 27 (conversation handoff) does the
+same for all four tables. It also raises the internal turn bound from 16 KiB to 64 KiB
+for a handoff's first request, which a previous-release worker refuses, and a
+previous-release gateway or worker ignores handoff seals, so stopping the previous
+release first is required for it; rolling back past it is unsupported (see
+[conversation handoff](handoffs.md#upgrade)). Migration 28 (approval expiry) does the
+same for `deferred_calls`, `request_admissions`, `routines`, `routine_firings` and
+`audit_events`, retrying while it holds 27's locks when both run in one transaction. A
+previous-release workflow worker never expires a card that has a deadline, while the
+database refuses a decision past it, so stopping the previous release first is required
+for it too; rolling back once a request with a deadline was accepted is unsupported (see
+[approval expiry](approval-expiry.md#upgrade-in-flight-workflows-and-recovery)).
+Migration 29 (member instructions) does the same for `members` and `audit_events`.
+After 27 in one transaction it already holds both; from version 27 it retries for
+`members` while holding 28's locks, and a spawn of the previous release still in flight
+makes it fail after the 60 s (see [member instructions](member-instructions.md#upgrade)).
+Migration 30 (audit filters) builds three indexes under `SHARE` on `audit_events`,
+taken the same way; after 27, 28 or 29 in one transaction it already holds that
+table. Audited writes wait for a time that grows with the audit table, and from
+version 29 a long autovacuum of that table can also make it fail after the 60 s
+(see [audit filters](audit-filters.md#upgrade-and-recovery)).
+Migration 31 (usage metering) takes `members` and `native_launches` in
+`SHARE ROW EXCLUSIVE` and `audit_events` and `routine_firings` in `ACCESS EXCLUSIVE`, with
+`NOWAIT` and retries like 25 to 30; after 27 to 30 in one transaction it retries while
+holding their locks, and a running native turn never delays it (see
+[usage metering](usage-metering.md#upgrade-and-recovery)). Migration 32 (outbound
+webhooks) takes `audit_events` alone in `ACCESS EXCLUSIVE` the same way; after 31 in one
+transaction it already holds it (see [outbound webhooks](webhooks.md#upgrade)). From the release that adds
+migration 31 on, every gateway, worker and CLI process refuses to start with
+`Migration N would apply after migration M` when it would apply a migration numbered 27
+or above below one the database already has, because applying the older one would
+silently narrow constraints the newer one widened.
+Nothing was applied, and the previous release still starts: keep running it. The usual
+cause is a release that numbered a migration below one an earlier release already
+shipped; report it and deploy a release that renumbers that migration. Do not delete the
+`schema_versions` row. Only a database that ran an unreleased or branch build needs
+restoring from a backup taken before that build, or rebuilding.
 
 A Kubernetes Deployment's default `RollingUpdate` strategy starts new pods while
 old ones still run, which is exactly what this forbids. Scale every Deployment

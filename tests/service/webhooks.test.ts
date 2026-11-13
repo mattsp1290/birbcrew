@@ -26,6 +26,11 @@ if (!url) throw new Error("Set BIRBCREW_TEST_DATABASE_URL to a disposable Postgr
 const pool = new Pool({ connectionString: url });
 after(() => pool.end());
 const sql = new URL("../../src/service/sql/", import.meta.url);
+// This feature's migration, and the newest one in the directory, by file name: renumbering either moves the tests with it.
+const migrations = (await readdir(sql)).sort();
+const webhookMigration = migrations.find(file => file.endsWith("-webhooks.sql"))!;
+const webhookVersion = Number(webhookMigration.split("-")[0]);
+const latestVersion = Number(migrations.at(-1)!.split("-")[0]);
 
 /** A fresh database, migrated up to `version`, dropped after the test. Every test that enables an
  * endpoint uses its own, so no other suite's gateway finds one to deliver to. */
@@ -831,8 +836,8 @@ test("the database keeps endpoints and deliveries as history and refuses a membe
   await refused(insert, [h.ownerId, "webhook.enabled", null, { revision: 9, host: "x" }]);
 });
 
-test("migration 030 takes only audit_events, without queueing, rewrites nothing and leaves its CHECKs unvalidated", async (t) => {
-  const upgraded = await databaseAt(t, 29);
+test("the webhook migration takes only audit_events, without queueing, rewrites nothing and leaves its CHECKs unvalidated", async (t) => {
+  const upgraded = await databaseAt(t, webhookVersion - 1);
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID();
   const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
     (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi','fixture') RETURNING member_id`, [ownerId, randomUUID()]);
@@ -844,7 +849,7 @@ test("migration 030 takes only audit_events, without queueing, rewrites nothing 
     await db.query("BEGIN");
     const files = "SELECT pg_relation_filenode('birbcrew_ts.audit_events') AS audit";
     const { rows: [before] } = await db.query(files);
-    await db.query(await readFile(new URL("030-webhooks.sql", sql), "utf8"));
+    await db.query(await readFile(new URL(webhookMigration, sql), "utf8"));
     assert.deepEqual((await db.query(files)).rows[0], before);
     const { rows } = await db.query(`SELECT c.relname AS relation, l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
       WHERE l.pid=pg_backend_pid() AND c.relkind='r' AND c.relnamespace='birbcrew_ts'::regnamespace
@@ -881,14 +886,15 @@ test("migration 030 takes only audit_events, without queueing, rewrites nothing 
     await holder.query("COMMIT");
     await migrating;
   } finally { holder.release(); }
-  assert.equal((await upgraded.query("SELECT count(*)::integer AS n FROM birbcrew_ts.schema_versions WHERE version=30")).rows[0].n, 1);
+  assert.deepEqual((await upgraded.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version>=$1 ORDER BY 1", [webhookVersion]))
+    .rows.map(row => row.version), migrations.map(file => Number(file.split("-")[0])).filter(version => version >= webhookVersion));
   const { rows: [nullable] } = await upgraded.query(`SELECT is_nullable FROM information_schema.columns
     WHERE table_schema='birbcrew_ts' AND table_name='audit_events' AND column_name='member_id'`);
   assert.equal(nullable.is_nullable, "YES");
 });
 
-test("migration 030 completes while a native turn holds its admission", async (t) => {
-  const upgraded = await databaseAt(t, 29);
+test("the webhook migration completes while a native turn holds its admission", async (t) => {
+  const upgraded = await databaseAt(t, webhookVersion - 1);
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
   const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
     (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi','fixture') RETURNING member_id`, [ownerId, randomUUID()]);
@@ -901,7 +907,7 @@ test("migration 030 completes while a native turn holds its admission", async (t
     VALUES ($1,$2,$3,$4,$5,1)`, [conversationId, requestId, start.token, execution.workflowRunId, execution.activityId]);
   await withNativeAdmission(upgraded, { ownerId, conversationId, requestId, text, token: start.token, execution }, AbortSignal.timeout(30_000), async () => {
     const migrated = await Promise.race([current.migrate().then(() => true), delay(5_000, false)]);
-    assert.equal(migrated, true, "migration 030 must not wait for a running native turn");
+    assert.equal(migrated, true, "the webhook migration must not wait for a running native turn");
     await current.appendText({ ownerId, conversationId, requestId, token: start.token }, requestId + "/assistant", 0, "still running");
   });
   await current.commitTurn({ ownerId, conversationId, requestId, token: start.token, reply: "still running", checkpoint: { version: 1, engine: "pi", state: {} } });

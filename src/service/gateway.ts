@@ -15,13 +15,16 @@ import { decisionSchema } from "./approvals.ts";
 import { AuditUnsettledError, auditCsv, auditParameterNames, auditQuerySchema, readAudit } from "./audit.ts";
 import { MemberClient } from "./client.ts";
 import { listGrants, revokeGrant } from "./grants.ts";
+import { HandoffApi } from "./handoffs.ts";
 import { MemoryApi, memoryListParameterNames } from "./memories.ts";
+import { readInstructions } from "./instructions.ts";
 import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from "./domain.ts";
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
 import { MemberStore } from "./store.ts";
 import { IntegrationApi, integrationCapabilities } from "./integration-api.ts";
 import { firingParameterNames, RoutineApi, RoutineDispatcher, routineListParameterNames, type Clock } from "./routines.ts";
 import { TemporalSettingsError, temporalConnectionOptions, temporalSettings } from "./temporal-config.ts";
+import { UsageApi, usageParameterNames } from "./usage.ts";
 import { defaultTargetPolicy, TargetRefusedError, type TargetPolicy } from "./webhook-target.ts";
 import { deliveryParameterNames, WebhookApi, WebhookDispatcher, webhookListParameterNames } from "./webhooks.ts";
 
@@ -197,6 +200,8 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
   const schemaVersion = () => databaseProbe ??= readSchemaVersion(store.pool.options).finally(() => { databaseProbe = undefined; });
   const routines = new RoutineApi(store, clock);
   const memories = new MemoryApi(store);
+  const handoffs = new HandoffApi(store, members);
+  const usage = new UsageApi(store);
   const dispatcher = new RoutineDispatcher({ store, members, integration, owners: accounts.map(({ actor }) => actor), clock });
   const webhooks = new WebhookApi(store, clock, webhookTargets);
   const deliveries = new WebhookDispatcher({ store, owners: accounts.map(({ actor }) => actor), clock, policy: webhookTargets });
@@ -289,6 +294,21 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       if (action === undefined && request.method === "DELETE") return json(response, 200, await webhooks.change(ownerId, webhookId, "delete"));
       throw new HttpError(405, "method_not_allowed");
     }
+    const usageRoute = versioned && /^\/usage(?:\/(members|conversations|records)|\/budgets\/([^/]+))?$/.exec(path);
+    if (usageRoute) {
+      const [, listing, budgetMember] = usageRoute;
+      const view = (listing ?? "summary") as keyof typeof usageParameterNames;
+      if (budgetMember !== undefined) {
+        if (url.search) throw new HttpError(400, "invalid_input");
+        const memberId = z.uuid().parse(budgetMember);
+        if (request.method === "GET") return json(response, 200, await usage.budget(ownerId, memberId));
+        if (request.method === "PUT") return json(response, 200, await usage.setBudget(ownerId, memberId, await body(request)));
+        if (request.method === "DELETE") return json(response, 200, await usage.clearBudget(ownerId, memberId));
+        throw new HttpError(405, "method_not_allowed");
+      }
+      if (request.method !== "GET") throw new HttpError(405, "method_not_allowed");
+      return json(response, 200, await usage[view](ownerId, queryOf(url, usageParameterNames[view])));
+    }
     const grantRoute = versioned && /^\/members\/([^/]+)\/grants(?:\/([^/]+)\/(revoke))?$/.exec(path);
     if (grantRoute) {
       if (url.search) throw new HttpError(400, "invalid_input");
@@ -298,6 +318,22 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
         z.strictObject({}).parse(await body(request));
         return json(response, 200, await revokeGrant(store.pool, { ownerId, memberId, grantId: z.uuid().parse(grantRoute[2]) }));
       }
+      throw new HttpError(405, "method_not_allowed");
+    }
+    const instructionsRoute = versioned && /^\/members\/([^/]+)\/instructions$/.exec(path);
+    if (instructionsRoute) {
+      if (url.search) throw new HttpError(400, "invalid_input");
+      if (request.method === "GET") return json(response, 200, await readInstructions(store.pool, ownerId, instructionsRoute[1]));
+      throw new HttpError(405, "method_not_allowed");
+    }
+    const handoffRoute = versioned && /^\/conversations\/([^/]+)\/(handoffs|handoff)$/.exec(path);
+    if (handoffRoute) {
+      if (url.search) throw new HttpError(400, "invalid_input");
+      const [, conversationId, resource] = handoffRoute;
+      if (resource === "handoffs" && request.method === "POST") {
+        return json(response, 201, await handoffs.create(ownerId, z.uuid().parse(conversationId), await body(request)));
+      }
+      if (resource === "handoff" && request.method === "GET") return json(response, 200, await handoffs.read(ownerId, z.uuid().parse(conversationId)));
       throw new HttpError(405, "method_not_allowed");
     }
     const requestRoute = versioned && /^\/conversations\/([^/]+)\/requests(?:\/([^/]+)(\/cancel)?)?$/.exec(path);
@@ -318,7 +354,7 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       throw new HttpError(405, "method_not_allowed");
     }
     if (path === "/members" && request.method === "POST") {
-      const input = spawnSchema.omit({ ownerId: true }).parse(await body(request));
+      const input = spawnSchema.omit({ ownerId: true }).parse(await body(request, true));
       const published = await store.pool.query("SELECT 1 FROM birbcrew_ts.profiles WHERE engine=$1 AND name=$2", [input.engine, input.profile]);
       if (!published.rowCount) throw new HttpError(409, "unknown_profile");
       return json(response, 201, await store.spawn({ ownerId, ...input }));

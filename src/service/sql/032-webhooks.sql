@@ -5,10 +5,11 @@
 -- Locks on existing tables, held until migrate() commits: ACCESS EXCLUSIVE on audit_events to drop
 -- NOT NULL from member_id (webhook rows belong to no member), add a member CHECK and replace the
 -- type CHECK (both NOT VALID, so no row is scanned), and SHARE for two empty partial unique index
--- builds, which read audit_events once each. No other existing table is locked. As in 025 the lock
--- is taken with NOWAIT and retried, so the migration never waits in a lock queue, where every
--- audited write would queue behind it. After 60 s without the lock it fails with 55P03 and
--- applies nothing.
+-- builds, which read audit_events once each. No other existing table is locked. As in 025 to 031 the
+-- lock is taken with NOWAIT and retried, so the migration never waits in a lock queue, where every
+-- audited write would queue behind it. Applied alone, from version 31, it holds nothing while it
+-- retries; applied after 031 in one transaction it already holds the lock. After 60 s without the
+-- lock it fails with 55P03 and applies nothing.
 DO $$
 DECLARE deadline timestamptz := clock_timestamp() + interval '60 seconds';
 BEGIN
@@ -186,8 +187,8 @@ CREATE TRIGGER recovery_write_barrier BEFORE INSERT OR UPDATE OR DELETE OR TRUNC
 CREATE TRIGGER recovery_write_barrier BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON birbcrew_ts.webhook_cursor
     FOR EACH STATEMENT EXECUTE FUNCTION birbcrew_ts.require_active_installation();
 
--- 021's recipe. This constraint replaces 026's, so it repeats every type 026 lists. Keep it in
--- step with auditEvents in src/service/audit.ts. approval.requested is a card or question that
+-- 021's recipe. This constraint replaces 031's, so it repeats every clause 031 lists, unchanged.
+-- Keep it in step with auditEvents in src/service/audit.ts. approval.requested is a card or question that
 -- became pending; the webhook facts belong to no member, conversation or request, and carry the
 -- endpoint's host, never its URL or secret. Dropping NOT NULL is a catalog change: no row is read.
 ALTER TABLE birbcrew_ts.audit_events
@@ -220,6 +221,17 @@ ALTER TABLE birbcrew_ts.audit_events
         OR (event_type IN ('memory.created', 'memory.deleted', 'memory.suspended')
             AND conversation_id IS NULL AND request_id IS NULL
             AND (jsonb_typeof(payload->'memoryId') = 'string') IS TRUE)
+        OR (event_type = 'conversation.handed_off' AND conversation_id IS NOT NULL AND request_id IS NULL
+            AND (jsonb_typeof(payload->'handoffId') = 'string') IS TRUE)
+        OR (event_type = 'approval.expired' AND request_id IS NOT NULL
+            AND (jsonb_typeof(payload->'approvalId') = 'string') IS TRUE)
+        OR (event_type = 'member.instructions_set' AND conversation_id IS NULL AND request_id IS NULL
+            AND (jsonb_typeof(payload->'digest') = 'string') IS TRUE
+            AND (jsonb_typeof(payload->'bytes') = 'number') IS TRUE)
+        OR (event_type IN ('usage.budget_set', 'usage.budget_cleared')
+            AND conversation_id IS NULL AND request_id IS NULL
+            AND (jsonb_typeof(payload->'revision') = 'number') IS TRUE)
+        OR (event_type = 'usage.request_refused' AND conversation_id IS NOT NULL AND request_id IS NOT NULL)
         OR (event_type = 'approval.requested' AND request_id IS NOT NULL
             AND (jsonb_typeof(payload->'approvalId') = 'string') IS TRUE)
         OR (event_type IN ('webhook.created', 'webhook.enabled', 'webhook.disabled', 'webhook.deleted')

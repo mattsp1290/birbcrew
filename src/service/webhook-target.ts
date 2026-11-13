@@ -8,7 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
  * connections for webhooks: every target is checked here at registration and again before
  * every delivery, and a delivery connects only to the addresses that check accepted. */
 export const targetLimits = {
-  urlBytes: 2048, // webhook_endpoints.url CHECK in 030-webhooks.sql repeats it
+  urlBytes: 2048, // webhook_endpoints.url CHECK in 032-webhooks.sql repeats it
   resolveTimeoutMs: 5_000,
   connectTimeoutMs: 5_000,
   totalTimeoutMs: 10_000,

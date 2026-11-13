@@ -11,6 +11,8 @@ const retainedEvents = 256;
 // The per-request call cap, so every granted call of the current request stays listed while the
 // snapshot stays bounded. The audit trail keeps every one.
 const retainedGrantedCalls = 16;
+// One card per request can expire; the last 16 bound the snapshot as granted calls do.
+const retainedExpiredCalls = 16;
 
 type PublicApproval = Omit<Approval, "argumentDigest" | "ownerId" | "nativeCallId" | "grantId"> & {
   expiresAt?: string; choices: typeof toolChoices.record_work_item; standingChoices?: typeof standingChoice.options;
@@ -27,9 +29,12 @@ interface ClosedCall {
 // A call a standing grant approved, which had no card. Per call, so creating or revoking a
 // member-wide grant republishes no conversation's snapshot.
 type GrantedCall = ActiveGrant & { requestId: string; approvalId: string };
+// A card nobody decided before its deadline; Crew cancelled its request (docs/approval-expiry.md).
+type ExpiredCall = { requestId: string; approvalId: string; expiresAt: string; expiredAt: string };
 type Projection = {
   interruptedCalls?: ClosedCall[];
   grantedCalls?: GrantedCall[];
+  expiredCalls?: ExpiredCall[];
   liveOperations?: (Omit<ClosedCall,"effect"> & {effect:"pending" | ClosedCall["effect"]})[];
   conversationId: string;
   memberId: string;
@@ -48,8 +53,10 @@ type Change = ChildChange
   | ({ kind: "reply"; requestId: string; cancelled?: boolean } & ({ text: string } | { itemCount: number }))
   | { kind: "toolValue"; invocationId: string; publicId: string; requestId: string }
   | { kind: "toolPreview"; invocationId: string; publicId: string }
-  | { kind: "call"; approval: Approval; expiresAt?: string; standing?: true; grant?: ActiveGrant }
+  // expiresAt marks a Codex live call; deadline is the expiry of a card the workflow waits on.
+  | { kind: "call"; approval: Approval; expiresAt?: string; deadline?: string; standing?: true; grant?: ActiveGrant }
   | ({ kind: "liveClosed" } & ClosedCall)
+  | ({ kind: "expired" } & ExpiredCall)
   | { kind: "liveDelivered"; requestId: string; approvalId: string }
   | { kind: "answered" | "resume"; approvalId: string }
   | { kind: "cancelled"; requestId: string }
@@ -112,6 +119,7 @@ function logicalKey(change: Change) {
     case "answered":
     case "resume":
     case "liveClosed":
+    case "expired":
     case "liveDelivered":
     case "result": return change.kind + "/" + change.approvalId;
     default: return change.kind + "/" + change.requestId;
@@ -214,7 +222,8 @@ function apply(snapshot: StoredSnapshot, change: Change): Event[] {
       const { memberId, conversationId, requestId, invocationId, approvalId, version, policyVersion,
         toolName, summary } = change.approval;
       commitPreamble(invocationId === requestId ? undefined : invocationId);
-      const card = { ...(change.expiresAt && {expiresAt:change.expiresAt}), memberId, conversationId, requestId, invocationId, approvalId, version, policyVersion, toolName, summary };
+      const expiresAt = change.expiresAt ?? change.deadline;
+      const card = { ...(expiresAt && {expiresAt}), memberId, conversationId, requestId, invocationId, approvalId, version, policyVersion, toolName, summary };
       if (change.grant) state.grantedCalls = [...state.grantedCalls ?? [], { requestId, approvalId, ...change.grant }].slice(-retainedGrantedCalls);
       else if (toolName === "choose_next_step") (state.pendingQuestions ??= []).push({ ...card, choices: toolChoices.choose_next_step });
       else state.pendingApprovals.push({ ...card, choices: toolChoices.record_work_item,
@@ -284,6 +293,14 @@ function apply(snapshot: StoredSnapshot, change: Change): Event[] {
       state.pendingApprovals = state.pendingApprovals.filter((p) => p.requestId !== change.requestId);
       state.phase = state.pendingApprovals.length || state.pendingQuestions?.length ? "waiting" : "running";
       break;
+    case "expired": {
+      const { kind, ...call } = change;
+      if (state.pendingQuestions) state.pendingQuestions = state.pendingQuestions.filter((p) => p.requestId !== call.requestId);
+      state.pendingApprovals = state.pendingApprovals.filter((p) => p.requestId !== call.requestId);
+      state.expiredCalls = [...state.expiredCalls ?? [], call].slice(-retainedExpiredCalls);
+      state.phase = state.pendingApprovals.length || state.pendingQuestions?.length ? "waiting" : "running";
+      break;
+    }
     case "resume":
       startStep(change.approvalId + "/continue");
       break;
@@ -351,7 +368,8 @@ function apply(snapshot: StoredSnapshot, change: Change): Event[] {
   }
   // A finalized snapshot omits live messages and would remove them from HttpAgent.
   const hasPartialMessage = snapshot.openText || Object.keys(snapshot.childText).length || Object.keys(snapshot.openTools).length;
-  if (!hasPartialMessage && change.kind !== "resume" && change.kind !== "answered" && change.kind !== "cancelled") {
+  if (!hasPartialMessage && change.kind !== "resume" && change.kind !== "answered" && change.kind !== "cancelled"
+      && change.kind !== "expired") {
     if ((change.kind === "childEnded" || change.kind === "failed") && state.children?.some(c => c.requestId === change.requestId) &&
       state.children.every(c => c.requestId !== change.requestId || (c.phase !== "ready" && c.phase !== "running"))) {
       // HttpAgent updates existing IDs in place. Drop this delegation’s provisional ordering

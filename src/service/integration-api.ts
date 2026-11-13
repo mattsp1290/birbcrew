@@ -1,15 +1,18 @@
 import { z } from "zod";
-import { appendAudit, auditEventTypes, auditLimits } from "./audit.ts";
+import { actorKinds, appendAudit, auditEventTypes, auditFilterNames, auditLimits } from "./audit.ts";
 import type { MemberClient } from "./client.ts";
-import { initiatorColumns, initiatorFromColumns, initiatorKinds, MemberStoreError, ownerInitiator, submitSchema, turnKey,
-  type Engine, type RequestInitiator } from "./domain.ts";
+import { approvalDeadline, initiatorColumns, initiatorFromColumns, initiatorKinds, MemberStoreError, ownerInitiator, submitSchema,
+  turnKey, type Engine, type RequestInitiator } from "./domain.ts";
 import { standingChoice } from "./deferral.ts";
 import { grantListLimit } from "./grants.ts";
+import { handoffCapabilities } from "./handoffs.ts";
 import { conversationTurnLimit, workflowGenerationTurnLimit } from "./limits.ts";
 import { memoryCapabilities } from "./memories.ts";
+import { instructionsCapabilities, instructionsSummarySql, type InstructionsSummary } from "./instructions.ts";
 import { routineCapabilities } from "./routines.ts";
 import type { MemberStore } from "./store.ts";
 import { webhookCapabilities } from "./webhooks.ts";
+import { usageCapabilities } from "./usage.ts";
 
 const listDefaultLimit = 50, listMaximumLimit = 100;
 
@@ -29,6 +32,7 @@ export const integrationCapabilities = {
   audit: {
     version: 1, route: "/v1/audit", eventTypes: auditEventTypes, pagination: "event-id-keyset-no-skipped-commits",
     formats: ["json", "csv"], limits: auditLimits, retention: "append-only-with-database; no-automatic-TTL",
+    filters: auditFilterNames, actorKinds,
   },
   routines: routineCapabilities,
   standingGrants: {
@@ -37,6 +41,16 @@ export const integrationCapabilities = {
     revocation: "later-proposals-only",
   },
   memories: memoryCapabilities,
+  handoffs: handoffCapabilities,
+  approvalExpiry: {
+    version: 1, field: "approvalDeadlineSeconds", routes: ["/v1/conversations/{conversationId}/requests", "/v1/routines"],
+    minimumSeconds: approvalDeadline.minimumSeconds, maximumSeconds: approvalDeadline.maximumSeconds,
+    engines: ["claude", "pi"], cardField: "expiresAt", stateField: "expiredCalls", receiptField: "expiredApproval",
+    outcome: "request-cancelled", auditEvent: "approval.expired", firingReason: "approval_expired",
+    codex: "earlier-of-live-and-request-deadline", piChildCards: "not-covered",
+  },
+  memberInstructions: instructionsCapabilities,
+  usage: usageCapabilities,
   webhooks: webhookCapabilities,
 } as const;
 
@@ -76,6 +90,10 @@ export interface RequestReceipt {
   result?: { text: string };
   reason?: string;
   cancellation?: { receiptId: string; delivery: "pending" | "delivered"; nativeTermination: "confirmed" | "unconfirmed"; effects: "not_assessed" };
+  /** The deadline the request was admitted with (docs/approval-expiry.md). */
+  approvalDeadlineSeconds?: number;
+  /** Present once a card of this request reached its deadline undecided and Crew cancelled the request. */
+  expiredApproval?: { approvalId: string; expiresAt: string; expiredAt: string };
 }
 
 /** Public contract adapter; no SDK or Temporal internals are exposed to HTTP consumers. */
@@ -106,14 +124,19 @@ export class IntegrationApi {
     const { rows: [row] } = await this.store.pool.query<{
       admission: string | null; reason: string | null; initiator_kind: string | null; initiator_id: string | null;
       phase: string | null; reply: string | null; receipt_id: string | null; delivered_at: Date | null; stopped: boolean; waiting: boolean;
+      approval_deadline_seconds: number | null; expired_id: string | null; expires_at: Date | null; expired_at: Date | null;
     }>(`SELECT a.phase AS admission,a.reason,a.initiator_kind,a.initiator_id,t.phase,t.reply,x.receipt_id,x.delivered_at,
-       EXISTS(SELECT 1 FROM birbcrew_ts.deferred_calls d WHERE d.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND d.request_id=COALESCE(a.request_id,t.request_id) AND d.decision IS NULL) AS waiting,
+       a.approval_deadline_seconds,e.approval_id AS expired_id,e.expires_at,e.expired_at,
+       EXISTS(SELECT 1 FROM birbcrew_ts.deferred_calls d WHERE d.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND d.request_id=COALESCE(a.request_id,t.request_id) AND d.decision IS NULL AND d.expired_at IS NULL) AS waiting,
        (EXISTS(SELECT 1 FROM birbcrew_ts.tool_cancellations tc WHERE tc.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND tc.request_id=COALESCE(a.request_id,t.request_id))
         AND EXISTS(SELECT 1 FROM birbcrew_ts.native_launches n WHERE n.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND n.request_id=COALESCE(a.request_id,t.request_id))
         AND NOT EXISTS(SELECT 1 FROM birbcrew_ts.native_launches n WHERE n.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND n.request_id=COALESCE(a.request_id,t.request_id) AND NOT n.stopped)) AS stopped
        FROM birbcrew_ts.request_admissions a FULL JOIN birbcrew_ts.turns t USING(conversation_id,request_id)
        JOIN birbcrew_ts.conversations c ON c.conversation_id=COALESCE(a.conversation_id,t.conversation_id)
        LEFT JOIN birbcrew_ts.integration_cancellations x ON x.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND x.request_id=COALESCE(a.request_id,t.request_id)
+       LEFT JOIN LATERAL (SELECT d.approval_id,d.expires_at,d.expired_at FROM birbcrew_ts.deferred_calls d
+         WHERE d.conversation_id=COALESCE(a.conversation_id,t.conversation_id) AND d.request_id=COALESCE(a.request_id,t.request_id)
+           AND d.expired_at IS NOT NULL LIMIT 1) e ON true
        WHERE c.owner_id=$1 AND COALESCE(a.conversation_id,t.conversation_id)=$2 AND COALESCE(a.request_id,t.request_id)=$3`,
       [key.ownerId,key.conversationId,key.requestId]);
     if (!row) throw new MemberStoreError("not_found");
@@ -133,6 +156,9 @@ export class IntegrationApi {
         receiptId: row.receipt_id, delivery: row.delivered_at ? "delivered" as const : "pending" as const,
         nativeTermination: row.stopped ? "confirmed" as const : "unconfirmed" as const, effects: "not_assessed" as const,
       } } : {}),
+      ...(row.approval_deadline_seconds !== null ? { approvalDeadlineSeconds: row.approval_deadline_seconds } : {}),
+      ...(row.expired_id ? { expiredApproval: { approvalId: row.expired_id, expiresAt: row.expires_at!.toISOString(),
+        expiredAt: row.expired_at!.toISOString() } } : {}),
     };
   }
 
@@ -169,12 +195,16 @@ export class IntegrationApi {
   /** Owner-scoped keyset page in identifier order; backed by members UNIQUE (owner_id, member_id). */
   async listMembers(ownerId: string, query: unknown) {
     const { limit, after } = memberListQuery.parse(query);
-    const { rows } = await this.store.pool.query<{ memberId: string; engine: Engine; profile: string }>(
-      `SELECT member_id AS "memberId",engine,profile FROM birbcrew_ts.members
-       WHERE owner_id=$1 AND ($2::uuid IS NULL OR member_id>$2) ORDER BY member_id LIMIT $3`,
+    const { rows } = await this.store.pool.query<{ memberId: string; engine: Engine; profile: string; instructions: InstructionsSummary | null }>(
+      `SELECT m.member_id AS "memberId",m.engine,m.profile,
+         CASE WHEN i.member_id IS NOT NULL THEN ${instructionsSummarySql} END AS instructions
+       FROM birbcrew_ts.members m LEFT JOIN birbcrew_ts.member_instructions i ON i.owner_id=m.owner_id AND i.member_id=m.member_id
+       WHERE m.owner_id=$1 AND ($2::uuid IS NULL OR m.member_id>$2) ORDER BY m.member_id LIMIT $3`,
       [ownerId, after ?? null, limit + 1]);
     const { items, next } = page("member", rows, limit, row => row.memberId);
-    return { apiVersion: "1" as const, members: items, next };
+    // Never the text: only GET /v1/members/{memberId}/instructions returns it.
+    const members = items.map(({ instructions, ...member }) => instructions ? { ...member, instructions } : member);
+    return { apiVersion: "1" as const, members, next };
   }
 
   /**

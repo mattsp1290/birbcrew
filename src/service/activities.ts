@@ -12,6 +12,7 @@ import { ApplicationFailure } from "@temporalio/client";
 import { ApprovalStore, type Approval, type Decision, type ToolOutcome } from "./approvals.ts";
 import { MemberStoreError, type Checkpoint, type Conversation, type TurnRequest } from "./domain.ts";
 import type { MemberStore } from "./store.ts";
+import type { SegmentUsage } from "./usage-capture.ts";
 
 export interface DriverInput {
   threadId: string;
@@ -30,10 +31,11 @@ export interface DriverInput {
   continuation?: { nativeCallId: string; result: ToolOutcome };
 }
 
+// usage: what the SDK reported for this segment's model calls; the supervisor records it once.
 export type DriverResult =
-  | { kind: "complete"; text: string; checkpoint: unknown }
-  | { kind: "delegated"; proposals: Delegation[]; checkpoint: unknown }
-  | { kind: "pending"; proposal: z.infer<typeof nativeProposal>; checkpoint: unknown };
+  | { kind: "complete"; text: string; checkpoint: unknown; usage?: SegmentUsage }
+  | { kind: "delegated"; proposals: Delegation[]; checkpoint: unknown; usage?: SegmentUsage }
+  | { kind: "pending"; proposal: z.infer<typeof nativeProposal>; checkpoint: unknown; usage?: SegmentUsage };
 export type TurnDriver = (input: DriverInput, member: Conversation) => Promise<DriverResult>;
 export type MemberProfiles = ReadonlyMap<string, Readonly<Partial<Record<Conversation["engine"], TurnDriver>>>>;
 export type PublicSegment = { kind: "complete"; text: string } | { kind: "pending"; approval: Approval } | { kind: "delegated"; children: ChildKey[] };
@@ -146,3 +148,17 @@ export function memberActivities(store: MemberStore, supervisor: Supervisor, pro
   };
 }
 export type MemberActivities = ReturnType<typeof memberActivities>;
+
+/** The conversation workflow's expireApproval activity (docs/approval-expiry.md). It touches only
+ * the database, so it runs on the member task queue, not an engine's. */
+export function expiryActivity(store: MemberStore) {
+  const ledger = new ApprovalStore(store.pool);
+  return async (approval: Approval) => {
+    try {
+      return await ledger.expireTurn(approval);
+    } catch (error) {
+      if (error instanceof MemberStoreError) throw ApplicationFailure.nonRetryable(error.code);
+      throw error;
+    }
+  };
+}

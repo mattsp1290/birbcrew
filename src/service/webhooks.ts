@@ -11,7 +11,7 @@ import { defaultTargetPolicy, parseTarget, postToTarget, resolveTarget, TargetRe
 export type Clock = () => Date;
 
 export const webhookLimits = {
-  enabledPerOwner: 10, // limit_enabled_webhooks in 030-webhooks.sql repeats it
+  enabledPerOwner: 10, // limit_enabled_webhooks in 032-webhooks.sql repeats it
   maximumAttempts: 10, // the webhook_deliveries.attempts CHECK repeats it
   consecutiveFailures: 10, // the webhook_endpoints.consecutive_failures CHECK repeats it
   firstRetryMs: 30_000,
@@ -49,7 +49,7 @@ type KindDefinition = { auditType: AuditEventType; when?: (row: AuditRow) => boo
 /** What an endpoint can subscribe to. Each kind is one committed audit event type (and, for
  * routine.disabled, one reason), so a delivery exists only for a change that committed. A body
  * carries identifiers, the kind, the time and a status, never prompt, reply, note or memory
- * text: the strict schema refuses anything else. 030-webhooks.sql repeats the names. */
+ * text: the strict schema refuses anything else. 032-webhooks.sql repeats the names. */
 export const webhookKinds = {
   "approval.pending": { auditType: "approval.requested",
     body: z.strictObject({ ...envelope, kind: z.literal("approval.pending"), conversationId: uuid, requestId: uuid,

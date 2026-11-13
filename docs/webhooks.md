@@ -2,7 +2,7 @@
 
 A pending approval card, a finished request and a settled routine firing used to
 reach only a client that polled or held an AG-UI stream open. Routines run with
-nobody watching, so their outcomes went unseen. Migration 30 lets an owner
+nobody watching, so their outcomes went unseen. Migration 32 lets an owner
 register webhook endpoints. Crew calls an endpoint when one of the events it
 selected happens, with a small signed body that names what happened. The
 receiver fetches the details with the owner's own token.
@@ -350,25 +350,25 @@ treats as consumer ingress.
 
 ## Upgrade
 
-Migration 30 creates the three tables and changes only `audit_events` among
+Migration 32 creates the three tables and changes only `audit_events` among
 existing tables: it drops `NOT NULL` from `member_id`, adds
 `audit_events_member_check` (only the `webhook.*` types may leave it null) and
-replaces `audit_events_type_check` with every earlier type and the five new ones,
-both `NOT VALID`, and builds two empty partial unique indexes. Dropping `NOT NULL`
-is a catalog change; no row is rewritten or checked. Until `migrate()` commits it
-holds, on existing tables only:
+replaces `audit_events_type_check` with every clause of migration 31's, unchanged,
+plus clauses for the five new types, both `NOT VALID`, and builds two empty partial
+unique indexes. Dropping `NOT NULL` is a catalog change; no row is rewritten or
+checked. Until `migrate()` commits it holds, on existing tables only:
 
 | Table | Modes (observed in `pg_locks` on PostgreSQL 17) | Why |
 | --- | --- | --- |
 | `audit_events` | `ACCESS EXCLUSIVE`, `ACCESS SHARE`, `SHARE` | the column and CHECKs, the cursor's starting point, and the two index builds |
 
 It takes the lock with `LOCK ... NOWAIT` and retries every 20 to 100 ms, as
-migration 25 does, so it never waits in a lock queue where every audited write
-would queue behind it. A running native turn's admission transaction holds nothing
-on `audit_events`, so the migration does not wait for it. After 60 s without the
-lock it fails with `55P03`, applies nothing, and the process exits. The cursor
-starts at the newest audit event, so no event from before the upgrade is ever
-sent.
+migrations 25 to 31 do, so it never waits in a lock queue where every audited write
+would queue behind it; applied after 31 in one transaction, it already holds the
+lock. A running native turn's admission transaction holds nothing on
+`audit_events`, so the migration does not wait for it. After 60 s without the lock
+it fails with `55P03`, applies nothing, and the process exits. The cursor starts at
+the newest audit event, so no event from before the upgrade is ever sent.
 
 Two changes reach existing clients. `GET /v1/audit` gains five event types, and
 `memberId` is `null` on the `webhook.*` rows; a consumer that requires a member on
@@ -476,7 +476,7 @@ receiver in the test process and a settable clock. It checks:
   `recovery.test.ts` does without `pg_dump`) disabling them, cancelling the pending
   row, moving the cursor and sending only later events after an enable;
 - the tombstone, history and cursor triggers, and the audit member CHECK;
-- migration 30 on the previous schema: its locks, no rewrite, `NOT VALID` CHECKs,
+- migration 32 on a version-31 database: its locks, no rewrite, `NOT VALID` CHECKs,
   the cursor at the newest event, that it retries instead of queueing behind an
   audited writer, and that it completes while a native turn holds its admission.
 

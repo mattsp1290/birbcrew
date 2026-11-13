@@ -11,7 +11,7 @@ Keep all of the following at the same quiesced boundary:
 
 | Artifact | Required contents |
 | --- | --- |
-| `application-postgres` | Entire Crew application database: schema/version table, members/profiles, volume identities and account digests, conversation mappings, native checkpoints, admissions/turns, effect and delivery receipts, decisions, observation snapshots/events/cursors, append-only audit events, scheduled routines and their firings, member memory entries (including their text) and each conversation's references to them, webhook endpoints (including their URLs and signing secrets), deliveries and fan-out cursor, trusted sessions/generations and historical receipt authority, and recovery control row. |
+| `application-postgres` | Entire Crew application database: schema/version table, members/profiles, volume identities and account digests, conversation mappings, native checkpoints, admissions/turns, effect and delivery receipts, decisions, observation snapshots/events/cursors, append-only audit events, scheduled routines and their firings, member memory entries (including their text) and each conversation's references to them, member instructions (including their text), the usage ledger and member usage budgets, webhook endpoints (including their URLs and signing secrets), deliveries and fan-out cursor, trusted sessions/generations and historical receipt authority, and recovery control row. |
 | `native-volumes` | Full private Claude and Codex native session trees, SQLite indexes and sidecars (after teardown), rollout/transcript bytes, identity markers, and any consumer-owned native stores. A checkpoint digest is not the underlying file. Pi context normally lives in application checkpoints. |
 | `temporal-persistence` | Supported consistent backup of the actual self-hosted Temporal persistence, visibility and required cluster/configuration state. Include all relevant stores in one opaque archive or provider snapshot export. A workflow-history export is insufficient to recreate the service's execution identities, queues and cluster persistence. |
 | `configuration` | Non-secret deployment configuration, application commit, lockfile, image/package/native pins, profile identities, models/tool schemas, logical native mount paths, PostgreSQL/Temporal server versions and store layout. |
@@ -254,6 +254,19 @@ snapshot or copied from another fence, and never deleted. See
    still applies. A held source that resumes without a restore keeps its entries. The
    restored native volumes still hold the system context that Claude and Codex
    sessions recorded. See [member memory](memories.md#recovery).
+
+   Member instructions are kept as they were at the recovery point, and nothing is
+   audited about them: they are fixed at spawn and never removed, so a restore cannot
+   bring back text an owner took away. See [member instructions](member-instructions.md#recovery).
+
+   Resume changes neither the usage ledger nor usage budgets. Tokens spent after the
+   recovery point are no longer in the ledger, so for the rest of that UTC day each
+   member's budget counts less than it used, and a budget set, changed or cleared
+   after the recovery point is back to its earlier state. Owners check each member's
+   budget after a restore. The ledger reissues the record IDs drawn after the recovery
+   point, so before resuming, read `SELECT max(usage_id) FROM birbcrew_ts.usage_ledger`
+   on the restored database and give it to consumers that mirror usage records. See
+   [usage metering](usage-metering.md#upgrade-and-recovery).
 
    In the same transaction it disables every enabled webhook endpoint with reason
    `recovery_restore`, auditing each `webhook.disabled`, cancels every undelivered
