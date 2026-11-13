@@ -183,7 +183,7 @@ together:
 - Codex gets the context as one `--config developer_instructions=<JSON string>`
   argument. The SDK escapes it a second time, so a quote costs four bytes. Linux
   refuses one argument of 131,072 bytes or more, counting its NUL.
-- Pi keeps the prompt in process.
+- Pi gets the prompt over its worker's IPC channel, which has no argument limit.
 
 The worst cases do not fit. The largest memory block takes 133,487 bytes as a Codex
 argument. The largest project notes take 224,541 code units, which Claude takes alone,

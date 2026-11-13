@@ -403,7 +403,7 @@ npm run test:recovery
 ```
 
 The integration API workflow's `consumer-contract` job runs both after `npm run build`,
-which builds the native launcher the capture suite starts Claude and Codex through.
+which builds the native launcher the capture suite starts Claude, Codex and Pi through.
 
 `usage-capture.test.ts` runs the real drivers against the local fixture providers. It
 checks that Codex records each turn's share of the running total over three resumed
