@@ -1,8 +1,9 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { PI_ATTRIBUTION, type Api, type AssistantMessage, type AssistantMessageEvent, type Context, type Model, type ProviderResponse, type ToolCall } from "@earendil-works/pi-ai";
 import { VERSION, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Duplex } from "node:stream";
@@ -15,8 +16,8 @@ const source = fileURLToPath(new URL("../..", import.meta.url)).replace(/\/$/, "
 const launcher = join(source, ".proof/bin/member-launch");
 const worker = fileURLToPath(new URL("./pi-worker.ts", import.meta.url));
 
-/** The member launcher invocation of every Pi worker. Its private directory is its only writable state,
- * and descriptor 3 (a socket pair) is its only channel. */
+/** The member launcher invocation of every Pi worker. Its private directory is the only place it may write
+ * files, and descriptor 3 (a socket pair) is its only channel. */
 export function piLaunch(directory: string, args: string[], invocationGroup?: number) {
   return {
     command: launcher,
@@ -146,8 +147,17 @@ export async function runPiWorker(command: PiCommand, host: PiHost) {
   try {
     return await supervise(directory, command, host);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await removePrivate(directory);
   }
+}
+
+// A worker can leave a directory its host cannot list (mode 0300) or a tree deeper than PATH_MAX, which
+// defeat Node's rm. GNU chmod and rm walk with descriptors; the worker is gone and cannot make links.
+async function removePrivate(directory: string) {
+  try { return await rm(directory, { recursive: true, force: true }); } catch { /* retried below */ }
+  const run = promisify(execFile);
+  await run("chmod", ["-R", "u+rwx", "--", directory]).catch(() => undefined);
+  await run("rm", ["-rf", "--one-file-system", "--", directory]);
 }
 
 function supervise(directory: string, command: PiCommand, host: PiHost) {
@@ -229,8 +239,8 @@ function supervise(directory: string, command: PiCommand, host: PiHost) {
           publish(event, sent);
           if (event.type === "done" || event.type === "error") {
             observed.push(event.type === "done" ? event.message : event.error);
-            // The agent runs tools only from a reply that ends to use them.
-            if (event.type === "done" && event.reason === "toolUse") {
+            // The agent runs a reply's tool calls unless it failed or was cut off by its token limit.
+            if (event.type === "done" && event.message.stopReason !== "length") {
               for (const part of event.message.content) if (part.type === "toolCall") relayed.set(part.id, part);
             }
             settled = true;
@@ -278,7 +288,9 @@ function supervise(directory: string, command: PiCommand, host: PiHost) {
         undelivered.delete(result.toolCallId);
         delivered.push(result);
         inOrder(() => host.onToolDelivered?.(message.delivered));
-      } else if ("result" in message && (inflight || undelivered.size)) fail(new Error("Pi worker finished before its tool results"));
+      } else if ("result" in message && (inflight || undelivered.size || streams.size)) {
+        fail(new Error("Pi worker finished before its model reply or tool results"));
+      }
       else reply = message;
     }
 

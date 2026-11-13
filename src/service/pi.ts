@@ -177,7 +177,8 @@ async function confinedSegment(input: DriverInput, profile: PiProfile, mode: "te
   const segment = workerSegment.parse(result);
   const state = stateSchema.parse(segment.checkpoint.state);
   const prior = input.checkpoint === null ? undefined : stateSchema.parse(input.checkpoint.state);
-  const relayed = observed[0];
+  // Compared as JSON, the form the worker's checkpoint took (JSON has no -0, for one).
+  const relayed = JSON.parse(JSON.stringify(observed[0])) as AssistantMessage;
   const current = segment.kind === "complete" ? state.turns.at(-1) : state.pending;
   const message = current && ("proposal" in current ? current.proposal : current.assistant);
   const calls = relayed.content.filter((part) => part.type === "toolCall");

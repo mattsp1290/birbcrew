@@ -36,6 +36,8 @@ export async function runTrustedPi(input:TrustedNativeInput,profile:PiProfile) {
     {profile,signal:input.signal,modelRequests:17,onText:input.onText,dispatch,onToolDelivered:input.onToolDelivered});
   const turn=workerTurn.parse(result);
   const prior=checkpoint === null ? undefined : stateSchema.parse(checkpoint);
+  // Compared as JSON, the form the worker's checkpoint took.
+  const relayed=JSON.parse(JSON.stringify(observed)) as typeof observed;
   const appended=turn.checkpoint.messages.slice(prior?.messages.length ?? 0) as Appended[];
   const of=(role:string)=>appended.filter(message=>message.role === role);
   const sdkWritten=sdkSystemEntries({instructions:profile.instructions,context,directory,cwd:"birb-trusted-pi-",tools:declared});
@@ -46,7 +48,7 @@ export async function runTrustedPi(input:TrustedNativeInput,profile:PiProfile) {
      !of("system").every(message=>{const entry=systemEntry.safeParse(message);return entry.success && sdkWritten(entry.data);}) ||
      users.length!==1 || !textPart.array().or(z.string()).safeParse(users[0].content).success ||
      contentText(users[0].content as string)!==text ||
-     !isDeepStrictEqual(of("assistant").map(message=>[message.content,message.stopReason]),observed.map(message=>[message.content,message.stopReason])) ||
+     !isDeepStrictEqual(of("assistant").map(message=>[message.content,message.stopReason]),relayed.map(message=>[message.content,message.stopReason])) ||
      !isDeepStrictEqual(of("toolResult").map(message=>[message.toolCallId,message.toolName,message.isError,
        textPart.array().safeParse(message.content).data?.map(part=>part.text).join("\n")]),delivered.map(result=>[result.toolCallId,result.toolName,result.isError,result.text])))
     throw new Error("Trusted Pi worker returned a turn outside its request");
