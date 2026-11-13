@@ -25,6 +25,15 @@ import {
   type BeginTurn, type Conversation, type Member, type RequestInitiator, type TurnRequest,
 } from "./domain.ts";
 
+type SpawnedMember = Member & { instructions?: InstructionsSummary; instructionPacks?: string[] };
+const memberColumns = `owner_id AS "ownerId", member_id AS "memberId", engine, profile`;
+/** The spawn response, the same for the first spawn and its replays: the instructions summary and
+ * the pack IDs only when the member has them. */
+function spawnedMember(member: Member, stored: InstructionsSummary | null, packs: string[]): SpawnedMember {
+  return { ...member, ...(stored ? { instructions: { bytes: stored.bytes, digest: stored.digest } } : {}),
+    ...(packs.length ? { instructionPacks: packs } : {}) };
+}
+
 type ConversationKey = z.input<typeof conversationKey>;
 type Claim = z.input<typeof claimSchema>;
 type Execution = z.input<typeof executionSchema>;
@@ -173,39 +182,41 @@ export class MemberStore {
   /** Instructions and instruction packs are written only here, in the member's own spawn
    * transaction (instructions.ts, instruction-packs.ts). A replay must repeat each exactly, or
    * leave it out exactly when the member has none. */
-  async spawn(input: z.input<typeof spawnSchema>): Promise<Member & { instructions?: InstructionsSummary; instructionPacks?: string[] }> {
-    const { ownerId, requestId, engine, profile, instructions, instructionPacks } = spawnSchema.parse(input);
+  async spawn(input: z.input<typeof spawnSchema>): Promise<SpawnedMember> {
+    const { ownerId, requestId, engine, profile, instructions, instructionPacks = [] } = spawnSchema.parse(input);
     return this.transaction(async (db) => {
-      const inserted = await db.query<{ member_id: string }>(
+      const { rows: [created] } = await db.query<Member>(
         `INSERT INTO birbcrew_ts.members (owner_id, spawn_request_id, engine, profile)
-         VALUES ($1, $2, $3, $4) ON CONFLICT (owner_id, spawn_request_id) DO NOTHING RETURNING member_id`,
+         VALUES ($1, $2, $3, $4) ON CONFLICT (owner_id, spawn_request_id) DO NOTHING RETURNING ${memberColumns}`,
         [ownerId, requestId, engine, profile],
       );
-      if (inserted.rowCount && instructions !== undefined) await db.query(
-        "INSERT INTO birbcrew_ts.member_instructions (owner_id, member_id, body) VALUES ($1, $2, $3)",
-        [ownerId, inserted.rows[0].member_id, instructions]);
-      if (inserted.rowCount && instructionPacks) await attachPacks(db, { ownerId, memberId: inserted.rows[0].member_id },
-        instructionPacks, instructions);
+      if (created) {
+        // This call made the member: it writes what it was given, then records it. It reads no
+        // table it did not write, so a spawn without packs or instructions works on a database
+        // migrated before them.
+        if (instructions !== undefined) await db.query(
+          "INSERT INTO birbcrew_ts.member_instructions (owner_id, member_id, body) VALUES ($1, $2, $3)",
+          [ownerId, created.memberId, instructions]);
+        if (instructionPacks.length) await attachPacks(db, created, instructionPacks, instructions);
+        const stored = instructions === undefined ? null : await instructionsOf(db, created);
+        await appendAudit(db, { type: "member.spawned", ownerId, memberId: created.memberId,
+          payload: { spawnRequestId: requestId, engine, profile } });
+        if (stored) await appendAudit(db, { type: "member.instructions_set", ownerId, memberId: created.memberId,
+          payload: { digest: stored.digest, bytes: stored.bytes } });
+        if (instructionPacks.length) await appendAudit(db, { type: "member.instruction_packs_attached", ownerId,
+          memberId: created.memberId, payload: { packIds: instructionPacks } });
+        return spawnedMember(created, stored, instructionPacks);
+      }
+      // A replay writes nothing, and must name exactly what the first spawn named.
       const { rows: [member] } = await db.query<Member>(
-        `SELECT owner_id AS "ownerId", member_id AS "memberId", engine, profile
-           FROM birbcrew_ts.members WHERE owner_id = $1 AND spawn_request_id = $2`,
+        `SELECT ${memberColumns} FROM birbcrew_ts.members WHERE owner_id = $1 AND spawn_request_id = $2`,
         [ownerId, requestId],
       );
-      // A member this call inserted has exactly what it was given; only a replay needs to look.
-      const stored = inserted.rowCount && instructions === undefined ? null : await instructionsOf(db, member);
-      const packs = inserted.rowCount ? instructionPacks ?? [] : await packIdsOf(db, member);
+      const stored = await instructionsOf(db, member);
+      const packs = await packIdsOf(db, member);
       if (member.engine !== engine || member.profile !== profile || stored?.text !== instructions
-        || packs.join() !== (instructionPacks ?? []).join()) throw new MemberStoreError("conflict");
-      if (inserted.rowCount) {
-        await appendAudit(db, { type: "member.spawned", ownerId, memberId: member.memberId,
-          payload: { spawnRequestId: requestId, engine, profile } });
-        if (stored) await appendAudit(db, { type: "member.instructions_set", ownerId, memberId: member.memberId,
-          payload: { digest: stored.digest, bytes: stored.bytes } });
-        if (packs.length) await appendAudit(db, { type: "member.instruction_packs_attached", ownerId, memberId: member.memberId,
-          payload: { packIds: packs } });
-      }
-      return { ...member, ...(stored ? { instructions: { bytes: stored.bytes, digest: stored.digest } } : {}),
-        ...(packs.length ? { instructionPacks: packs } : {}) };
+        || packs.join() !== instructionPacks.join()) throw new MemberStoreError("conflict");
+      return spawnedMember(member, stored, packs);
     });
   }
 

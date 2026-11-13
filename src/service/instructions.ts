@@ -25,16 +25,22 @@ export function packsContext(texts: readonly string[]): string | undefined {
   return texts.length ? packsHeader + escapeSeparators(JSON.stringify({ packs: texts })) : undefined;
 }
 
-/** The member's packs block, then its instructions block, one newline apart: the part of a
- * conversation's system context fixed at spawn. Undefined when the member has neither. */
-export async function memberInstructionsContext(db: Queryable, member: MemberKey): Promise<string | undefined> {
+/** The packs block, then the instructions block, one newline apart: the part of a conversation's
+ * system context fixed at spawn. Undefined when there are neither packs nor instructions. */
+export function fixedContext(packTexts: readonly string[], instructions: string | undefined): string | undefined {
+  const blocks = [packsContext(packTexts), instructions === undefined ? undefined : instructionsContext(instructions)]
+    .filter(block => block !== undefined);
+  return blocks.length ? blocks.join("\n") : undefined;
+}
+
+/** The fixed context of a stored member: its packs' texts in order, then its instructions. */
+export async function memberFixedContext(db: Queryable, member: MemberKey): Promise<string | undefined> {
   const { rows: packs } = await db.query<{ body: string }>(`SELECT p.body FROM birbcrew_ts.member_instruction_packs a
       JOIN birbcrew_ts.instruction_packs p ON p.owner_id=a.owner_id AND p.pack_id=a.pack_id
      WHERE a.owner_id=$1 AND a.member_id=$2 ORDER BY a.position`, [member.ownerId, member.memberId]);
   const { rows: [row] } = await db.query<{ body: string }>(
     "SELECT body FROM birbcrew_ts.member_instructions WHERE owner_id=$1 AND member_id=$2", [member.ownerId, member.memberId]);
-  const blocks = [packsContext(packs.map(pack => pack.body)), row && instructionsContext(row.body)].filter(block => block !== undefined);
-  return blocks.length ? blocks.join("\n") : undefined;
+  return fixedContext(packs.map(pack => pack.body), row?.body);
 }
 
 // Every UTF-8 byte of the text costs at most two bytes in the block: '"', '\', tab and newline
@@ -46,8 +52,8 @@ export const instructionsInjectedBytes = Buffer.byteLength(instructionsContext('
 /** The same for a member's packs and instructions together. They share instructionsBytes, every
  * byte of either costs at most two, and each block and each pack adds framing, so the largest is
  * the most packs, each one '"', with the rest of the budget as instructions. */
-export const fixedInjectedBytes = Buffer.byteLength(packsContext(Array.from({ length: instructionPacksPerMember }, () => '"'))!
-  + "\n" + instructionsContext('"'.repeat(instructionsBytes - instructionPacksPerMember))) + 1;
+export const fixedInjectedBytes = Buffer.byteLength(fixedContext(Array.from({ length: instructionPacksPerMember }, () => '"'),
+  '"'.repeat(instructionsBytes - instructionPacksPerMember))!) + 1;
 
 /** The byte count and the SHA-256 of the UTF-8 text in lowercase hex, computed by PostgreSQL for
  * the row aliased `i`, so every route reports the digest the same way. */

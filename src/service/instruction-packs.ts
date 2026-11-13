@@ -147,10 +147,8 @@ export class PackApi {
     return this.store.transaction(async db => {
       const row = await this.owned(db, ownerId, packId, true);
       if (row.state === "deleted") return packView(row, true);
-      // A later statement than the lock, so it sees a spawn that held the pack and committed.
-      const { rows: [{ attached }] } = await db.query<{ attached: boolean }>(
-        "SELECT EXISTS (SELECT 1 FROM birbcrew_ts.member_instruction_packs WHERE pack_id=$1) AS attached", [row.pack_id]);
-      if (attached) throw new MemberStoreError("pack_in_use");
+      // guard_instruction_pack refuses a pack any member has (pack_in_use). Its check runs after
+      // the lock above, so it sees a spawn that held the pack and committed.
       await db.query(`UPDATE birbcrew_ts.instruction_packs SET state='deleted', name=NULL, description=NULL, body=NULL,
         deleted_at=clock_timestamp() WHERE pack_id=$1`, [row.pack_id]).catch(constraintError);
       await appendAudit(db, { type: "instruction_pack.deleted", ownerId, memberId: null, payload: { packId: row.pack_id } });

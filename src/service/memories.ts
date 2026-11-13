@@ -3,7 +3,7 @@ import { z } from "zod";
 import { appendAudit } from "./audit.ts";
 import { claudeCommand } from "./claude.ts";
 import { MemberStoreError, ownerText, type Conversation, type Engine } from "./domain.ts";
-import { memberInstructionsContext } from "./instructions.ts";
+import { memberFixedContext } from "./instructions.ts";
 import { trustedProjectContext } from "./project-notes.ts";
 import type { MemberStore } from "./store.ts";
 
@@ -33,22 +33,22 @@ const joined = (...blocks: (string | undefined)[]) => blocks.filter(block => blo
 
 async function contextBlocks(db: Queryable, conversation: Conversation) {
   const notes = await trustedProjectContext(db, conversation);
-  const instructions = await memberInstructionsContext(db, conversation);
+  const fixed = await memberFixedContext(db, conversation);
   const { rows } = await db.query<Entry>(`SELECT m.memory_id AS "memoryId", m.body AS text
       FROM birbcrew_ts.conversation_memories r
       JOIN birbcrew_ts.conversations c USING (conversation_id)
       JOIN birbcrew_ts.member_memories m ON m.memory_id = r.memory_id AND m.owner_id = c.owner_id AND m.member_id = c.member_id
      WHERE r.conversation_id = $1 AND c.owner_id = $2 AND c.member_id = $3 AND m.state = 'active'
      ORDER BY r.position`, [conversation.conversationId, conversation.ownerId, conversation.memberId]);
-  return { instructions, notes, memory: memoryContext(rows) };
+  return { fixed, notes, memory: memoryContext(rows) };
 }
 
 /** The system context a native launch of this conversation receives: its member's instruction
  * packs and instructions (instructions.ts), its project notes, then the snapshot's entries that are still active. Pi
  * children get none of them (supervisor-runner.ts). */
 export async function conversationContext(db: Queryable, conversation: Conversation): Promise<string | undefined> {
-  const { instructions, notes, memory } = await contextBlocks(db, conversation);
-  return joined(instructions, notes, memory);
+  const { fixed, notes, memory } = await contextBlocks(db, conversation);
+  return joined(fixed, notes, memory);
 }
 
 // Every UTF-8 byte of an entry's text costs at most two bytes in the block: '"', '\', tab and
@@ -91,12 +91,12 @@ export async function snapshotMemories(db: Queryable, conversation: Conversation
     SELECT $1, row_number() OVER (ORDER BY created_at, memory_id), memory_id FROM birbcrew_ts.member_memories
      WHERE owner_id = $2 AND member_id = $3 AND state = 'active'`,
     [conversation.conversationId, conversation.ownerId, conversation.memberId]);
-  const instructions = await memberInstructionsContext(db, conversation);
-  if (!rowCount && instructions === undefined) return;
+  const fixed = await memberFixedContext(db, conversation);
+  if (!rowCount && fixed === undefined) return;
   const { notes, memory } = await contextBlocks(db, conversation);
   const fits = (context: string | undefined) => contextFits(conversation.engine, context);
-  if (fits(joined(instructions, notes, memory)) || !fits(notes)) return;
-  throw new MemberStoreError(fits(joined(instructions, notes)) ? "memory_limit" : "instructions_limit");
+  if (fits(joined(fixed, notes, memory)) || !fits(notes)) return;
+  throw new MemberStoreError(fits(joined(fixed, notes)) ? "memory_limit" : "instructions_limit");
 }
 
 export const memoryCapabilities = {

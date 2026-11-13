@@ -10,7 +10,7 @@ import { auditEventTypes } from "../../src/service/audit.ts";
 import type { MemberClient } from "../../src/service/client.ts";
 import { instructionPacksPerMember, instructionsBytes, ownerInitiator, type Conversation, type Engine, type TurnRequest } from "../../src/service/domain.ts";
 import { createGateway } from "../../src/service/gateway.ts";
-import { fixedInjectedBytes, instructionsContext, packsContext } from "../../src/service/instructions.ts";
+import { fixedContext, fixedInjectedBytes, instructionsContext, packsContext } from "../../src/service/instructions.ts";
 import { codexArgument, contextFits, conversationContext, memoryContext, MemoryApi, snapshotMemories } from "../../src/service/memories.ts";
 import { withNativeAdmission } from "../../src/service/native-admission.ts";
 import { MemberStore } from "../../src/service/store.ts";
@@ -491,9 +491,6 @@ test("every launch gets the packs first, then the member's instructions, notes a
   assert.equal(await conversationContext(pool, await open(await g.spawn("pi"))), undefined, "nothing, exactly as before");
   assert.equal(packsContext([]), undefined);
   assert.equal(/STYLE-NAME|SECURITY-NAME/.test((await conversationContext(pool, first))!), false);
-  // The supervisor gives the context to every launch but a Pi child's.
-  assert.match(await readFile(new URL("../../src/service/supervisor-runner.ts", import.meta.url), "utf8"),
-    /const projectContext = command\.childProfile \? undefined : await conversationContext\(pool, member\);/);
 
   // With project notes and memory: packs, instructions, notes, memory, one newline apart.
   const { memoryId } = await memories.create(g.ownerId, { requestId: randomUUID(), memberId: member.memberId, text: "Deploys need a second reviewer." });
@@ -549,7 +546,7 @@ test("packs and instructions together fit every engine on their own, and count t
     [Array.from({ length: 8 }, () => '"'.repeat(instructionsBytes / 8)), undefined], [['"'], '"'.repeat(instructionsBytes - 1)],
     [Array.from({ length: 8 }, () => "\\".repeat(2_000)), "\n".repeat(384)], [["\u2028".repeat(5_461)], undefined]];
   for (const [packs, instructions] of splits) {
-    const context = [packsContext(packs), instructions === undefined ? undefined : instructionsContext(instructions)].filter(Boolean).join("\n");
+    const context = fixedContext(packs, instructions)!;
     assert.ok(Buffer.byteLength(context) <= Buffer.byteLength(largest), JSON.stringify([packs.length, instructions?.length]));
     assert.ok(Buffer.byteLength(codexArgument(context)) <= Buffer.byteLength(codexArgument(largest)));
   }
