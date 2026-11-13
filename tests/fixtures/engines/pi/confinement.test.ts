@@ -15,7 +15,7 @@ import { createPiFixtureOptions } from "./index.mts";
 
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
 
-test("the confined Pi worker cannot read outside its code or open a socket", { timeout: 20_000 }, async (t) => {
+test("the confined Pi worker cannot read outside its code, open a socket, start a process or signal its host", { timeout: 20_000 }, async (t) => {
   const scope = await mkdtemp(join(tmpdir(), "birb-pi-scope-"));
   t.after(() => rm(scope, { recursive: true, force: true }));
   const directory = join(scope, "conversation");
@@ -36,21 +36,26 @@ test("the confined Pi worker cannot read outside its code or open a socket", { t
     const paths = ${JSON.stringify(paths)};
     const result = Object.fromEntries(Object.entries(paths).map(([name, path]) => [name, attempt(() => fs.readFileSync(path))]));
     result.private = attempt(() => fs.writeFileSync("scratch", "own state"));
-    const done = (tcp) => process.send({ ...result, tcp }, () => process.exit(0));
+    result.signal = attempt(() => process.kill(process.ppid, 0));
+    result.process = require("node:child_process").spawnSync(process.execPath, ["-e", "0"]).error?.code ?? "allowed";
+    const done = (tcp) => { fs.writeSync(3, JSON.stringify({ ...result, tcp }) + "\\n"); process.exit(0); };
     require("node:net").connect(${address.port}, "127.0.0.1").once("connect", () => done("allowed")).once("error", (error) => done(error.code));
   `;
   const launch = piLaunch(directory, ["-e", probe]);
   const child = spawn(launch.command, launch.args, launch.options);
-  const [message] = await once(child, "message");
-  const [code] = await once(child, "exit");
+  let output = "";
+  child.stdio[3]!.on("data", (chunk: Buffer) => { output += chunk; });
+  const [code] = await once(child, "close");
   assert.equal(code, 0);
-  // Landlock denies reads outside the code and the private directory; seccomp denies the socket itself.
-  assert.deepEqual(message, { sibling: "EACCES", checkout: "EACCES", host: "EACCES", code: "allowed", private: "allowed", tcp: "EPERM" });
+  // Landlock denies reads outside the code and the private directory; seccomp denies the socket, the new
+  // process and the signal to the host.
+  assert.deepEqual(JSON.parse(output), { sibling: "EACCES", checkout: "EACCES", host: "EACCES", code: "allowed", private: "allowed",
+    signal: "EPERM", process: "EPERM", tcp: "EPERM" });
   assert.equal(connections, 0);
 
   const unconfined = piLaunch(directory, ["-e", "0"]);
   const refused = spawn(unconfined.command, unconfined.args, { ...unconfined.options, stdio: "ignore" });
-  assert.deepEqual(await once(refused, "exit"), [126, null], "The launcher must refuse a Pi worker without its IPC channel");
+  assert.deepEqual(await once(refused, "exit"), [126, null], "The launcher must refuse a Pi worker without its channel");
 });
 
 function processStatus(pid: number) {
@@ -75,7 +80,10 @@ test("a Pi turn runs in a launcher-confined worker with no inherited environment
   assert.equal(seen.length, 1);
   const [worker] = seen;
   assert.equal(worker.status.NoNewPrivs, "1");
-  assert.equal(Number(worker.status.Seccomp_filters), Number(processStatus(process.pid).Seccomp_filters) + 1);
+  assert.equal(worker.status.Seccomp, "2");
+  const filters = Number(processStatus(process.pid).Seccomp_filters);
+  assert.ok(Number.isInteger(filters));
+  assert.equal(Number(worker.status.Seccomp_filters), filters + 1);
   assert.deepEqual(worker.command, [process.execPath, join(root, "src/service/pi-worker.ts")]);
-  assert.deepEqual(worker.environment.sort(), ["HOME", "NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE", "TMPDIR"]);
+  assert.deepEqual(worker.environment.sort(), ["HOME", "TMPDIR"]);
 });

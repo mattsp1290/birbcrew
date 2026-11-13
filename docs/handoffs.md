@@ -253,7 +253,7 @@ Every engine gets the prompt outside its command line, so one budget fits every 
 | --- | --- |
 | Codex | The Codex SDK starts `codex exec --experimental-json` with only flags and `--config` overrides as arguments and writes the prompt to its stdin (`@openai/codex-sdk` 0.167.1, `dist/index.js`). The native launcher closes only descriptors 3 and above, so stdin reaches Codex. The 131,072-byte argument limit applies to `developer_instructions` (member instructions, notes and memory), not to the prompt |
 | Claude | IPC to the Claude worker, then the Claude Agent SDK writes it to the Claude CLI's stdin (`--input-format stream-json`) |
-| Pi | IPC to the confined Pi worker, which runs the Pi SDK |
+| Pi | A frame on descriptor 3 to the confined Pi worker, which runs the Pi SDK |
 
 The transcript is never in a command line, so `/proc/<pid>/cmdline` and exec auditing
 do not see it.

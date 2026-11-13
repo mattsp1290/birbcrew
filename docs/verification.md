@@ -49,14 +49,14 @@ from the original checkout.
 
 Every engine's native process starts through the member launcher,
 `.proof/bin/member-launch`, built from `native/member-launch.c`. It applies a
-Landlock filesystem ruleset and a seccomp filter, sets `no_new_privs`, dies
-with its parent, and closes inherited descriptors before it runs the engine.
-Every engine may read a fixed list of runtime files: the dynamic loader cache,
-DNS and TLS configuration, `/dev/null`, `/dev/urandom` and a few `/proc` and
-`/sys` entries that runtimes read at startup. The seccomp filter refuses
-`setsid` and `setpgid`, so a native process cannot leave the process group that
-its host kills, and on x86-64 it refuses x32 system call numbers, which would
-otherwise bypass the filter.
+Landlock filesystem ruleset and a seccomp filter, sets `no_new_privs` and a
+parent-death signal, and closes inherited descriptors from 3 up (from 4 up for
+Pi, which keeps its channel), before it runs the engine. Every engine may read a fixed list of runtime files: the dynamic
+loader cache, DNS and TLS configuration, `/dev/null`, `/dev/urandom` and a few
+`/proc` and `/sys` entries that runtimes read at startup. The seccomp filter
+refuses `setsid` and `setpgid`, so a native process cannot leave the process
+group that its host kills, and on x86-64 it refuses x32 system call numbers,
+which would otherwise bypass the filter.
 
 - **Claude** runs the Claude CLI with its conversation directory writable. The
   launcher does not restrict its network.
@@ -64,51 +64,77 @@ otherwise bypass the filter.
   workspace readable, and TCP connections only to the provider port and the
   invocation's tool port.
 - **Pi** runs the Pi SDK in a Node worker, `src/service/pi-worker.ts`. The
-  worker gets no credentials and no network. It reaches its host only through
-  the Node IPC channel that the host opened.
+  worker gets no credentials and no network. Its only channel is descriptor 3,
+  a socket pair to its host carrying newline-delimited JSON.
 
-The Pi worker may use these and nothing else:
+In addition to the runtime files above, the Pi worker may use only these:
 
 | Allowance | Reason |
 | --- | --- |
-| Read and execute the Node binary, and the libraries under `/usr/lib`, `/usr/lib64` and `/lib64` | Node and its dynamic loader start the worker. |
-| Read `package.json`, `node_modules` and `src/service` in the checkout | The worker loads the Pi SDK and Crew's Pi session code. It cannot read the rest of the checkout, such as `tests`, `docs` or a local `.env`. |
+| Read and execute the Node binary and anything under `/usr/lib`, `/usr/lib64` and `/lib64` | Node and its dynamic loader start the worker. Executing a file only replaces the worker, which cannot start another process. |
+| Read `package.json`, `node_modules` and `src/service` in the checkout | The worker loads the Pi SDK and Crew's Pi session code. It cannot read the rest of the checkout, such as `tests`, `docs` or a local `.env`. Keep profile modules and secrets out of these directories. |
 | Read, write, create and remove in one private directory | The Pi session needs a scratch working directory. It is the worker's `HOME`, `TMPDIR` and working directory, the host creates a new one for each invocation, and removes it after the worker exits. |
-| Keep descriptor 3, the IPC socket | Model requests, text, tool calls and the result cross it. The launcher refuses to start a Pi worker unless `NODE_CHANNEL_FD` is 3 and descriptor 3 is a socket, and closes every other inherited descriptor. |
+| Keep descriptor 3 | Model requests, text, tool calls and the result cross it. The launcher refuses to start a Pi worker unless descriptor 3 is a socket, and closes every other inherited descriptor; 0 to 2 are `/dev/null`. |
 
-The seccomp filter also refuses `socket` and `io_uring_setup` for Pi, so the
-worker cannot open any socket, TCP, UDP or Unix. The worker's environment holds
-only `HOME`, `TMPDIR` and Node's two IPC variables: no database URL and no
-provider key. The host runs the model request for the worker with the
-operator's own model, provider, credentials and proxy relay, and it ignores any
-model, key, headers or environment that the worker sends. A member segment may
-make one model request and a trusted application turn 17, one for each of at
-most 16 tool calls and one for the reply. The host also runs each trusted
-application tool. It checks the worker's result before it returns it: the
-checkpoint, a proposal's binding to its request, and a delegation's model and
-tools. It records usage from the replies it relayed, not from the worker. A Pi
-profile's `prepare` runs on the host. Its extension may register only the
-`before_provider_headers`, `before_provider_request`, `after_provider_response`
-and `provider_stream_event` hooks; any other extension call fails the turn. In
-the member lane the worker stays in the supervised runner's process group, so
-the supervisor's stop and reaping cover it.
+For Pi the seccomp filter also refuses:
+
+- `socket`, `socketpair` and `io_uring_setup`, so the worker cannot open any
+  socket, TCP, UDP or Unix;
+- `fork`, `vfork` and `clone` without `CLONE_THREAD`, so it cannot start a
+  process, and `clone3`, so that threads use `clone`;
+- `prctl(PR_SET_PDEATHSIG)`, so it cannot undo its death signal;
+- `kill` and `tgkill` to any process but itself, and `tkill`,
+  `pidfd_send_signal`, `rt_sigqueueinfo` and `rt_tgsigqueueinfo`.
+
+The worker's environment holds only `HOME` and `TMPDIR`: no database URL and no
+provider key. The host makes each model request for the worker with the
+operator's own model, provider, credentials, proxy relay and request identity,
+with provider retries off. Of the worker's request options it takes only the
+session ID, transport and bounded timeouts; it ignores any model, key, headers,
+identity or environment. A member segment may make one model request and a
+trusted application turn 17, one for each of at most 16 tool calls and one for
+the reply. The host runs each trusted application tool, and only for a tool
+call that the model sent through it. It reads the worker's frames with a size
+limit and stops acting on them after the first failure. It counts the text the
+worker publishes, at most 65,536 bytes.
+
+The host checks the worker's result before it returns it. A member segment's
+checkpoint must keep the thread, the session and every earlier turn, add exactly
+this request's turn or pending call, and hold the reply or tool calls exactly
+as the model sent them through the host; the committed text must equal both
+that reply and the published text. A proposal must name the segment's tool and
+its request. Delegated child profiles come from the `@birbcrew/pi-subagents`
+role table on the host, not from the worker. A trusted turn's reply must equal
+the text the model sent, and its checkpoint must extend the prior one. The host
+records a member segment's usage from the replies it relayed, not from the
+worker. A Pi profile's `prepare` runs on the host. Its extension may register
+only the `before_provider_headers`, `before_provider_request`,
+`after_provider_response` and `provider_stream_event` hooks; any other
+extension call fails the turn, and so does an error from a hook, which the Pi
+SDK would only report. In the member lane the worker stays in the supervised
+runner's process group, so the supervisor's stop and reaping cover it; in the
+trusted lane it gets its own group, which the host kills when the worker
+exits.
 
 Claude and Pi need Landlock ABI 3 or newer, and Codex needs ABI 4. On a kernel
 without Landlock, with an older ABI, or where the container's seccomp profile
 blocks the `landlock_*` system calls, the launcher exits with status 126 before
 the engine starts, and the turn fails. No engine falls back to running
-unconfined.
+unconfined. Landlock below ABI 6 cannot scope signals, so a Claude or Codex
+process can still signal other processes of the same user.
 
-`tests/fixtures/engines/pi/confinement.test.ts` proves the Pi policy. A
-process started with the exact launcher invocation of a Pi worker gets
-`EACCES` when it reads a file outside its allowed set: a sibling owner's file,
-a test file in the same checkout, and its host's `/proc/<pid>/environ`. It gets
-`EPERM` when it connects to a listening loopback port, which received no
-connection. It can still read Crew's code and write its private directory. The
-same test runs a real Pi turn and checks that its worker has `no_new_privs`,
-one more seccomp filter than the test process, and only the four environment
-variables, and that the launcher refuses a Pi worker started without an IPC
-channel. `tests/fixtures/engines/claude/durable.test.ts` and
+`tests/fixtures/engines/pi/confinement.test.ts` proves the Pi policy. It starts
+a process with the launcher invocation of a Pi worker, running `node -e` probe
+code instead of the worker entry. The probe gets `EACCES` when it reads a file
+outside its allowed set: a sibling owner's file, a test file in the same
+checkout, and its host's `/proc/<pid>/environ`. It gets `EPERM` when it
+connects to a listening loopback port, which received no connection, when it
+starts a process, and when it signals its host. It can still read Crew's code
+and write its private directory. The same test runs a real Pi turn and checks
+that its worker has `no_new_privs`, one more seccomp filter than the test
+process, and only `HOME` and `TMPDIR` in its environment, and that the launcher
+refuses a Pi worker started without descriptor 3.
+`tests/fixtures/engines/claude/durable.test.ts` and
 `tests/fixtures/engines/codex/native.test.ts` prove the Claude and Codex
 filesystem policies.
 
