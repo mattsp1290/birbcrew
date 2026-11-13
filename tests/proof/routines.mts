@@ -70,7 +70,7 @@ try {
     const chat = await api("/v1/members", { requestId: randomUUID(), engine: "pi", profile: "fixture.v1" });
     const guarded = await api("/v1/members", { requestId: randomUUID(), engine: "pi", profile: "fixture.approval.v1" });
     const capabilities = await api("/v1/capabilities");
-    assert.deepEqual(capabilities.initiatorKinds, ["owner", "routine"]);
+    assert.deepEqual(capabilities.initiatorKinds, ["owner", "routine", "handoff"]);
 
     // A firing opens a new conversation, runs to completion and is attributed to its routine.
     const marker = randomUUID();

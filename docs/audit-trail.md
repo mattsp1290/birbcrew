@@ -45,17 +45,19 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   older than `bounded-conversations-v1`, trusted-context effects, whose lane
   records no admission, and a request refused under its member's usage budget
   (`usage.request_refused`, whose payload names the routine instead when a routine's
-  firing submitted it).
-  `member.spawned`, `conversation.opened`, the routine facts, the memory facts and
-  the budget facts belong to no request and name the acting owner. Migration 25 adds the
+  firing submitted it). `member.spawned`, `member.instructions_set`,
+  `conversation.opened`, `conversation.handed_off`, the routine facts, the memory
+  facts and the budget facts belong to no request and name the acting owner. Migration 25 adds the
   second kind, `routine`, with the routine's ID: an admission records it only from
   the routine's firing row (see
-  [scheduled routines](scheduled-routines.md#what-a-firing-records)). Named CHECK
+  [scheduled routines](scheduled-routines.md#what-a-firing-records)). Migration 27
+  adds the third, `handoff`, with the handoff's ID: an admission records it only for
+  the request a [conversation handoff](handoffs.md#the-reserved-first-request)
+  reserved, with exactly its transcript. Named CHECK
   constraints (`audit_events_initiator_check` and
-  `request_admissions_initiator_kind_check`) allow only these two kinds, and a
-  routine only on a request-tied audit row. Member handoff must widen both in its
-  own migration. No operator or application kind exists
-  yet. Operator CLI commands (`npm run members`) act as the owner they name.
+  `request_admissions_initiator_kind_check`) allow only these three kinds, and a
+  routine or a handoff only on a request-tied audit row. No operator or application
+  kind exists yet. Operator CLI commands (`npm run members`) act as the owner they name.
   Standing grants (migration 24) added no kind: a call a grant approves keeps its
   request's initiator, and `approval.auto_approved` names the system as its actor.
 - `event_type`, `member_id`, `conversation_id`, `request_id` and a small
@@ -77,16 +79,20 @@ Payloads contain identifiers, SHA-256 digests, choices and statuses only. They
 never contain prompt or reply text, tool arguments or results, notes, member memory
 text, tokens or credentials. Memory rows carry no digest of their text either: the
 owner can delete an entry, and a digest kept in this table would let an export holder
-confirm a guess of the deleted text. `src/service/audit.ts` validates each payload against a strict schema
+confirm a guess of the deleted text. Member instructions are never erased, so their row
+carries the SHA-256 of the text, never the text. `src/service/audit.ts` validates each payload against a strict schema
 before insert, so extra fields are refused. The prompt digest is the hex SHA-256 of
-the exact UTF-8 text, the same digest that admission already stores. The argument
+the exact UTF-8 text, the same digest that admission already stores. A handoff's
+transcript digest is the hex SHA-256 of the transcript it quoted, which is also the
+prompt digest of the target's first request. The argument
 digest is the one shown on the public approval card: a SHA-256 over the tool name,
 operation ID and note.
 
-Both digests are unsalted fingerprints of the text, not secrets. Anyone holding an
-export can confirm a guess, and can recover short or predictable text ("yes", "run
-the tests", a templated prompt) by trying candidates. Identical text has the same
-digest for every owner, so pooled exports link those requests across owners. Treat
+These digests, and the instructions digest, are unsalted fingerprints of the text, not
+secrets. Anyone holding an export can confirm a guess, and can recover short or
+predictable text ("yes", "run the tests", a templated prompt or role) by trying
+candidates. Identical text has the same digest for every owner, so pooled exports link
+those requests and members across owners. Treat
 an exported trail with the same care as the prompts and notes themselves. A later
 audit version may switch to a keyed per-owner digest.
 
@@ -94,8 +100,8 @@ audit version may switch to a keyed per-owner digest.
 
 The registry is the `auditEvents` object in `src/service/audit.ts`.
 `audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
-`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql` and then `031-usage.sql`, lists the same types.
-Each widening replaces the whole constraint, so the latest migration lists every type.
+`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql`, `027-handoffs.sql`, `028-approval-expiry.sql`, `029-member-instructions.sql` and then `031-usage.sql`, lists the same types.
+Each widening replaces the whole constraint, so the last widening lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
 
@@ -107,12 +113,13 @@ A test checks that the two lists match. `GET /v1/capabilities` lists them under
 | `approval.decided` | owner | `decideLocked` stores a choice: Claude/Pi cards, Pi child cards and Codex live calls. `choice` may be a standing choice | `approvalId` | `approvalId`, `invocationId`, `toolName`, `argumentDigest`, `choice` |
 | `grant.created` | owner | A standing choice creates a grant; on the card's conversation and request | `grantId` | `grantId`, `approvalId`, `scope` |
 | `approval.auto_approved` | system | `proposeLocked` inserts a call a standing grant approved, with no card | `approvalId` | `approvalId`, `invocationId`, `toolName`, `argumentDigest`, `grantId` |
+| `approval.expired` | system | `expireTurn` cancels a request whose Claude/Pi card was undecided at its [deadline](approval-expiry.md) | `approvalId` | `approvalId`, `invocationId`, `toolName`, `expiresAt` |
 | `grant.revoked` | owner, or system for `recovery_restore` | The owner revokes a grant, or a restored installation resumes; on its conversation for a conversation grant | `grantId` | `grantId`, `reason` |
 | `work_item.committed` | system | `settleLocked` inserts the work-item receipt, including Codex live dispatch | `receiptId` | `receiptId`, `approvalId` |
 | `request.cancellation_requested` | owner | First durable cancellation fact: the v1 intent, or the cancellation marker written by the legacy cancel route | conversation + request | `receiptId` when the v1 intent came first; `policy: "fail_closed"` when a routine's policy requested it |
 | `request.finished` | system | `commitTurn` (`completed`), `rejectAccepted` (`cancelled`/`failed`), `rejectUnstartedAdmission` (`failed`), final `reconcileTurn` or delegation quarantine (`uncertain`) | conversation + request | `status`, optional `reason` |
 | `trusted_effect.completed` | system | The trusted-context lane records that an `effect` tool completed | `operationId` | `operationId`, `toolName` |
-| `routine.created` | owner | a routine is created | routine + revision | `routineId`, `revision`, `schedule`, `approvalPolicy`, `promptDigest` |
+| `routine.created` | owner | a routine is created | routine + revision | `routineId`, `revision`, `schedule`, `approvalPolicy`, `promptDigest`, optional `approvalDeadlineSeconds` |
 | `routine.enabled` | owner | a routine is enabled | routine + revision | `routineId`, `revision` |
 | `routine.disabled` | owner, or system after ten consecutive failures | a routine is disabled | routine + revision | `routineId`, `revision`, `reason` |
 | `routine.deleted` | owner | a routine is deleted | routine + revision | `routineId`, `revision` |
@@ -120,6 +127,8 @@ A test checks that the two lists match. `GET /v1/capabilities` lists them under
 | `memory.created` | owner | a [member memory](memories.md) entry is created | entry | `memoryId` |
 | `memory.deleted` | owner | an entry is deleted and its text erased | entry | `memoryId` |
 | `memory.suspended` | system | a restored installation resumes and suspends an active entry | entry | `memoryId`, `reason` (`recovery_restore`) |
+| `conversation.handed_off` | owner | a [conversation handoff](handoffs.md) commits; on the source conversation | handoff | `handoffId`, `targetConversationId`, `targetMemberId`, `firstRequestId`, `carriedTurns`, `omittedTurns`, `uncertainTurns`, `transcriptDigest` |
+| `member.instructions_set` | owner | `spawn` inserts a member with [instructions](member-instructions.md) | member | `digest` (SHA-256 of the text), `bytes` |
 | `usage.budget_set` | owner | a member's [usage budget](usage-metering.md) is set or its limit changes | member + revision | `revision`, `tokenLimit`, `period` |
 | `usage.budget_cleared` | owner | a member's usage budget is cleared | member + revision | `revision` |
 | `usage.request_refused` | system | admission refuses a request because its member used its budget; the only refused call the trail records | conversation + request | `tokenLimit`, `usedTokens`, `period`, `windowStart`, `budgetRevision`, optional `routineId` |
@@ -142,8 +151,10 @@ filter for another owner's conversation returns an empty page, not `404`.
 | `after` | Return events with a larger `eventId`. Decimal, default `0`. |
 | `limit` | Default 100 in both formats. At most 1000 for JSON and 10000 for CSV (the hard row cap). |
 | `conversationId` | Only events for this conversation. |
+| `memberId`, `eventType`, `actorKind`, `initiatorKind`, `initiatorId`, `from`, `to` | Only events that match: see [audit filters](audit-filters.md). |
 | `format` | `json` (default) or `csv`. |
 
+Filters combine with AND and never change the cursor rules below.
 Query validation is strict. An unknown or repeated parameter, or a malformed or
 out-of-range value, returns `400 invalid_input`. Other methods return `405`.
 
@@ -304,8 +315,32 @@ type and the three memory types, and adds one partial unique index for them. It 
 `audit_events` together with `members` and `conversations` without queueing, so it
 never waits for a native turn; [member memory](memories.md#upgrade) lists its locks.
 
-Migration 31 replaces `audit_events_type_check` the same way, with every earlier type
-and the three usage types, and adds two partial unique indexes for them. It takes
+Migration 27 replaces `audit_events_type_check` and `audit_events_initiator_check`
+the same way, with every earlier type and kind plus `conversation.handed_off` and
+`handoff`, widens the admission CHECK, and adds one partial unique index. It takes
+`request_admissions` and `audit_events` together with `members` and `conversations`
+without queueing, so it never deadlocks with an admission or a commit and never waits
+for a native turn; [conversation handoff](handoffs.md#upgrade) lists its locks.
+Previous-release processes must be stopped first, and rollback is unsupported.
+
+Migration 28 replaces `audit_events_type_check` the same way, with every type 27 lists plus
+`approval.expired`, and adds one partial unique index for it. It takes `audit_events`
+together with the four other tables it alters without queueing;
+[approval expiry](approval-expiry.md#upgrade-in-flight-workflows-and-recovery) lists its
+locks.
+
+Migration 29 replaces `audit_events_type_check` the same way, with every type 28 lists plus
+`member.instructions_set`, and adds one partial unique index for it. It takes
+`audit_events` together with `members` without queueing;
+[member instructions](member-instructions.md#upgrade) lists its locks.
+
+Migration 30 adds three indexes for the filters and changes no constraint or
+trigger. It holds `SHARE` on `audit_events`, taken the same way, so audited writes
+wait for the index builds; applied alone, from version 29, reads continue.
+[Audit filters](audit-filters.md#upgrade-and-recovery) lists its locks.
+
+Migration 31 replaces `audit_events_type_check` the same way, with every type 29 lists
+plus the three usage types, and adds two partial unique indexes for them. It takes
 `audit_events` and `routine_firings` together with `members` and `native_launches`
 without queueing, so it never waits for a native turn;
 [usage metering](usage-metering.md#upgrade-and-recovery) lists its locks.
@@ -480,6 +515,7 @@ export BIRBCREW_TEST_DATABASE_URL='postgresql://birbcrew:fixture-only@127.0.0.1:
 npm run test:audit
 npm run test:routines
 npm run test:memories
+npm run test:instructions
 npm run test:api
 node --test tests/service/store.test.ts tests/service/rollover-client.test.ts
 npm run test:recovery

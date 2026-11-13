@@ -71,11 +71,18 @@ export async function proposeLive(pool: Pool, launch: Launch, input: LiveProposa
     if (capacity.rowCount) throw new MemberStoreError("input_limit");
     const key = {ownerId:launch.ownerId, memberId:member.memberId, conversationId:launch.conversationId,
       requestId:launch.requestId, token:launch.token, invocationId:launch.requestId, nativeCallId:input.nativeCallId};
+    // A request's approval deadline (docs/approval-expiry.md) can only shorten the live deadline:
+    // the earlier one is the card's, and the live-call machinery below enforces it.
+    const {rows: [live]} = await db.query<{deadline: Date}>(`SELECT least($3::timestamptz,
+      (SELECT date_trunc('milliseconds', clock_timestamp()) + make_interval(secs => approval_deadline_seconds)
+         FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2)) AS deadline`,
+      [key.conversationId,key.requestId,expiresAt]);
+    const liveDeadline = live.deadline.toISOString();
     const approval = await ledger.proposeLocked(db, {...key,toolName:tool,arguments:input.args},
-      undefined, {liveDeadline:expiresAt});
+      undefined, {liveDeadline});
     const inserted = await db.query(`INSERT INTO birbcrew_ts.codex_live_calls
       (approval_id,conversation_id,request_id,token,thread_id,expires_at)
-      SELECT $1,$2,$3,$4,$5,$6::timestamptz WHERE $6::timestamptz>clock_timestamp() ON CONFLICT DO NOTHING`, [approval.approvalId,key.conversationId,key.requestId,key.token,threadId,expiresAt]);
+      SELECT $1,$2,$3,$4,$5,$6::timestamptz WHERE $6::timestamptz>clock_timestamp() ON CONFLICT DO NOTHING`, [approval.approvalId,key.conversationId,key.requestId,key.token,threadId,liveDeadline]);
     // A new HTTP request must never acquire the original native callback.
     if (!inserted.rowCount) throw new MemberStoreError("conflict");
     return approval;

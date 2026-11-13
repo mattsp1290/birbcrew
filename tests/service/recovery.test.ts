@@ -16,6 +16,7 @@ import {RoutineApi,RoutineDispatcher} from '../../src/service/routines.ts';
 import {ApprovalStore} from '../../src/service/approvals.ts';
 import {revokeGrant} from '../../src/service/grants.ts';
 import {conversationContext,MemoryApi} from '../../src/service/memories.ts';
+import {HandoffApi} from '../../src/service/handoffs.ts';
 import {recordSegmentUsage,UsageApi} from '../../src/service/usage.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
@@ -173,6 +174,11 @@ test('real PostgreSQL archive restores mappings, checkpoint, committed replay an
  assert.deepEqual(audit.map(row=>row.event_type),['member.spawned','conversation.opened','request.finished']);
  assert.deepEqual((await restored.query('SELECT * FROM birbcrew_ts.audit_events ORDER BY event_id')).rows,audit);
  assert.deepEqual((await readAudit(restored,'owner',auditQuerySchema.parse({}))).events.map(event=>event.eventId),audit.map(row=>row.event_id));
+ // Filtered reads return the same rows from the restored copy, which pg_restore gives the same indexes.
+ const filtered=auditQuerySchema.parse({memberId:member.memberId.toUpperCase(),eventType:'conversation.opened,request.finished',from:'2000-01-01T00:00:00Z'});
+ assert.deepEqual((await readAudit(restored,'owner',filtered)).events.map(event=>event.eventId),audit.filter(row=>row.event_type!=='member.spawned').map(row=>row.event_id));
+ const indexes="SELECT indexdef FROM pg_indexes WHERE schemaname='birbcrew_ts' AND tablename='audit_events' ORDER BY indexname";
+ assert.deepEqual((await restored.query(indexes)).rows,(await t.pool.query(indexes)).rows);
  await assert.rejects(restored.query('DELETE FROM birbcrew_ts.audit_events'),{code:'23514'});
  await assert.rejects(t.recovery.resume(t.hooks),/fenced/);
  const manifest=await readRecoveryManifest(relocated);
@@ -375,6 +381,35 @@ test('a restored installation revokes every standing grant as it resumes; a held
  assert.equal((await call(new MemberStore(restored),restored)).grantId,undefined);
 });
 
+test('a card keeps its absolute deadline across a restore, and past it only the restored installation settles it, once',async context=>{
+ const t=await setup(context);
+ const ownerId='owner';const {memberId}=await t.store.spawn({ownerId,requestId:randomUUID(),engine:'pi',profile:'fixture'});
+ const key={ownerId,conversationId:randomUUID(),requestId:randomUUID()};
+ await t.store.openConversation({ownerId,memberId,conversationId:key.conversationId});
+ const request={...key,text:'record at the recovery point',approvalDeadlineSeconds:60};
+ await t.store.recordAcceptance(request,ownerInitiator);
+ const start=await t.store.beginTurn(request);assert.equal(start.kind,'start');if(start.kind!=='start') return;
+ const card=await new ApprovalStore(t.pool).propose({...key,memberId,token:start.token,invocationId:key.requestId,nativeCallId:'call',
+  toolName:'record_work_item',arguments:{operation_id:key.requestId}});
+ assert.ok(card.expiresAt);
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);
+ const restored=await restoreBundle(t);const recovery=new InstallationRecovery(restored,t.fence);
+ await recovery.acceptRestore(t.bundle,pins,randomUUID());
+ await recovery.resume(t.hooks,manifest);
+ const {rows:[row]}=await restored.query('SELECT expires_at,expired_at FROM birbcrew_ts.deferred_calls WHERE approval_id=$1',[card.approvalId]);
+ assert.deepEqual([row.expires_at.toISOString(),row.expired_at],[card.expiresAt,null],'the deadline is a time, not a duration restarted by the restore');
+ // The deadline passed while the installation was held and restored.
+ await restored.query('UPDATE birbcrew_ts.deferred_calls SET expires_at=clock_timestamp() WHERE approval_id=$1',[card.approvalId]);
+ const ledger=new ApprovalStore(restored);
+ await assert.rejects(ledger.decide({...key,memberId,invocationId:key.requestId,nativeCallId:'call',approvalId:card.approvalId,
+  argumentDigest:card.argumentDigest,version:card.version,choice:'approve'}),{code:'conflict'});
+ assert.deepEqual(await Promise.all([ledger.expireTurn(card),ledger.expireTurn(card)]),[{kind:'expired'},{kind:'expired'}]);
+ assert.equal((await restored.query("SELECT count(*)::integer AS n FROM birbcrew_ts.audit_events WHERE event_type='approval.expired'")).rows[0].n,1);
+ // The held source writes nothing.
+ await assert.rejects(new ApprovalStore(t.pool).expireTurn(card),{code:'55000'});
+});
+
 test('capture accepts the memory tables, and a held installation refuses every memory write',async context=>{
  const t=await setup(context);
  const {memberId}=await spawn(t.store);const api=new MemoryApi(t.store);
@@ -393,6 +428,38 @@ test('capture accepts the memory tables, and a held installation refuses every m
  assert.deepEqual(await api.get('owner',kept.memoryId),kept,'reads still work');
  await t.recovery.resume(t.hooks);
  assert.equal((await api.delete('owner',kept.memoryId)).state,'deleted');
+});
+
+test('capture accepts the handoff table, and a held installation refuses every handoff write',async context=>{
+ const t=await setup(context);
+ const {memberId}=await spawn(t.store);
+ const members={async open(input:Parameters<MemberStore['openConversation']>[0]){return t.store.openConversation(input);},
+  async accept(input:TurnRequest){await t.store.recordAcceptance(input,ownerInitiator);return {requestId:input.requestId};}} as unknown as MemberClient;
+ const api=new HandoffApi(t.store,members);
+ async function committed() {
+  const conversationId=randomUUID(),requestId=randomUUID(),text='remember '+requestId;
+  await t.store.openConversation({ownerId:'owner',memberId,conversationId});
+  await t.store.recordAcceptance({ownerId:'owner',conversationId,requestId,text},ownerInitiator);
+  const start=await t.store.beginTurn({ownerId:'owner',conversationId,requestId,text});
+  assert.equal(start.kind,'start');if(start.kind!=='start') throw new Error('unreachable');
+  await t.store.commitTurn({ownerId:'owner',conversationId,requestId,token:start.token,reply:'stored',checkpoint:{version:1,engine:'pi',state:{}}});
+  return conversationId;
+ }
+ const [handed,held]=[await committed(),await committed()];
+ const kept=await api.create('owner',handed,{requestId:randomUUID(),memberId});
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);
+ assert.equal(manifest.inventory.conversation_handoffs,1);
+ for(const write of [()=>api.create('owner',held,{requestId:randomUUID(),memberId}),
+  ()=>t.pool.query(`INSERT INTO birbcrew_ts.conversation_handoffs (owner_id,request_id,source_conversation_id,source_member_id,
+    target_conversation_id,target_member_id,transcript,transcript_digest,carried_turns,omitted_turns,uncertain_turns)
+    SELECT owner_id,$1,$2,source_member_id,target_conversation_id,target_member_id,transcript,transcript_digest,1,0,0
+    FROM birbcrew_ts.conversation_handoffs`,[randomUUID(),held])]) {
+  await assert.rejects(write(),{code:'55000'});
+ }
+ assert.equal((await api.read('owner',handed)).outgoing?.handoffId,kept.handoffId,'reads still work');
+ await t.recovery.resume(t.hooks);
+ assert.equal((await api.create('owner',held,{requestId:randomUUID(),memberId})).carriedTurns,1);
 });
 
 test('a restored installation suspends every active memory as it resumes; a held source keeps its own',async context=>{
@@ -484,6 +551,37 @@ test('capture accepts the usage tables; a restore rewinds the ledger and budgets
  await restoredStore.openConversation({ownerId:'owner',conversationId:refused.conversationId,memberId});
  await restoredStore.recordAcceptance(refused,ownerInitiator);
  await assert.rejects(restored.query('DELETE FROM birbcrew_ts.usage_ledger'),{code:'23514'});
+});
+
+test('capture counts member instructions, a held installation refuses them, and a restore keeps them as they were',async context=>{
+ const t=await setup(context);
+ const role='You review database migrations and never propose schema changes yourself.';
+ const member=await t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture',instructions:role});
+ const conversation=await t.store.openConversation({ownerId:'owner',memberId:member.memberId,conversationId:randomUUID()});
+ const launched=await conversationContext(t.pool,conversation);
+ assert.match(launched!,/never propose schema changes/);
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);
+ assert.equal(manifest.inventory.member_instructions,1);
+ for(const write of [()=>t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture',instructions:'held'}),
+  ()=>t.pool.query(`INSERT INTO birbcrew_ts.member_instructions(owner_id,member_id,body) VALUES('owner',$1,'direct')`,[member.memberId])]) {
+  await assert.rejects(write(),{code:'55000'});
+ }
+ assert.deepEqual((await t.pool.query('SELECT body FROM birbcrew_ts.member_instructions')).rows,[{body:role}],'reads still work');
+ await t.recovery.resume(t.hooks);
+ // A member spawned after the recovery point is gone after the restore, its instructions with it.
+ const later=await t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture',instructions:'after the recovery point'});
+ await t.recovery.holdForRestore(manifest.generation,t.hooks);
+ const restored=await restoreBundle(t);const recovery=new InstallationRecovery(restored,t.fence);
+ await recovery.acceptRestore(t.bundle,pins,randomUUID());
+ await recovery.resume(t.hooks,manifest);
+ const rows=async(pool:Pool)=>(await pool.query('SELECT member_id,body FROM birbcrew_ts.member_instructions ORDER BY created_at')).rows;
+ assert.deepEqual(await rows(restored),[{member_id:member.memberId,body:role}],'the restore neither suspends nor removes them');
+ assert.equal(await conversationContext(restored,conversation),launched,'a restored conversation launches with the text it had');
+ assert.deepEqual((await restored.query(`SELECT event_type FROM birbcrew_ts.audit_events WHERE event_type LIKE 'member.instructions%'`)).rows,
+  [{event_type:'member.instructions_set'}],'the resume records nothing about instructions');
+ assert.deepEqual((await rows(t.pool)).map(row=>row.member_id),[member.memberId,later.memberId]);
+ await assert.rejects(restored.query('UPDATE birbcrew_ts.member_instructions SET body=$1',['changed']),{code:'23514'});
 });
 
 test('a restore past the fence epoch, its epoch file missing or behind, starts above every ID the restored identity drew',async context=>{

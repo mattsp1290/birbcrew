@@ -6,11 +6,13 @@
 -- native_launches for the new foreign keys; ACCESS EXCLUSIVE on audit_events to replace its type
 -- CHECK (dropped and re-added NOT VALID, so no row is scanned) and to build two empty partial
 -- unique indexes, which read audit_events once; ACCESS EXCLUSIVE on routine_firings to replace
--- its reason CHECK the same way. As in 025 they are taken together with NOWAIT and retried, so
--- the migration never waits in a lock queue and never joins a deadlock. A native turn's
--- admission transaction holds ACCESS SHARE and ROW SHARE (FOR SHARE) only, which these modes
--- allow, so a running turn never delays it. After 60 s without the locks it fails with 55P03
--- and applies nothing.
+-- its reason CHECK the same way. As in 025 to 030 they are taken together with NOWAIT and
+-- retried, so the migration never waits in a lock queue and never joins a deadlock. Applied
+-- alone, from version 30, it holds nothing while it retries; applied with earlier migrations in
+-- one transaction it retries while holding their locks, and admissions and audited writes wait.
+-- A native turn's admission transaction holds ACCESS SHARE and ROW SHARE (FOR SHARE) only, which
+-- these modes allow, so a running turn never delays it. After 60 s without the locks it fails
+-- with 55P03 and applies nothing.
 DO $$
 DECLARE deadline timestamptz := clock_timestamp() + interval '60 seconds';
 BEGIN
@@ -117,24 +119,22 @@ CREATE TRIGGER recovery_write_barrier BEFORE INSERT OR UPDATE OR DELETE OR TRUNC
     FOR EACH STATEMENT EXECUTE FUNCTION birbcrew_ts.require_active_installation();
 
 -- A routine firing refused by its member's budget fails with its own reason, which counts toward
--- the consecutive-failure switch-off like any failure. 025 left this CHECK unnamed, so PostgreSQL
--- named it routine_firings_check4; a sibling migration may already have renamed it
--- routine_firings_reason_check, the name it gets here. Like the type CHECK below, it replaces the
--- whole predicate: when stacking, copy in every reason the migrations before this one added.
+-- the consecutive-failure switch-off like any failure. This replaces 028's constraint, so it
+-- repeats every reason 028 lists. Keep it in step with skipReasons and failReasons in
+-- src/service/routines.ts.
 ALTER TABLE birbcrew_ts.routine_firings
-    DROP CONSTRAINT IF EXISTS routine_firings_check4,
-    DROP CONSTRAINT IF EXISTS routine_firings_reason_check,
+    DROP CONSTRAINT routine_firings_reason_check,
     ADD CONSTRAINT routine_firings_reason_check CHECK ((CASE status
         WHEN 'skipped' THEN reason IN ('missed', 'overlap', 'owner_unavailable')
-        WHEN 'failed' THEN reason IN ('rejected', 'approval_required', 'turn_failed', 'turn_cancelled', 'turn_uncertain', 'usage_limit')
+        WHEN 'failed' THEN reason IN ('rejected', 'approval_required', 'approval_expired', 'turn_failed', 'turn_cancelled',
+            'turn_uncertain', 'usage_limit')
         WHEN 'admitted' THEN reason IS NULL OR reason = 'approval_required'
         WHEN 'waiting' THEN reason IS NULL OR reason = 'approval_required'
         ELSE reason IS NULL END) IS TRUE) NOT VALID;
 
--- 021's recipe. This constraint replaces 026's, so it repeats every type 026 lists; when stacking,
--- copy in every type the migrations before this one added. Keep it in step with auditEvents in
--- src/service/audit.ts. A budget change belongs to a member only; a refusal names the refused
--- request, which has no admission row.
+-- 021's recipe. This constraint replaces 029's, so it repeats every type 029 lists. Keep it in
+-- step with auditEvents in src/service/audit.ts. A budget change belongs to a member only; a
+-- refusal names the refused request, which has no admission row.
 ALTER TABLE birbcrew_ts.audit_events
     DROP CONSTRAINT audit_events_type_check,
     ADD CONSTRAINT audit_events_type_check CHECK (
@@ -162,6 +162,13 @@ ALTER TABLE birbcrew_ts.audit_events
         OR (event_type IN ('memory.created', 'memory.deleted', 'memory.suspended')
             AND conversation_id IS NULL AND request_id IS NULL
             AND (jsonb_typeof(payload->'memoryId') = 'string') IS TRUE)
+        OR (event_type = 'conversation.handed_off' AND conversation_id IS NOT NULL AND request_id IS NULL
+            AND (jsonb_typeof(payload->'handoffId') = 'string') IS TRUE)
+        OR (event_type = 'approval.expired' AND request_id IS NOT NULL
+            AND (jsonb_typeof(payload->'approvalId') = 'string') IS TRUE)
+        OR (event_type = 'member.instructions_set' AND conversation_id IS NULL AND request_id IS NULL
+            AND (jsonb_typeof(payload->'digest') = 'string') IS TRUE
+            AND (jsonb_typeof(payload->'bytes') = 'number') IS TRUE)
         OR (event_type IN ('usage.budget_set', 'usage.budget_cleared')
             AND conversation_id IS NULL AND request_id IS NULL
             AND (jsonb_typeof(payload->'revision') = 'number') IS TRUE)

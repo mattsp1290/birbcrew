@@ -1,4 +1,5 @@
 import { appendFile } from "node:fs/promises";
+import { handoffAcknowledgement } from "../handoff.mts";
 import { streamGate, waitForGate } from "../stream-gate.mts";
 import { once } from "node:events";
 import { createServer, type ServerResponse } from "node:http";
@@ -101,6 +102,7 @@ export async function startProvider(onFailure = () => {},
       } else {
         let text: string;
         if (output) text = "settled " + JSON.stringify(output.output);
+        else if (handoffAcknowledgement(prompt)) text = handoffAcknowledgement(prompt)!;
         else if (prompt?.startsWith("remember ")) text = "stored " + memory;
         else if (prompt === "recall") text = "recalled " + (memory ?? "none");
         else if (prompt === "wait") text = "waiting";

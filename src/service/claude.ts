@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
+import { turnTextBytes } from "./domain.ts";
 import { segmentUsage } from "./usage-capture.ts";
 
 const call = z.strictObject({ id: z.string().min(1).max(256), name: z.string(), input: z.record(z.string(), z.json()) });
@@ -33,7 +34,7 @@ export const claudeCheckpoint = z.strictObject({
 export const claudeCommand = z.strictObject({
   threadId: z.uuid(),
   runId: z.uuid(),
-  text: z.string().min(1).max(16_384),
+  text: z.string().min(1).refine(text => Buffer.byteLength(text) <= turnTextBytes),
   model: z.string().min(1),
   checkpoint: claudeCheckpoint.nullable(),
   projectContext: z.string().max(262_144).optional(),
