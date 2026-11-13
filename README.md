@@ -135,3 +135,9 @@ verbatim transcript of the source's newest committed turns, up to 64 KiB, as a u
 message quoted as data; tool calls, approvals and native state do not cross. The owner
 continues in the target. Model replies from the source reach the target at user rank, so
 hand off only conversations whose replies you would paste into a prompt yourself.
+
+An owner can give a member [instructions](docs/member-instructions.md) when they spawn
+it: up to 16,384 bytes describing its role. They are fixed for the life of the member,
+come before project notes and memory in every native launch of its conversations, and
+never change its tools, approvals or limits. Only the owner reads the text back, through
+`/v1/members/{memberId}/instructions`; listings and the audit trail carry its digest.

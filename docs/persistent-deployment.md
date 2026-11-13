@@ -197,6 +197,10 @@ previous-release workflow worker never expires a card that has a deadline, while
 database refuses a decision past it, so stopping the previous release first is required
 for it too; rolling back once a request with a deadline was accepted is unsupported (see
 [approval expiry](approval-expiry.md#upgrade-in-flight-workflows-and-recovery)).
+Migration 29 (member instructions) does the same for `members` and `audit_events`.
+After 27 in one transaction it already holds both; from version 27 it retries for
+`members` while holding 28's locks, and a spawn of the previous release still in flight
+makes it fail after the 60 s (see [member instructions](member-instructions.md#upgrade)).
 
 A Kubernetes Deployment's default `RollingUpdate` strategy starts new pods while
 old ones still run, which is exactly what this forbids. Scale every Deployment

@@ -506,6 +506,37 @@ test('a restored installation suspends every active memory as it resumes; a held
  assert.deepEqual((await states(t.pool)).map(row=>row.state),['deleted','active']);
 });
 
+test('capture counts member instructions, a held installation refuses them, and a restore keeps them as they were',async context=>{
+ const t=await setup(context);
+ const role='You review database migrations and never propose schema changes yourself.';
+ const member=await t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture',instructions:role});
+ const conversation=await t.store.openConversation({ownerId:'owner',memberId:member.memberId,conversationId:randomUUID()});
+ const launched=await conversationContext(t.pool,conversation);
+ assert.match(launched!,/never propose schema changes/);
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);
+ assert.equal(manifest.inventory.member_instructions,1);
+ for(const write of [()=>t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture',instructions:'held'}),
+  ()=>t.pool.query(`INSERT INTO birbcrew_ts.member_instructions(owner_id,member_id,body) VALUES('owner',$1,'direct')`,[member.memberId])]) {
+  await assert.rejects(write(),{code:'55000'});
+ }
+ assert.deepEqual((await t.pool.query('SELECT body FROM birbcrew_ts.member_instructions')).rows,[{body:role}],'reads still work');
+ await t.recovery.resume(t.hooks);
+ // A member spawned after the recovery point is gone after the restore, its instructions with it.
+ const later=await t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture',instructions:'after the recovery point'});
+ await t.recovery.holdForRestore(manifest.generation,t.hooks);
+ const restored=await restoreBundle(t);const recovery=new InstallationRecovery(restored,t.fence);
+ await recovery.acceptRestore(t.bundle,pins,randomUUID());
+ await recovery.resume(t.hooks,manifest);
+ const rows=async(pool:Pool)=>(await pool.query('SELECT member_id,body FROM birbcrew_ts.member_instructions ORDER BY created_at')).rows;
+ assert.deepEqual(await rows(restored),[{member_id:member.memberId,body:role}],'the restore neither suspends nor removes them');
+ assert.equal(await conversationContext(restored,conversation),launched,'a restored conversation launches with the text it had');
+ assert.deepEqual((await restored.query(`SELECT event_type FROM birbcrew_ts.audit_events WHERE event_type LIKE 'member.instructions%'`)).rows,
+  [{event_type:'member.instructions_set'}],'the resume records nothing about instructions');
+ assert.deepEqual((await rows(t.pool)).map(row=>row.member_id),[member.memberId,later.memberId]);
+ await assert.rejects(restored.query('UPDATE birbcrew_ts.member_instructions SET body=$1',['changed']),{code:'23514'});
+});
+
 test('a restore past the fence epoch, its epoch file missing or behind, starts above every ID the restored identity drew',async context=>{
  for(const {drawn,stale,epoch} of [
   // The identity was last set by an acceptance at epoch 5 and has drawn nothing since: only the committed rows show epoch 3.

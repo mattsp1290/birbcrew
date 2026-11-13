@@ -8,6 +8,7 @@ import { grantListLimit } from "./grants.ts";
 import { handoffCapabilities } from "./handoffs.ts";
 import { conversationTurnLimit, workflowGenerationTurnLimit } from "./limits.ts";
 import { memoryCapabilities } from "./memories.ts";
+import { instructionsCapabilities, instructionsSummarySql, type InstructionsSummary } from "./instructions.ts";
 import { routineCapabilities } from "./routines.ts";
 import type { MemberStore } from "./store.ts";
 
@@ -45,6 +46,7 @@ export const integrationCapabilities = {
     outcome: "request-cancelled", auditEvent: "approval.expired", firingReason: "approval_expired",
     codex: "earlier-of-live-and-request-deadline", piChildCards: "not-covered",
   },
+  memberInstructions: instructionsCapabilities,
 } as const;
 
 type Listing = "member" | "conversation";
@@ -188,12 +190,16 @@ export class IntegrationApi {
   /** Owner-scoped keyset page in identifier order; backed by members UNIQUE (owner_id, member_id). */
   async listMembers(ownerId: string, query: unknown) {
     const { limit, after } = memberListQuery.parse(query);
-    const { rows } = await this.store.pool.query<{ memberId: string; engine: Engine; profile: string }>(
-      `SELECT member_id AS "memberId",engine,profile FROM birbcrew_ts.members
-       WHERE owner_id=$1 AND ($2::uuid IS NULL OR member_id>$2) ORDER BY member_id LIMIT $3`,
+    const { rows } = await this.store.pool.query<{ memberId: string; engine: Engine; profile: string; instructions: InstructionsSummary | null }>(
+      `SELECT m.member_id AS "memberId",m.engine,m.profile,
+         CASE WHEN i.member_id IS NOT NULL THEN ${instructionsSummarySql} END AS instructions
+       FROM birbcrew_ts.members m LEFT JOIN birbcrew_ts.member_instructions i ON i.owner_id=m.owner_id AND i.member_id=m.member_id
+       WHERE m.owner_id=$1 AND ($2::uuid IS NULL OR m.member_id>$2) ORDER BY m.member_id LIMIT $3`,
       [ownerId, after ?? null, limit + 1]);
     const { items, next } = page("member", rows, limit, row => row.memberId);
-    return { apiVersion: "1" as const, members: items, next };
+    // Never the text: only GET /v1/members/{memberId}/instructions returns it.
+    const members = items.map(({ instructions, ...member }) => instructions ? { ...member, instructions } : member);
+    return { apiVersion: "1" as const, members, next };
   }
 
   /**

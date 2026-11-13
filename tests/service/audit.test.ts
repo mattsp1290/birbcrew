@@ -430,6 +430,7 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
         toolName: "choose_next_step", expiresAt: "2031-01-01T00:01:00.000Z" } },
       "conversation.handed_off": { conversationId, payload: { handoffId: randomUUID(), targetConversationId: randomUUID(),
         targetMemberId: randomUUID(), firstRequestId: randomUUID(), carriedTurns: 1, omittedTurns: 0, uncertainTurns: 0, transcriptDigest: digest } },
+      "member.instructions_set": { payload: { digest, bytes: 1 } },
     };
     for (const type of auditEventTypes) {
       const fact = { type, ownerId, memberId, ...samples[type] } as AuditFact<typeof type>;

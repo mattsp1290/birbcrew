@@ -19,7 +19,8 @@ initiator kinds, the grants route and the inactive-list limit), `memories` (the
 member memory route, limits, injection and deletion semantics per engine), `handoffs`
 (the conversation handoff routes, delivery and transcript and prompt limits),
 `approvalExpiry` (the deadline field, its bounds and the fields that report an
-expiry), health dependencies and listing limits. Additive
+expiry), `memberInstructions` (the spawn field, the read route, limits, order and
+restore), health dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
@@ -27,7 +28,7 @@ proof of the operator's provider access or configured profile availability.
 
 | Route | Purpose |
 | --- | --- |
-| `POST /v1/members` | Existing member creation contract (`requestId`, `engine`, `profile`) |
+| `POST /v1/members` | Existing member creation contract (`requestId`, `engine`, `profile`), plus optional `instructions` |
 | `POST /v1/conversations` | Open an owned conversation (`conversationId`, `memberId`) |
 | `POST /v1/conversations/{conversationId}/requests` | Submit `{ "requestId": "UUID", "text": "exact input" }`, optionally with `approvalDeadlineSeconds` |
 | `GET /v1/conversations/{conversationId}/requests/{requestId}` | Reconcile status and original committed result; never invokes inference |
@@ -48,6 +49,7 @@ proof of the operator's provider access or configured profile availability.
 | `GET`/`DELETE /v1/memories/{memoryId}` | Read one entry, or erase its text and keep a tombstone |
 | `POST /v1/conversations/{conversationId}/handoffs` | Hand the conversation to another member (`requestId`, `memberId`): seal it and open a target whose first request carries its transcript |
 | `GET /v1/conversations/{conversationId}/handoff` | The handoff that created or sealed this conversation; never its transcript |
+| `GET /v1/members/{memberId}/instructions` | The member's instructions, or `null` |
 
 Authentication is required even for capabilities and health. There is no
 unauthenticated route. A request without a valid token gets `401` before the gateway
@@ -126,6 +128,9 @@ rows:
 ```json
 { "apiVersion": "1", "members": [{ "memberId": "UUID", "engine": "pi", "profile": "name" }], "next": "opaque" }
 ```
+
+A member spawned with instructions also carries `"instructions": { "bytes": 73, "digest": "sha256 hex" }`,
+never the text.
 
 ```json
 {
@@ -410,7 +415,8 @@ later never reach it. Only the owner writes memory; the model cannot. A create i
 idempotent by `requestId`; a replay of a deleted entry fails `409 memory_deleted`,
 and a 33rd active entry `409 memory_limit`. `POST /v1/conversations` also fails
 `409 memory_limit` when the conversation's project notes fit what the member's engine
-can be given but notes and entries together do not; nothing is opened. Deleting an
+can be given but notes and entries together do not, counting any member instructions
+with the notes; nothing is opened. Deleting an
 entry erases its text and keeps a tombstone. A deletion reaches every later launch on
 Pi with Crew's Pi models. Codex replays the context its rollout recorded on a
 conversation's first turn, and Claude's SDK may resend the prompt it recorded then, so
@@ -432,6 +438,24 @@ reserved one (`409 handoff_pending`). Every other request keeps the 16 KiB limit
 POST with the same `requestId`: it returns the same handoff and submits the reserved request again
 if a failure interrupted it. A target whose workflow has closed stays unadmitted. See [conversation handoff](handoffs.md) for what is carried, the
 errors, costs and the trust boundary.
+
+## Member instructions
+
+`POST /v1/members` takes optional `instructions`: 1 to 16,384 bytes under memory's
+character rules. The route now decodes its body strictly, so bytes that are not UTF-8
+fail `400 invalid_json` with or without the field. Instructions are fixed for the life
+of the member; a spawn replay must repeat them exactly, or fails `409 conflict`. Every native launch of the member's conversations
+gets them first, before project notes and memory; Pi children and the trusted-context
+lane do not. They never change the member's tools, approvals or limits.
+`GET /v1/members/{memberId}/instructions` returns the text to its owner only; spawn
+responses, `GET /v1/members` and the `member.instructions_set` audit row carry its
+SHA-256 and byte count. `POST /v1/conversations`, and a handoff to the member, which
+opens its target the same way, fail `409 instructions_limit` when the conversation's
+project notes fit what the member's engine can be given but notes and instructions
+together do not, and `409 memory_limit` when notes and instructions fit but memory on top
+does not. A handoff adds no instructions to its transcript; a source reply that quotes
+them is carried like any other reply. A restore keeps instructions as they were. See
+[member instructions](member-instructions.md).
 
 ## Validation
 

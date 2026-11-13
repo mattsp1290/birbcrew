@@ -127,7 +127,7 @@ How much to trust each column:
 | 24 | Event triggers or goals | No | Yes | Yes | Part | Part | Yes | No | Part | Yes |
 | 25 | Follow-ups that the agent schedules | No | Yes | Part | Part | Part | Part | No | Part | Yes |
 | 26 | Memory across conversations | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| 27 | Skills or reusable instruction packs | No | Yes | Yes | Part | No | ? | Part | Yes | Yes |
+| 27 | Skills or reusable instruction packs | Part | Yes | Yes | Part | No | ? | Part | Yes | Yes |
 | 28 | Learning from past work or a demonstration | No | Yes | Yes | ? | No | Part | Yes | ? | Yes |
 | 29 | Proactive check-ins or suggestions | No | Yes | Yes | Yes | Yes | Yes | No | Yes | Yes |
 
@@ -186,12 +186,12 @@ that names a later pull request describes Crew after that pull request instead.
 | 13 | Yes | A `record_work_item` call opens an approval card. A `choose_next_step` call opens a question. See [the gateway guide](member-gateway.md). An owner can give a request or a routine an approval deadline of one minute to seven days, after which Crew cancels a Claude or Pi request whose card is still undecided and records the expiry; see [approval expiry](approval-expiry.md) (pull request #51). |
 | 14 | Yes | An owner can answer a card with `allow_conversation` or `allow_always`. A grant matches the tool, not its arguments. A grant never expires by time and never applies to a routine's request or to a handoff's first request. See [standing grants](standing-grants.md). |
 | 15 | No | Crew has no deny rule and no rule language. The eligibility of a grant is fixed in code. A routine's `fail_closed` approval policy cancels the waiting request rather than denying the call. |
-| 16 | Yes | `GET /v1/audit` returns an append-only trail of 21 event types (pull request #51 adds `approval.expired`) as JSON or CSV. The only filter is `conversationId`. Refused HTTP calls leave no row. No retention limit and no deletion route exist. See [the audit trail](audit-trail.md). |
+| 16 | Yes | `GET /v1/audit` returns an append-only trail of 22 event types (pull request #51 adds `approval.expired`, and pull request #48 adds `member.instructions_set`) as JSON or CSV. The only filter is `conversationId`. Refused HTTP calls leave no row. No retention limit and no deletion route exist. See [the audit trail](audit-trail.md). |
 | 17 | Yes | Each request admission records an initiator of kind `owner`, `routine`, or `handoff`. The audit trail copies the initiator from the admission. |
 | 18 | No | Grant matching runs only inside the transaction that records a call. |
 | 19 | No | Members have no computer. |
 | 20 | No | Provider keys come from environment variables, operator-provided private files, the operator's Codex login, or an operator credential command for proxy profiles. Crew has no credential store and encrypts none of them. Native transcripts are plain text in the state directory. |
-| 21 | Part | Clients cannot supply tools, context, or instructions. Crew injects project notes and member memory under a header that labels them as reference data. Crew has no injection classifier. It checks tool arguments only against strict schemas and binds `operation_id` to the request; it does not inspect free text such as the `note` of a work item. A handoff passes the source's replies to the target inside a user message, which [the handoff guide](handoffs.md) says is not a security boundary. |
+| 21 | Part | Clients cannot supply tools or context. An owner can set a member's instructions once, at spawn (pull request #48); they reach the model as instructions, not as reference data. Crew injects project notes and member memory under a header that labels them as reference data. Crew has no injection classifier. It checks tool arguments only against strict schemas and binds `operation_id` to the request; it does not inspect free text such as the `note` of a work item. A handoff passes the source's replies to the target inside a user message, which [the handoff guide](handoffs.md) says is not a security boundary. |
 | 22 | Part | A Landlock and seccomp launcher confines the Claude and Codex native processes. Pi does not use the launcher: it runs unconfined in a Node runner process that the worker's supervisor forks each time a turn runs or resumes. See [verification](verification.md). |
 
 ### Work over time
@@ -202,7 +202,7 @@ that names a later pull request describes Crew after that pull request instead.
 | 24 | No | No webhook, repository, or email event starts a request. |
 | 25 | No | A member has no tool that schedules a later turn. Only an owner creates a routine. |
 | 26 | Yes | An owner saves at most 32 entries of at most 1,024 bytes for each member. A conversation takes a snapshot of the entries when it opens. The model cannot write memory, and Crew has no search over memory. See [member memory](memories.md). |
-| 27 | No | Pi loads no skills and no prompt templates, and no extensions other than Crew's own inline ones. Claude loads no plugins and no setting sources. Codex runs with plugins off and refuses ambient configuration files. The instruction text of a member is fixed. |
+| 27 | Part | An owner can give a member instructions of at most 16,384 bytes at spawn (pull request #48). They are fixed for the life of the member, reach every native launch of its conversations before project notes and memory, and never change its tools, approvals, or limits. Crew still has no skills and no reusable instruction packs: Pi loads no skills and no prompt templates, and no extensions other than Crew's own inline ones. Claude loads no plugins and no setting sources. Codex runs with plugins off and refuses ambient configuration files. See [member instructions](member-instructions.md). |
 | 28 | No | Crew does not learn from finished conversations. |
 | 29 | No | A member acts only on an owner request, a handoff's first request, a routine firing, or a trusted application's request. |
 

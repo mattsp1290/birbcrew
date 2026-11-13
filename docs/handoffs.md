@@ -22,8 +22,10 @@ this in one PostgreSQL transaction:
    [What crosses](#what-crosses)).
 4. Opens the target exactly as `POST /v1/conversations` would for that member, with a
    UUID the server draws: the project-notes capture, the
-   [member memory](memories.md) snapshot, the `409 memory_limit` refusal and the
-   `conversation.opened` audit row.
+   [member memory](memories.md) snapshot, the `409 memory_limit` and
+   `409 instructions_limit` refusals and the `conversation.opened` audit row. Every
+   launch of the target gets its member's [instructions](member-instructions.md), as any
+   conversation of that member does.
 5. Inserts an immutable `conversation_handoffs` row: the source, the target, the
    client's `requestId`, a server-reserved `firstRequestId`, the transcript, its
    SHA-256 digest and the turn counts. The row seals the source.
@@ -107,7 +109,8 @@ target's first user message in its snapshot, and the reserved request's receipt 
 | `409` | `handoff_too_large` | the source's newest committed turn alone does not fit the transcript budget |
 | `409` | `trusted_conversation` | the source is attached to the [trusted-context lane](trusted-application-context.md) |
 | `409` | `history_unavailable` | the source predates the public event ledger, or a committed prompt does not match its turn's digest |
-| `409` | `memory_limit` | the target member's notes and memory would not fit its engine, as for any open |
+| `409` | `memory_limit` | the project notes and the target member's instructions fit its engine but not with its memory, as for any open |
+| `409` | `instructions_limit` | the project notes fit the target member's engine but not with its instructions, as for any open |
 | `409` | `conflict` | the `requestId` was used with another source or member; on the target's request routes, the reserved request's ID sent with other text or with an approval deadline |
 | `409` | `handoff_pending` | on the target's request routes: its reserved request is not admitted yet |
 | `409` | `update_rejected` | after the commit: the target's workflow refused the reserved request's update, as a previous-release worker does with one over 16 KiB (see [Upgrade](#upgrade)); a retry with the same `requestId` succeeds only once that cause is removed |
@@ -158,7 +161,8 @@ BirbCrew conversation handoff v1. The owner moved an earlier conversation with a
 
 Not carried: tool calls and their arguments, approvals and decisions, work items and
 receipts, Pi child tasks and outputs, native sessions and checkpoints, the source's
-project notes and memory (the target gets its own member's), standing grants, uncertain
+instructions, project notes and memory (the target gets its own member's, as system
+context, never in the transcript), standing grants, uncertain
 turns, turns left out to fit, and the prompts of earlier handoff turns.
 
 ## The reserved first request
@@ -235,7 +239,7 @@ Every engine gets the prompt outside its command line, so one budget fits every 
 
 | Engine | How the prompt arrives |
 | --- | --- |
-| Codex | The Codex SDK starts `codex exec --experimental-json` with only flags and `--config` overrides as arguments and writes the prompt to its stdin (`@openai/codex-sdk` 0.167.1, `dist/index.js`). The native launcher closes only descriptors 3 and above, so stdin reaches Codex. The 131,072-byte argument limit applies to `developer_instructions` (notes and memory), not to the prompt |
+| Codex | The Codex SDK starts `codex exec --experimental-json` with only flags and `--config` overrides as arguments and writes the prompt to its stdin (`@openai/codex-sdk` 0.167.1, `dist/index.js`). The native launcher closes only descriptors 3 and above, so stdin reaches Codex. The 131,072-byte argument limit applies to `developer_instructions` (member instructions, notes and memory), not to the prompt |
 | Claude | IPC to the Claude worker, then the Claude Agent SDK writes it to the Claude CLI's stdin (`--input-format stream-json`) |
 | Pi | In process |
 

@@ -14,11 +14,24 @@ function boundedText(bytes: number) {
   );
 }
 
+// \p{Cc} is C0, DEL and C1. Tab and newline are the only control characters owner text may hold.
+const disallowedControl = /(?![\t\n])\p{Cc}/u;
+/** Text an owner writes for a model to read: member memory (memories.ts) and member instructions. */
+export function ownerText(bytes: number) {
+  return z.string().min(1).refine(text => text.isWellFormed() && !disallowedControl.test(text) && Buffer.byteLength(text) <= bytes,
+    { message: `Expected well-formed UTF-8 text of at most ${bytes} bytes without control characters other than tab and newline` });
+}
+/** The most UTF-8 bytes of member instructions (docs/member-instructions.md); the body CHECK in
+ * 029-member-instructions.sql repeats it. */
+export const instructionsBytes = 16_384;
+
 const uuid = z.uuid().transform((value) => value.toLowerCase());
 const ownerId = boundedText(256);
 const profile = boundedText(128);
 
-export const spawnSchema = z.strictObject({ ownerId, requestId: uuid, engine: engineSchema, profile });
+export const spawnSchema = z.strictObject({
+  ownerId, requestId: uuid, engine: engineSchema, profile, instructions: ownerText(instructionsBytes).optional(),
+});
 export const conversationKey = z.strictObject({ ownerId, conversationId: uuid });
 export const openSchema = conversationKey.extend({ memberId: uuid });
 export const turnKey = conversationKey.extend({ requestId: uuid });
@@ -94,7 +107,7 @@ export type BeginTurn =
 
 export class MemberStoreError extends Error {
   readonly code: "not_found" | "conflict" | "busy" | "stale" | "input_limit" | "history_unavailable" | "request_rejected"
-    | "routine_limit" | "routine_deleted" | "memory_limit" | "memory_deleted"
+    | "routine_limit" | "routine_deleted" | "memory_limit" | "memory_deleted" | "instructions_limit"
     | "handed_off" | "handoff_pending" | "handoff_empty" | "handoff_too_large" | "trusted_conversation";
 
   constructor(code: MemberStoreError["code"]) {
