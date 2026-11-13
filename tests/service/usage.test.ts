@@ -9,7 +9,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { ActivityFailure, ApplicationFailure, WorkflowUpdateFailedError, type Client } from "@temporalio/client";
 import { Pool, type PoolClient } from "pg";
 import { MemberClient } from "../../src/service/client.ts";
-import { auditEvents, auditEventTypes } from "../../src/service/audit.ts";
+import { auditEvents, auditEventTypes, auditQuerySchema, readAudit } from "../../src/service/audit.ts";
+import { ApprovalStore } from "../../src/service/approvals.ts";
 import { MemberStoreError, ownerInitiator, type Engine, type TurnRequest } from "../../src/service/domain.ts";
 import { createGateway } from "../../src/service/gateway.ts";
 import { HandoffApi } from "../../src/service/handoffs.ts";
@@ -431,6 +432,35 @@ test("a handoff meets its target's budget before it commits; its reserved reques
   assert.equal((await usage.budget(source.ownerId, target.memberId)).usedTokens, 16_120);
 });
 
+test("segments that ran before a card expired stay metered after the expiry cancels their request", async () => {
+  const owner = await member(store);
+  const usage = new UsageApi(store), approvals = new ApprovalStore(pool);
+  const conversationId = await conversation(store, owner);
+  const request = { ownerId: owner.ownerId, conversationId, requestId: randomUUID(), text: "record then wait", approvalDeadlineSeconds: 60 };
+  await store.recordAcceptance(request, ownerInitiator);
+  const execution = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
+  const turn = await store.beginTurn(request, execution);
+  assert.equal(turn.kind, "start"); if (turn.kind !== "start") return;
+  await pool.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+    VALUES ($1,$2,$3,$4,$5,1)`, [conversationId, request.requestId, turn.token, execution.workflowRunId, execution.activityId]);
+  // The proposing segment returned: the supervisor records its usage before it commits the card.
+  await recordSegmentUsage(pool, { ...request, token: turn.token, execution }, reported(400, 40));
+  const card = await approvals.propose({ ownerId: owner.ownerId, memberId: owner.memberId, conversationId, requestId: request.requestId,
+    invocationId: request.requestId, nativeCallId: "expiring-call", token: turn.token, toolName: "record_work_item",
+    arguments: { operation_id: request.requestId } });
+  assert.ok(card.expiresAt);
+  await pool.query("UPDATE birbcrew_ts.deferred_calls SET expires_at=clock_timestamp() WHERE approval_id=$1", [card.approvalId]);
+  assert.deepEqual(await approvals.expireTurn(card), { kind: "expired" });
+  // Cancelled, and nothing resumes it, but the model work it did is still the member's.
+  const records = (await usage.records(owner.ownerId, { conversationId })).records;
+  assert.deepEqual(records.map(record => [record.requestId, record.state, record.inputTokens, record.outputTokens]),
+    [[request.requestId, "reported", 400, 40]]);
+  await usage.setBudget(owner.ownerId, owner.memberId, { tokenLimit: 440 });
+  assert.deepEqual([(await usage.budget(owner.ownerId, owner.memberId)).usedTokens, (await usage.summary(owner.ownerId, {})).total.totalTokens], [440, 440]);
+  await assert.rejects(store.recordAcceptance({ ...request, requestId: randomUUID(), conversationId: await conversation(store, owner) }, ownerInitiator),
+    { code: "usage_limit" });
+});
+
 test("a routine firing refused by its member's budget fails with usage_limit and counts toward the switch-off", async (t) => {
   const db = await databaseAt(t);
   const isolated = new MemberStore(db);
@@ -472,6 +502,13 @@ test("a routine firing refused by its member's budget fails with usage_limit and
   const { rows: settled } = await db.query(`SELECT payload->>'reason' AS reason FROM birbcrew_ts.audit_events
     WHERE event_type='routine.firing_settled' ORDER BY event_id`);
   assert.deepEqual(settled.map(row => row.reason), ["usage_limit", "usage_limit"]);
+  // The audit filters find the refusals by type. A refused request has no admission, so its row
+  // names the owner as initiator and the routine only in its payload, which no filter reads.
+  const filtered = async (filters: Record<string, string>) =>
+    (await readAudit(db, owner.ownerId, auditQuerySchema.parse(filters))).events.map(event => [event.type, event.initiator.kind]);
+  assert.deepEqual(await filtered({ eventType: "usage.request_refused", actorKind: "system", initiatorKind: "owner" }),
+    [["usage.request_refused", "owner"], ["usage.request_refused", "owner"]]);
+  assert.deepEqual(await filtered({ initiatorId: routine.routineId }), []);
 });
 
 test("migration 031 takes its locks without queueing, rewrites nothing, leaves its CHECKs unvalidated and never waits for a running turn", async (t) => {
