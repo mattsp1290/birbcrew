@@ -1,0 +1,291 @@
+import assert from "node:assert/strict";
+import { execFile, spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, type AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { after, test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+import { Client, Connection } from "@temporalio/client";
+import { NativeConnection, Worker } from "@temporalio/worker";
+import { Pool } from "pg";
+import { expiryActivity, memberActivities } from "../../src/service/activities.ts";
+import { ChildStore, type ChildKey } from "../../src/service/children.ts";
+import type { ChildTarget } from "../../src/service/child-target.ts";
+import { MemberClient } from "../../src/service/client.ts";
+import { answerLive, cancelLive } from "../../src/service/codex-calls.ts";
+import { registerProfiles } from "../../src/service/deployment.ts";
+import { createGateway } from "../../src/service/gateway.ts";
+import type { MemberProfile } from "../../src/service/profiles.ts";
+import { progressActivity } from "../../src/service/progress-activity.ts";
+import { activityQueue, memberTaskQueue } from "../../src/service/queues.ts";
+import { MemberStore, ownerAdmissionActivity } from "../../src/service/store.ts";
+import { startSupervisor } from "../../src/service/supervisor.ts";
+
+// Child targets against a real Temporal server, Crew's worker activities, its supervisor and the Pi
+// fixture provider (no inference): where a targeted child runs, what a workflow worker from before
+// targets does with one, and whether histories that source recorded replay under this one. Needs
+// a disposable PostgreSQL database, and either BIRBCREW_TEMPORAL_ADDRESS or TEMPORAL_CLI (Temporal
+// CLI 1.10.0) to start a development server.
+const database = process.env.BIRBCREW_TEST_DATABASE_URL;
+if (!database) throw new Error("Set BIRBCREW_TEST_DATABASE_URL to a disposable PostgreSQL database");
+const directory = await mkdtemp(join(tmpdir(), "birb-child-target-"));
+const server = await temporalServer();
+process.env.BIRBCREW_TEMPORAL_ADDRESS = server.address;
+process.env.BIRBCREW_DATABASE_URL = database;
+process.env.BIRBCREW_PROOF_ENGINE = "pi";
+const logs = { parent: join(directory, "parent.jsonl"), target: join(directory, "target.jsonl") };
+process.env.BIRBCREW_PROOF_REQUESTS = logs.parent;
+const parentProfile = "fixture.crew.v1", targetProfile = "fixture.crew-target.v1";
+const target: ChildTarget = { engine: "pi", profile: targetProfile };
+const workflowsPath = fileURLToPath(new URL("../../src/service/workflow.ts", import.meta.url));
+
+// Inside the checkout, so the workflow bundle and the profile module resolve this repository's packages.
+const local = resolve(".proof", "child-target-" + randomUUID());
+await mkdir(local, { recursive: true });
+const legacyPath = join(local, "workflow.ts");
+const legacySource = await readFile(new URL("../proof/fixtures/pre-child-target-workflow.ts.txt", import.meta.url), "utf8");
+assert.ok(!legacySource.includes("target"), "the fixture is the workflow source from before child targets");
+await writeFile(legacyPath, legacySource.replaceAll('from "./', 'from "../../src/service/'));
+// The target profile runs the parent's fixture model, so the model its parent pins on a child
+// matches, and logs its own prompts.
+const config = join(local, "profiles.mts");
+await writeFile(config, `import { appendFileSync } from "node:fs";
+  import { contentText } from "@earendil-works/pi-ai";
+  import { createPiFixtureOptions } from ${JSON.stringify(new URL("../fixtures/engines/pi/index.mts", import.meta.url).href)};
+  const source = await import(${JSON.stringify(new URL("../proof/fixture-profiles.mts", import.meta.url).href)});
+  const crew = source.profiles.get(${JSON.stringify(parentProfile)});
+  const pi = await createPiFixtureOptions((context) => {
+    const last = context.messages.findLast((message) => message.role === "user");
+    if (last?.role === "user") appendFileSync(${JSON.stringify(logs.target)}, JSON.stringify({ prompt: contentText(last.content) }) + "\\n");
+  });
+  export const profiles = new Map([[${JSON.stringify(parentProfile)}, crew], [${JSON.stringify(targetProfile)}, { ...crew, pi }]]);
+  export const close = source.close;`);
+
+const pool = new Pool({ connectionString: database });
+const store = new MemberStore(pool);
+await store.migrate();
+const children = new ChildStore(pool);
+const { profiles } = await import(pathToFileURL(config).href) as { profiles: Map<string, MemberProfile> };
+const stateDir = join(directory, "native");
+await registerProfiles(pool, profiles, stateDir);
+const model = profiles.get(parentProfile)!.pi!.model.id;
+const connection = await Connection.connect({ address: server.address });
+const temporal = new Client({ connection });
+const native = await NativeConnection.connect({ address: server.address });
+const supervisor = await startSupervisor(config, stateDir);
+const engines = await Promise.all([parentProfile, targetProfile].map(async profile => {
+  const worker = await Worker.create({ connection: native, taskQueue: activityQueue("pi", profile),
+    activities: memberActivities(store, supervisor, profiles, stateDir, "pi") });
+  return { worker, done: worker.run() };
+}));
+
+const ownerId = "owner-" + randomUUID(), token = randomUUID();
+const gateway = createGateway(store, new MemberClient(store, temporal), { [createHash("sha256").update(token).digest("hex")]: ownerId });
+gateway.listen(0, "127.0.0.1");
+await once(gateway, "listening");
+const port = (gateway.address() as AddressInfo).port;
+const workflows: string[] = [];
+after(async () => {
+  const closed = once(gateway, "close");
+  gateway.close(); gateway.closeAllConnections();
+  await closed; await gateway.stopped();
+  for (const id of workflows) await temporal.workflow.getHandle(id).terminate("fixture cleanup").catch(() => {});
+  for (const { worker } of engines) worker.shutdown();
+  await Promise.all(engines.map(({ done }) => done));
+  await supervisor.close();
+  await native.close(); await connection.close(); await pool.end();
+  await server.stop();
+  await rm(local, { recursive: true, force: true });
+  await rm(directory, { recursive: true, force: true });
+});
+
+/** The Temporal server BIRBCREW_TEMPORAL_ADDRESS names, else a development server from TEMPORAL_CLI. */
+async function temporalServer() {
+  const existing = process.env.BIRBCREW_TEMPORAL_ADDRESS;
+  if (existing) return { address: existing, stop: async () => {} };
+  const cli = process.env.TEMPORAL_CLI;
+  if (!cli) throw new Error("Set BIRBCREW_TEMPORAL_ADDRESS, or TEMPORAL_CLI to start a Temporal development server");
+  const probe = createServer().listen(0, "127.0.0.1");
+  await once(probe, "listening");
+  const address = "127.0.0.1:" + (probe.address() as AddressInfo).port;
+  await new Promise(done => probe.close(done));
+  const child = spawn(cli, ["server", "start-dev", "--headless", "--port", address.split(":")[1], "--db-filename", join(directory, "temporal.db")],
+    { stdio: "ignore" });
+  const exited = once(child, "exit");
+  void exited.catch(() => {});
+  const stop = async () => { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGTERM"); await exited; } };
+  for (let attempt = 0; ; attempt++) {
+    try { await promisify(execFile)(cli, ["operator", "cluster", "health", "--address", address, "--command-timeout", "1s"]); break; }
+    catch (error) {
+      if (attempt >= 120) { await stop(); throw error; }
+      await delay(500);
+    }
+  }
+  return { address, stop };
+}
+
+/** The conversation workflow's worker, as worker.ts registers it, running the given source. */
+async function workflowWorker(path = workflowsPath) {
+  const worker = await Worker.create({ connection: native, taskQueue: memberTaskQueue, workflowsPath: path, activities: {
+    rejectUnstartedAdmission: store.rejectUnstartedAdmission.bind(store), recordAcceptance: ownerAdmissionActivity(store),
+    rejectAccepted: store.rejectAccepted.bind(store), conversationProgress: progressActivity(store),
+    cancelGenerating: store.cancelGenerating.bind(store), decideLive: answerLive.bind(null, pool), cancelLive: cancelLive.bind(null, pool),
+    reconcileTurn: store.reconcileTurn.bind(store), reconcileChild: children.reconcile.bind(children),
+    closeExitedChild: children.closeExitedChild.bind(children), quarantineDelegation: children.quarantineDelegation.bind(children),
+    expireApproval: expiryActivity(store),
+  } });
+  const done = worker.run();
+  return { async stop() { worker.shutdown(); await done; } };
+}
+
+async function until<T>(check: () => Promise<T | undefined>, label: string, timeout = 60_000): Promise<T> {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    const value = await check();
+    if (value !== undefined) return value;
+    await delay(200);
+  }
+  throw new Error("Timed out waiting for " + label);
+}
+
+async function api(path: string, body?: unknown) {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, { method: body === undefined ? "GET" : "POST",
+    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  return { status: response.status, body: await response.json() };
+}
+
+const prompts = async (log: string) => (await readFile(log, "utf8").catch(() => "")).trim().split("\n").filter(Boolean)
+  .map(line => (JSON.parse(line) as { prompt: string }).prompt);
+const childRow = async (key: ChildKey) => (await pool.query<{ phase: string; native_call_id: string; outcome: unknown }>(
+  "SELECT phase,native_call_id,outcome FROM birbcrew_ts.pi_children WHERE child_id=$1", [key.childId])).rows[0];
+
+/** A Pi parent turn admitted and started, with one analyst child delegated as given. No parent
+ * workflow runs: nothing a parent can produce yet carries a target. */
+async function delegated(task: string, childTarget?: ChildTarget) {
+  const { memberId } = await store.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile: parentProfile });
+  const conversationId = randomUUID();
+  await store.openConversation({ ownerId, conversationId, memberId });
+  const request = { ownerId, conversationId, requestId: randomUUID(), text: "delegate" };
+  const turn = await store.beginTurn(request, { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 });
+  if (turn.kind !== "start") throw new Error("Expected a started turn");
+  const [key] = await children.delegate(turn.conversation, request.requestId, turn.token, [{ nativeCallId: "call_" + randomUUID(), task,
+    profile: { role: "analyst", version: 1, instructions: "Answer the assigned question using only the supplied task context.", model,
+      tools: [], ...(childTarget && { target: childTarget }) } }], { version: 1, engine: "pi", state: {} });
+  return { key, memberId };
+}
+
+/** Runs the child's workflow to its end, as its parent's executeChild would. */
+async function runChild(key: ChildKey) {
+  const workflowId = `birbcrew-ts/child/${key.childId}`;
+  workflows.push(workflowId);
+  const handle = await temporal.workflow.start("piChildWorkflow", { workflowId, taskQueue: memberTaskQueue, args: [key, parentProfile] });
+  await handle.result();
+  return workflowId;
+}
+
+/** Replays the history with the given source and reports the queue of each child segment and the patches. */
+async function replay(workflowId: string, path = workflowsPath) {
+  const recorded = await temporal.workflow.getHandle(workflowId).fetchHistory();
+  await Worker.runReplayHistory({ workflowsPath: path }, recorded, workflowId);
+  const events = recorded.events ?? [];
+  return {
+    queues: events.flatMap(event => event.activityTaskScheduledEventAttributes?.activityType?.name === "executeChildSegment"
+      ? [event.activityTaskScheduledEventAttributes.taskQueue?.name] : []),
+    failures: events.flatMap(event => event.activityTaskFailedEventAttributes?.failure?.applicationFailureInfo?.type ?? []),
+    patches: events.flatMap(event => event.markerRecordedEventAttributes?.markerName === "core_patch"
+      ? (event.markerRecordedEventAttributes.details?.["patch-data"]?.payloads ?? []).map(payload => Buffer.from(payload.data ?? []).toString())
+      : []),
+  };
+}
+
+test("a child whose row names a Pi target runs on that profile's queue and driver, as its parent member's spend", { timeout: 180_000 }, async () => {
+  const worker = await workflowWorker();
+  try {
+    const nonce = randomUUID();
+    const { key, memberId } = await delegated("remember " + nonce, target);
+    assert.deepEqual(key.target, target);
+    const workflowId = await runChild(key);
+    const row = await childRow(key);
+    assert.deepEqual([row.phase, row.outcome], ["complete", { kind: "completed", nativeCallId: row.native_call_id, text: "stored " + nonce }]);
+    assert.ok((await prompts(logs.target)).includes("remember " + nonce), "the target profile's driver ran the child");
+    assert.ok(!(await prompts(logs.parent)).includes("remember " + nonce), "the parent profile's driver did not");
+    const usage = await pool.query("SELECT member_id,engine FROM birbcrew_ts.usage_ledger WHERE child_id=$1", [key.childId]);
+    assert.deepEqual(usage.rows, [{ member_id: memberId, engine: "pi" }]);
+    const replayed = await replay(workflowId);
+    assert.deepEqual(replayed.queues, [activityQueue("pi", targetProfile)]);
+    assert.deepEqual(replayed.patches, []);
+    // The pre-target source replays this history too: replay never compares an activity's task
+    // queue, so only the activity's own check stops such a worker from misrouting a child.
+    await replay(workflowId, legacyPath);
+  } finally { await worker.stop(); }
+});
+
+test("a workflow worker from before targets schedules a targeted child on its parent's queue, and the activity refuses it", { timeout: 180_000 }, async () => {
+  const worker = await workflowWorker(legacyPath);
+  try {
+    const nonce = randomUUID();
+    const { key } = await delegated("remember " + nonce, target);
+    const workflowId = await runChild(key);
+    const row = await childRow(key);
+    assert.deepEqual([row.phase, row.outcome], ["failed", { kind: "failed", nativeCallId: row.native_call_id, code: "child_failed" }]);
+    assert.equal((await pool.query("SELECT 1 FROM birbcrew_ts.native_launches WHERE child_id=$1", [key.childId])).rowCount, 0);
+    for (const log of Object.values(logs)) assert.ok(!(await prompts(log)).includes("remember " + nonce));
+    const replayed = await replay(workflowId, legacyPath);
+    assert.deepEqual(replayed.queues, [activityQueue("pi", parentProfile)]);
+    assert.deepEqual(replayed.failures, ["ChildTargetMismatch"]);
+    await replay(workflowId);
+  } finally { await worker.stop(); }
+});
+
+test("histories recorded with the workflow source before targets replay, and a child card it left waiting is answered under this one",
+  { timeout: 240_000 }, async () => {
+    async function delegation(tasks: { role: "analyst" | "recorder"; task: string }[]) {
+      const { memberId } = await store.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile: parentProfile });
+      const conversationId = randomUUID(), requestId = randomUUID(), base = `/v1/conversations/${conversationId}`;
+      assert.equal((await api("/v1/conversations", { conversationId, memberId })).status, 201);
+      const workflowId = `birbcrew-ts/member/${memberId}/conversation/${conversationId}`;
+      workflows.push(workflowId);
+      const submitted = await api(`${base}/requests`, { requestId, text: "delegate " + JSON.stringify(tasks) });
+      assert.equal(submitted.status, 202, JSON.stringify(submitted.body));
+      return {
+        memberId, requestId, workflowId, base,
+        settled: (phase: string) => until(async () => (await api(base)).body.state.phase === phase || undefined, "phase " + phase),
+        reply: async () => (await pool.query<{ reply: string }>("SELECT reply FROM birbcrew_ts.turns WHERE request_id=$1", [requestId])).rows[0].reply,
+        children: async () => (await pool.query<{ child_id: string }>("SELECT child_id FROM birbcrew_ts.pi_children WHERE request_id=$1 ORDER BY ordinal",
+          [requestId])).rows.map(row => `birbcrew-ts/child/${row.child_id}`),
+      };
+    }
+    let worker = await workflowWorker(legacyPath);
+    try {
+      const finished = await delegation([{ role: "analyst", task: "remember " + randomUUID() }]);
+      await finished.settled("idle");
+      const waiting = await delegation([{ role: "analyst", task: "remember " + randomUUID() }, { role: "recorder", task: "record assigned cedar" }]);
+      const card = await until(async () => (await api(waiting.base)).body.state.pendingApprovals[0], "the child's card");
+      const [, recorder] = await waiting.children();
+      assert.equal(recorder, `birbcrew-ts/child/${card.invocationId}`);
+      await worker.stop();
+      worker = await workflowWorker();
+      assert.deepEqual(await api(`${waiting.base}/human`, { memberId: waiting.memberId, requestId: waiting.requestId,
+        invocationId: card.invocationId, approvalId: card.approvalId, version: card.version, choice: "approve" }),
+      { status: 200, body: { approvalId: card.approvalId, decision: "approve" } });
+      await waiting.settled("idle");
+      assert.match(await finished.reply(), /^delegated \[\{"kind":"completed"/);
+      const outcomes = JSON.parse((await waiting.reply()).slice("delegated ".length)) as { kind: string; text: string }[];
+      assert.deepEqual(outcomes.map(outcome => outcome.kind), ["completed", "completed"]);
+      assert.equal(JSON.parse(outcomes[1].text.slice("settled ".length)).kind, "recorded");
+      for (const r of [finished, waiting]) {
+        assert.deepEqual((await replay(r.workflowId)).queues, []);
+        for (const child of await r.children()) {
+          const replayed = await replay(child);
+          assert.ok(replayed.queues.length >= 1 && replayed.queues.every(queue => queue === activityQueue("pi", parentProfile)), child);
+          assert.deepEqual(replayed.patches, []);
+        }
+      }
+    } finally { await worker.stop(); }
+  });
