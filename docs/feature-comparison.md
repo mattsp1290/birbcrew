@@ -4,13 +4,14 @@ This page compares what Crew supports with eight other products, across 40
 features. Use it to pick candidate features for Crew. It records what each
 product does. It does not rank the products or recommend a feature.
 
-The comparison is a snapshot taken on 2026-11-12.
+The comparison is a snapshot taken on 2026-11-12. The Crew column was read
+again on 2026-11-13.
 
 ## Products
 
 | Column | Product | Kind | Read at |
 | --- | --- | --- | --- |
-| Crew | This repository | Open source (MIT), headless service | `main` at `f742b11` |
+| Crew | This repository | Open source (MIT), headless service | `main` at `8fb8bf0` |
 | OpenBot | [CopilotKit/OpenBot](https://github.com/CopilotKit/OpenBot) | Open source (MIT), self-hosted workspace | `0fe182c` (2026-11-12) |
 | Grok Bot | xAI Grok Bot | Hosted, beta since 2026-08-11 | xAI docs and press, read 2026-11-12 |
 | Muse | Meta Muse | Hosted, announced 2026-09-08 | Meta posts and press, read 2026-11-12 |
@@ -154,7 +155,7 @@ How much to trust each column:
 
 ## What Crew has for each row
 
-Each line states what Crew does at `f742b11` and where the feature stops. A line
+Each line states what Crew does at `8fb8bf0` and where the feature stops. A line
 that names a later pull request describes Crew after that pull request instead.
 
 ### Agents and runtime
@@ -166,7 +167,7 @@ that names a later pull request describes Crew after that pull request instead.
 | 3 | Yes | The operator chooses the model in a profile module. [AI proxy profiles](ai-proxy-profiles.md) route Claude Messages, Codex Responses, and Pi Chat Completions through an operator proxy. An owner can only pick among the profiles that the operator registered. No request field names a model. |
 | 4 | Yes | Temporal orders turns. PostgreSQL stores each conversation, its native checkpoint, and its AG-UI history. See [the design](architecture.md) and [bounded conversations](bounded-conversations.md). |
 | 5 | Part | A Pi member with a `.crew.v1` profile can call `delegate_task` to start at most two child workflows in one turn. Each child is a separate Pi session with a fixed role, `analyst` or `recorder`. Claude and Codex members have no subagents. |
-| 6 | Part | An owner can hand a conversation to another of their members, also one with a different engine, through `POST /v1/conversations/{id}/handoffs`. The target is a fresh conversation whose first request carries the source's newest whole committed turns, at most 64 KiB, as a verbatim quoted transcript. The source is sealed, and a handoff cannot be undone. Only the owner starts a handoff: no member can hand off or delegate to another member, and each conversation still binds one member. See [conversation handoff](handoffs.md). |
+| 6 | Part | An owner can hand a conversation to any of their members, including the source's own member or one with a different engine, through `POST /v1/conversations/{id}/handoffs`. The target is a fresh conversation whose first request carries the source's newest whole committed turns, at most 64 KiB, as a verbatim quoted transcript. The source is sealed, and a handoff cannot be undone. Only the owner starts a handoff: no member can hand off or delegate to another member, and each conversation still binds one member. See [conversation handoff](handoffs.md). |
 
 ### Tools
 
@@ -183,15 +184,15 @@ that names a later pull request describes Crew after that pull request instead.
 
 | # | Crew | Detail |
 | --- | --- | --- |
-| 13 | Yes | A `record_work_item` call opens an approval card. A `choose_next_step` call opens a question. See [the gateway guide](member-gateway.md). An owner can give a request or a routine an approval deadline of one minute to seven days, after which Crew cancels a Claude or Pi request whose card is still undecided and records the expiry; see [approval expiry](approval-expiry.md) (pull request #51). |
+| 13 | Yes | A `record_work_item` call opens an approval card. A `choose_next_step` call opens a question. See [the gateway guide](member-gateway.md). An owner can give a request or a routine an approval deadline of one minute to seven days. After the deadline, Crew cancels a Claude or Pi request whose card or question is still undecided and records the expiry. A card that a Pi delegation child opens gets no deadline. A Codex card or question always expires after 45 seconds, whatever the owner sets. See [approval expiry](approval-expiry.md). |
 | 14 | Yes | An owner can answer a card with `allow_conversation` or `allow_always`. A grant matches the tool, not its arguments. A grant never expires by time and never applies to a routine's request or to a handoff's first request. See [standing grants](standing-grants.md). |
 | 15 | No | Crew has no deny rule and no rule language. The eligibility of a grant is fixed in code. A routine's `fail_closed` approval policy cancels the waiting request rather than denying the call. |
-| 16 | Yes | `GET /v1/audit` returns an append-only trail of 30 event types (pull request #51 adds `approval.expired`, pull request #48 adds `member.instructions_set`, pull request #53 adds `usage.budget_set`, `usage.budget_cleared`, and `usage.request_refused`, and pull request #52 adds `approval.requested` and four `webhook.*` types, whose rows name no member) as JSON or CSV. It filters by conversation, member, event type, actor kind, initiator kind, initiator ID and time window, combined with AND (pull request #50). No filter reads payload fields, such as an approval's choice or the `routineId` of a routine's own rows. Refused HTTP calls leave no row, except a request that its member's usage budget refuses (pull request #53). No retention limit and no deletion route exist. See [the audit trail](audit-trail.md) and [audit filters](audit-filters.md). |
+| 16 | Yes | `GET /v1/audit` returns an append-only trail of 30 event types as JSON or CSV. It filters by conversation, member, event type, actor kind, initiator kind, initiator ID, and time window, combined with AND. No filter reads payload fields, such as an approval's choice or the `routineId` of a routine's own rows. The four `webhook.*` types name no member, so a `memberId` filter never matches their rows. Refused HTTP calls leave no row, except a request that its member's usage budget refuses. No retention limit and no deletion route exist. See [the audit trail](audit-trail.md) and [audit filters](audit-filters.md). |
 | 17 | Yes | Each request admission records an initiator of kind `owner`, `routine`, or `handoff`. The audit trail copies the initiator from the admission. |
 | 18 | No | Grant matching runs only inside the transaction that records a call. |
 | 19 | No | Members have no computer. |
-| 20 | No | Provider keys come from environment variables, operator-provided private files, the operator's Codex login, or an operator credential command for proxy profiles. Crew has no credential store and encrypts none of them. Native transcripts are plain text in the state directory. Each webhook endpoint's signing secret is stored as plain text in PostgreSQL (pull request #52). |
-| 21 | Part | Clients cannot supply tools or context. An owner can set a member's instructions once, at spawn (pull request #48); they reach the model as instructions, not as reference data. Crew injects project notes and member memory under a header that labels them as reference data. Crew has no injection classifier. It checks tool arguments only against strict schemas and binds `operation_id` to the request; it does not inspect free text such as the `note` of a work item. A handoff passes the source's replies to the target inside a user message, which [the handoff guide](handoffs.md) says is not a security boundary. |
+| 20 | No | Provider keys come from environment variables, operator-provided private files, the operator's Codex login, or an operator credential command for proxy profiles. Crew has no credential store and encrypts none of them. Native transcripts are plain text in the state directory. Each webhook endpoint's signing secret is stored as plain text in PostgreSQL. |
+| 21 | Part | An AG-UI client cannot supply tools or context. An owner can set a member's instructions once, at spawn. They reach the model as instructions, not as reference data. Crew injects project notes and member memory under a header that labels them as reference data. Crew has no injection classifier. It checks tool arguments only against strict schemas and binds `operation_id` to the request; it does not inspect free text such as the `note` of a work item. A handoff passes the source's replies to the target inside a user message, which [the handoff guide](handoffs.md) says is not a security boundary. |
 | 22 | Part | A Landlock and seccomp launcher confines the Claude and Codex native processes. Pi does not use the launcher: it runs unconfined in a Node runner process that the worker's supervisor forks each time a turn runs or resumes. See [verification](verification.md). |
 
 ### Work over time
@@ -199,10 +200,10 @@ that names a later pull request describes Crew after that pull request instead.
 | # | Crew | Detail |
 | --- | --- | --- |
 | 23 | Yes | An owner creates a routine with a five-field UTC cron schedule. Windows are at least 15 minutes apart. An owner has at most 20 enabled routines. The tenth failure in a row disables a routine. Each firing opens a new conversation. See [scheduled routines](scheduled-routines.md). |
-| 24 | No | No webhook, repository, or email event starts a request. |
+| 24 | No | No inbound webhook, repository, or email event starts a request. Crew's own webhooks are outbound only. |
 | 25 | No | A member has no tool that schedules a later turn. Only an owner creates a routine. |
-| 26 | Yes | An owner saves at most 32 entries of at most 1,024 bytes for each member. A conversation takes a snapshot of the entries when it opens. The model cannot write memory, and Crew has no search over memory. See [member memory](memories.md). |
-| 27 | Part | An owner can give a member instructions of at most 16,384 bytes at spawn (pull request #48). They are fixed for the life of the member, reach every native launch of its conversations before project notes and memory, and never change its tools, approvals, or limits. Crew still has no skills and no reusable instruction packs: Pi loads no skills and no prompt templates, and no extensions other than Crew's own inline ones. Claude loads no plugins and no setting sources. Codex runs with plugins off and refuses ambient configuration files. See [member instructions](member-instructions.md). |
+| 26 | Yes | An owner saves at most 32 active entries of at most 1,024 bytes for each member. A conversation takes a snapshot of the entries when it opens. The model cannot write memory, and Crew has no search over memory. See [member memory](memories.md). |
+| 27 | Part | An owner can give a member instructions of at most 16,384 bytes at spawn. They are fixed for the life of the member and never change its tools, approvals, or limits. They reach each native launch of its conversations before project notes and memory, except Pi delegation children and the trusted-context lane. Crew has no skills and no instruction pack that several members share or that a member loads when it needs it. Pi loads no skills and no prompt templates, and no extensions other than Crew's own inline ones. Claude loads no plugins and no setting sources. Codex runs with plugins off and refuses ambient configuration files. See [member instructions](member-instructions.md). |
 | 28 | No | Crew does not learn from finished conversations. |
 | 29 | No | A member acts only on an owner request, a handoff's first request, a routine firing, or a trusted application's request. |
 
@@ -214,7 +215,7 @@ that names a later pull request describes Crew after that pull request instead.
 | 31 | No | None. |
 | 32 | No | None. The original first-milestone brief assigns the eventual phone interface to Birbforge. |
 | 33 | No | None. No Slack, Teams, or SMS integration exists. [The original first-milestone brief](first-milestone.md) excluded sending to Slack. |
-| 34 | Part | An owner registers up to 10 HTTPS webhook endpoints (pull request #52). Crew posts a signed body of IDs and a status when a card or question becomes pending, a request finishes, a routine firing settles, or Crew disables a routine. Crew sends no push, email, or chat message itself. See [outbound webhooks](webhooks.md). |
+| 34 | Part | An owner can keep up to 10 HTTPS webhook endpoints enabled. Crew posts a signed body there when a card or question becomes pending, a request finishes, a routine firing settles, or Crew disables a routine. The body holds IDs and a status or the tool name. It never holds prompt or reply text. Crew sends no push, email, or chat message itself, so a person is reached only through a receiver that the owner registers. See [outbound webhooks](webhooks.md). |
 | 35 | No | None. |
 
 ### Operations
@@ -223,8 +224,8 @@ that names a later pull request describes Crew after that pull request instead.
 | --- | --- | --- |
 | 36 | Part | The gateway maps static bearer-token digests to owner IDs. Crew has no sign-in provider, no session, no role, and no user management. |
 | 37 | Part | The repository builds a service image, an executor image for the documentation pilot, and the pilot's Python API image, and supports Temporal mTLS. The gateway binds only to 127.0.0.1. The repository has no Kubernetes manifest and no Helm chart, and a rolling update is documented as unsafe. See [persistent deployment](persistent-deployment.md) and [the in-cluster executor](in-cluster-executor.md). |
-| 38 | Part | Crew exports four trace span names over OTLP. It records the token counts each engine reports for every native segment that returns a result, totals them per member and conversation through `/v1/usage`, and lets an owner give a member a daily token budget that admission enforces as a soft cap (pull request #53). It keeps a cost only when a Pi provider reports a billed one, so Claude and Codex usage has no cost, and Crew never estimates one. See [usage metering](usage-metering.md). |
-| 39 | Yes | An operator can take a quiesced backup of the whole installation and restore it behind a fence. The procedure stops the whole installation. See [coordinated recovery](coordinated-recovery.md). |
+| 38 | Part | Crew exports four trace span names over OTLP. It records the token counts each engine reports for every native segment that returns a result, except in the trusted-context lane. It totals them per member and conversation through `/v1/usage`, and lets an owner give a member a daily token budget that admission enforces as a soft cap. It keeps a cost only when a Pi provider reports a billed one, so Claude and Codex usage has no cost, and Crew never estimates one. See [usage metering](usage-metering.md). |
+| 39 | Yes | An operator can take a quiesced backup of the whole installation and restore it behind a fence. The procedure stops the whole installation. A restored installation revokes every standing grant, suspends every active memory entry, and disables every enabled webhook endpoint as it resumes. See [coordinated recovery](coordinated-recovery.md). |
 | 40 | Yes | MIT. |
 
 ## Notes on the other products
