@@ -7,6 +7,7 @@
 #include <linux/filter.h>
 #include <linux/landlock.h>
 #include <linux/seccomp.h>
+#include <linux/sockios.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -14,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -54,18 +56,51 @@ static void permit_under(int rules, const char *root, const char *child, uint64_
     permit(rules, path, access, 0);
 }
 
-static struct sock_filter code[64];
+static struct sock_filter code[160];
 static unsigned short length;
-static void emit(struct sock_filter instruction) { if (length == 64) _exit(126); code[length++] = instruction; }
+static void emit(struct sock_filter instruction) { if (length == 160) _exit(126); code[length++] = instruction; }
 static void deny(uint32_t call, uint32_t error) {
     emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, call, 0, 1));
     emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | error));
 }
+static void load(unsigned arg) {
+    emit((struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args) + 8 * arg));
+}
+// The blocks below load an argument, so each returns for its own system call. After execv the worker keeps
+// this process ID, and 0 also names the caller.
+static void only_self(uint32_t call, unsigned arg) {
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, call, 0, 5));
+    load(arg);
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 2, 0));
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)getpid(), 1, 0));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+}
+// For setpriority and ioprio_set: only the process kind of target (args[0]) naming the caller (args[1]).
+static void only_self_process(uint32_t call, uint32_t kind) {
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, call, 0, 7));
+    load(0);
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kind, 0, 3));
+    load(1);
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 2, 0));
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)getpid(), 1, 0));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+}
+static void refuse_commands(uint32_t call, uint32_t first, uint32_t second) {
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, call, 0, 5));
+    load(1);
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, first, 2, 0));
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, second, 1, 0));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
+}
 
 // Descendants stay in the invocation process group supervised by the host. An offline member (Pi) also
 // cannot open a socket, since its model traffic and tool calls cross descriptor 3 to the host; io_uring
-// could open one without the socket call. It cannot start a process, undo its death signal or signal any
-// process but itself, so nothing it does outlives or reaches past its turn.
+// could open one without the socket call. It cannot start a process, undo its death signal, or create
+// IPC objects that outlive it. It cannot signal, set limits on or reschedule any process but itself, nor
+// make the kernel signal one for it through a file owner.
 static void keep_group(int offline) {
     emit((struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)));
 #if defined(__aarch64__)
@@ -98,24 +133,36 @@ static void keep_group(int offline) {
         deny(SYS_pidfd_send_signal, EPERM);
         deny(SYS_rt_sigqueueinfo, EPERM);
         deny(SYS_rt_tgsigqueueinfo, EPERM);
-        // Each block below loads an argument, so it returns for its own system call.
+        deny(SYS_shmget, EPERM);
+        deny(SYS_msgget, EPERM);
+        deny(SYS_semget, EPERM);
+        deny(SYS_mq_open, EPERM);
         emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone, 0, 4));
-        emit((struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])));
+        load(0);
         emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, CLONE_THREAD, 1, 0));
         emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
         emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
         emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 0, 4));
-        emit((struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])));
+        load(0);
         emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, PR_SET_PDEATHSIG, 0, 1));
         emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
         emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
-        // After execv the worker keeps this process ID.
+        // kill(0) would signal the whole supervised group, so kill and tgkill must name this process.
         emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_kill, 1, 0));
         emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_tgkill, 0, 4));
-        emit((struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])));
+        load(0);
         emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)getpid(), 1, 0));
         emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
         emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+        only_self(SYS_prlimit64, 0);
+        only_self(SYS_sched_setaffinity, 0);
+        only_self(SYS_sched_setattr, 0);
+        only_self(SYS_sched_setparam, 0);
+        only_self(SYS_sched_setscheduler, 0);
+        only_self_process(SYS_setpriority, PRIO_PROCESS);
+        only_self_process(SYS_ioprio_set, 1 /* IOPRIO_WHO_PROCESS */);
+        refuse_commands(SYS_fcntl, F_SETOWN, F_SETOWN_EX);
+        refuse_commands(SYS_ioctl, FIOSETOWN, SIOCSPGRP);
     }
     emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
     struct sock_fprog filter = { .len = length, .filter = code };
