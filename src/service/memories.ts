@@ -43,8 +43,8 @@ async function contextBlocks(db: Queryable, conversation: Conversation) {
   return { instructions, notes, memory: memoryContext(rows) };
 }
 
-/** The system context a native launch of this conversation receives: its member's instructions
- * (instructions.ts), its project notes, then the snapshot's entries that are still active. Pi
+/** The system context a native launch of this conversation receives: its member's instruction
+ * packs and instructions (instructions.ts), its project notes, then the snapshot's entries that are still active. Pi
  * children get none of them (supervisor-runner.ts). */
 export async function conversationContext(db: Queryable, conversation: Conversation): Promise<string | undefined> {
   const { instructions, notes, memory } = await contextBlocks(db, conversation);
@@ -84,8 +84,8 @@ export function contextFits(engine: Engine, context: string | undefined): boolea
  * or suspended one is left out at each launch. Instructions, notes and the snapshot never grow
  * afterwards, so a context that fits the engine now fits at every later launch. One that does not
  * fit is refused here, rather than failing the conversation's first turn: `memory_limit` when the
- * instructions and notes fit without the memory, otherwise `instructions_limit`. Notes too large
- * on their own are left as they were before memory and instructions existed. */
+ * instructions (with any packs) and notes fit without the memory, otherwise `instructions_limit`.
+ * Notes too large on their own are left as they were before memory and instructions existed. */
 export async function snapshotMemories(db: Queryable, conversation: Conversation) {
   const { rowCount } = await db.query(`INSERT INTO birbcrew_ts.conversation_memories (conversation_id, position, memory_id)
     SELECT $1, row_number() OVER (ORDER BY created_at, memory_id), memory_id FROM birbcrew_ts.member_memories

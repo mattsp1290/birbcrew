@@ -18,6 +18,7 @@ import { listGrants, revokeGrant } from "./grants.ts";
 import { HandoffApi } from "./handoffs.ts";
 import { MemoryApi, memoryListParameterNames } from "./memories.ts";
 import { readInstructions } from "./instructions.ts";
+import { PackApi, packListParameterNames } from "./instruction-packs.ts";
 import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from "./domain.ts";
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
 import { MemberStore } from "./store.ts";
@@ -200,6 +201,7 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
   const schemaVersion = () => databaseProbe ??= readSchemaVersion(store.pool.options).finally(() => { databaseProbe = undefined; });
   const routines = new RoutineApi(store, clock);
   const memories = new MemoryApi(store);
+  const packs = new PackApi(store);
   const handoffs = new HandoffApi(store, members);
   const usage = new UsageApi(store);
   const dispatcher = new RoutineDispatcher({ store, members, integration, owners: accounts.map(({ actor }) => actor), clock });
@@ -292,6 +294,23 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       }
       if (action === undefined && request.method === "GET") return json(response, 200, await webhooks.get(ownerId, webhookId));
       if (action === undefined && request.method === "DELETE") return json(response, 200, await webhooks.change(ownerId, webhookId, "delete"));
+      throw new HttpError(405, "method_not_allowed");
+    }
+    const packRoute = versioned && /^\/instruction-packs(?:\/([^/]+))?$/.exec(path);
+    if (packRoute) {
+      const [, id] = packRoute;
+      if (id === undefined) {
+        if (request.method === "POST") {
+          if (url.search) throw new HttpError(400, "invalid_input");
+          return json(response, 201, await packs.create(ownerId, await body(request, true)));
+        }
+        if (request.method === "GET") return json(response, 200, await packs.list(ownerId, queryOf(url, packListParameterNames)));
+        throw new HttpError(405, "method_not_allowed");
+      }
+      const packId = z.uuid().parse(id);
+      if (url.search) throw new HttpError(400, "invalid_input");
+      if (request.method === "GET") return json(response, 200, await packs.get(ownerId, packId));
+      if (request.method === "DELETE") return json(response, 200, await packs.delete(ownerId, packId));
       throw new HttpError(405, "method_not_allowed");
     }
     const usageRoute = versioned && /^\/usage(?:\/(members|conversations|records)|\/budgets\/([^/]+))?$/.exec(path);

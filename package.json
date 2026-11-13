@@ -37,6 +37,7 @@
     "test:memories:service": "node tests/proof/memories.mts",
     "test:instructions": "node --test tests/service/member-instructions.test.ts",
     "test:instructions:service": "node tests/proof/member-instructions.mts",
+    "test:packs": "node --test tests/service/instruction-packs.test.ts",
     "test:handoffs:service": "node tests/proof/handoffs.mts",
     "test:grants": "node --test tests/service/standing-grants.test.ts",
     "test:expiry": "node --test tests/service/approval-expiry.test.ts",
