@@ -25,6 +25,8 @@ import { IntegrationApi, integrationCapabilities } from "./integration-api.ts";
 import { firingParameterNames, RoutineApi, RoutineDispatcher, routineListParameterNames, type Clock } from "./routines.ts";
 import { TemporalSettingsError, temporalConnectionOptions, temporalSettings } from "./temporal-config.ts";
 import { UsageApi, usageParameterNames } from "./usage.ts";
+import { defaultTargetPolicy, TargetRefusedError, type TargetPolicy } from "./webhook-target.ts";
+import { deliveryParameterNames, WebhookApi, WebhookDispatcher, webhookListParameterNames } from "./webhooks.ts";
 
 const credentials = z.record(z.string().regex(/^[0-9a-f]{64}$/), z.string().min(1));
 const encoder = new EventEncoder();
@@ -186,9 +188,10 @@ function queryOf(url: URL, names: readonly string[]) {
   return Object.fromEntries(url.searchParams);
 }
 
-/** `clock` drives routine schedules; tests inject one. */
+/** `clock` drives routine schedules and webhook retries; tests inject one. `webhookTargets` is
+ * where webhooks may be sent: HTTPS to public addresses unless the operator allows insecure targets. */
 export function createGateway(store: MemberStore, members: MemberClient, owners: Record<string, string>,
-  { clock = () => new Date() }: { clock?: Clock } = {}) {
+  { clock = () => new Date(), webhookTargets = defaultTargetPolicy }: { clock?: Clock; webhookTargets?: TargetPolicy } = {}) {
   const integration = new IntegrationApi(store, members);
   const accounts = Object.entries(credentials.parse(owners)).map(([hash, actor]) => ({ digest: Buffer.from(hash, "hex"), actor }));
   // One database probe at a time, shared by concurrent health calls, so polling holds at most one probe connection.
@@ -200,6 +203,8 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
   const handoffs = new HandoffApi(store, members);
   const usage = new UsageApi(store);
   const dispatcher = new RoutineDispatcher({ store, members, integration, owners: accounts.map(({ actor }) => actor), clock });
+  const webhooks = new WebhookApi(store, clock, webhookTargets);
+  const deliveries = new WebhookDispatcher({ store, owners: accounts.map(({ actor }) => actor), clock, policy: webhookTargets });
   async function route(request: IncomingMessage, response: ServerResponse) {
     const auth = request.headers.authorization;
     if (!auth?.startsWith("Bearer ") || auth.length === 7) throw new HttpError(401, "authentication_required");
@@ -263,6 +268,30 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       if (url.search) throw new HttpError(400, "invalid_input");
       if (request.method === "GET") return json(response, 200, await memories.get(ownerId, memoryId));
       if (request.method === "DELETE") return json(response, 200, await memories.delete(ownerId, memoryId));
+      throw new HttpError(405, "method_not_allowed");
+    }
+    const webhookRoute = versioned && /^\/webhooks(?:\/([^/]+)(?:\/(enable|disable|deliveries))?)?$/.exec(path);
+    if (webhookRoute) {
+      const [, id, action] = webhookRoute;
+      if (id === undefined) {
+        if (request.method === "POST") {
+          if (url.search) throw new HttpError(400, "invalid_input");
+          return json(response, 201, await webhooks.create(ownerId, await body(request, true)));
+        }
+        if (request.method === "GET") return json(response, 200, await webhooks.list(ownerId, queryOf(url, webhookListParameterNames)));
+        throw new HttpError(405, "method_not_allowed");
+      }
+      const webhookId = z.uuid().parse(id);
+      if (action === "deliveries" && request.method === "GET") {
+        return json(response, 200, await webhooks.deliveries(ownerId, webhookId, queryOf(url, deliveryParameterNames)));
+      }
+      if (url.search) throw new HttpError(400, "invalid_input");
+      if ((action === "enable" || action === "disable") && request.method === "POST") {
+        z.strictObject({}).parse(await body(request));
+        return json(response, 200, await webhooks.change(ownerId, webhookId, action));
+      }
+      if (action === undefined && request.method === "GET") return json(response, 200, await webhooks.get(ownerId, webhookId));
+      if (action === undefined && request.method === "DELETE") return json(response, 200, await webhooks.change(ownerId, webhookId, "delete"));
       throw new HttpError(405, "method_not_allowed");
     }
     const usageRoute = versioned && /^\/usage(?:\/(members|conversations|records)|\/budgets\/([^/]+))?$/.exec(path);
@@ -386,16 +415,19 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       if (error instanceof MemberStoreError) return json(response, error.code === "not_found" ? 404 : 409, { error: error.code });
       if (error instanceof WorkflowUpdateFailedError) return json(response, 409, { error: "update_rejected" });
       if (error instanceof AuditUnsettledError) return json(response, 503, { error: "audit_unsettled" }, { "Retry-After": "1" });
+      // No reason: which names resolve to private addresses is not the caller's to learn.
+      if (error instanceof TargetRefusedError) return json(response, 400, { error: "target_refused" });
       return json(response, 503, { error: "retry_same_request" });
     });
   });
-  // Background loops: the cancellation outbox and the routine dispatcher. Neither keeps the
-  // process alive; each skips a beat while its previous pass still runs.
+  // Background loops: the cancellation outbox, the routine dispatcher and the webhook outbox. None
+  // keeps the process alive; each skips a beat while its previous pass still runs.
   const timers: ReturnType<typeof setInterval>[] = [];
   server.once("listening", () => {
     const flush = () => { void integration.flushCancellations().catch(() => {}); };
     const dispatch = () => { void dispatcher.tick().catch(() => {}); };
-    for (const loop of [flush, dispatch]) {
+    const deliver = () => { void deliveries.tick().catch(() => {}); };
+    for (const loop of [flush, dispatch, deliver]) {
       const timer = setInterval(loop, 1000);
       timer.unref();
       timers.push(timer);
@@ -405,9 +437,9 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
   let stopping = Promise.resolve();
   server.once("close", () => {
     for (const timer of timers) clearInterval(timer);
-    stopping = dispatcher.stop();
+    stopping = Promise.all([dispatcher.stop(), deliveries.stop()]).then(() => {});
   });
-  // Settles once the close has ended the dispatcher's pass; await it before closing the pool.
+  // Settles once the close has ended both dispatchers' passes; await it before closing the pool.
   return Object.assign(server, { stopped: () => stopping });
 }
 
@@ -422,7 +454,10 @@ async function main() {
   try {
     const store = new MemberStore(pool);
     await store.migrate();
-    const server = createGateway(store, new MemberClient(store, new Client({ connection, namespace: temporal.namespace })), config.tokenHashes);
+    // Off unless exactly "1": plain http and loopback or private addresses, for local testing only.
+    const webhookTargets = { allowInsecure: process.env.BIRBCREW_WEBHOOK_ALLOW_INSECURE_TARGETS === "1" };
+    const server = createGateway(store, new MemberClient(store, new Client({ connection, namespace: temporal.namespace })), config.tokenHashes,
+      { webhookTargets });
     server.listen(config.port, "127.0.0.1");
     await once(server, "listening");
     const address = server.address();

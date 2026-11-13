@@ -161,7 +161,9 @@ the routine. `routine.firing_settled` gains the reason `approval_expired`, and
   with a new routine.
 - An automatic approve or deny at the deadline.
 - A notification before or at expiry. A client reads `expiresAt` and
-  `expiredCalls`, or the receipt.
+  `expiredCalls`, or the receipt. An [outbound webhook](webhooks.md#handoffs-approval-expiry-and-usage-budgets)
+  sends `approval.pending` when the card becomes pending and the request's
+  `request.finished` afterwards, whose body does not say that the card expired.
 - Requests admitted before migration 28: they have no deadline and never expire.
 - While no worker runs, the snapshot keeps listing an overdue card until the
   workflow records the expiry. Its `expiresAt` is in the past and a decision on it is

@@ -45,7 +45,7 @@ migrations at startup (see [Database role](#database-role)).
 
 | Process | Command | Notes |
 | --- | --- | --- |
-| Gateway | `node src/service/gateway.ts /etc/crew/gateway.json` | JSON `{ "port": 8080, "tokenHashes": { "<sha256 hex>": "<owner id>" } }` as in the [gateway guide](member-gateway.md). Listens on `127.0.0.1:<port>` and prints `{"url": ...}`. Also runs the [scheduled-routine](scheduled-routines.md) dispatcher. |
+| Gateway | `node src/service/gateway.ts /etc/crew/gateway.json` | JSON `{ "port": 8080, "tokenHashes": { "<sha256 hex>": "<owner id>" } }` as in the [gateway guide](member-gateway.md). Listens on `127.0.0.1:<port>` and prints `{"url": ...}`. Also runs the [scheduled-routine](scheduled-routines.md) and [outbound webhook](webhooks.md) dispatchers. |
 | Worker | `node src/service/cli.ts worker src/service/providers.ts` | Registers the profiles enabled by the attestation variables below. |
 
 Every gateway fires scheduled routines from a PostgreSQL leased queue, beside its
@@ -60,6 +60,19 @@ one replica, a restart skips any window in those 5 minutes. A routine fires only
 while at least one gateway runs, so stopping every gateway pauses routines and their
 missed windows are skipped, not replayed. Routine firings use the gateway's clock;
 keep replicas' clocks synchronised.
+
+Gateways also send [outbound webhooks](webhooks.md): once an owner registers an
+endpoint, every gateway replica connects out to it. Give gateways egress to DNS (the
+servers in the container's `/etc/resolv.conf`, queried directly; the hosts file is
+not read) and to the HTTPS hosts and ports owners register, which may be any public
+address and port. Crew refuses private, loopback and metadata addresses itself, but
+an egress policy (a Kubernetes `NetworkPolicy` or a firewall) is the place to narrow
+it further, for example to an allow-list of receivers. Webhook requests ignore
+`HTTP_PROXY`, `HTTPS_PROXY` and `NODE_USE_ENV_PROXY`, so an installation whose only
+way out is a proxy cannot deliver them. Add a private certificate authority with
+`NODE_EXTRA_CA_CERTS`. Workers never send webhooks. Each endpoint's signing secret
+is stored as plain text in the application database, so protect database access and
+backups as [outbound webhooks](webhooks.md#the-secret-and-where-it-is-kept) explains.
 
 Run one container per process with the hardening below. `tini` is the image
 entrypoint and reaps orphaned SDK descendants, so do not add Docker's `--init`.
@@ -87,6 +100,7 @@ In Kubernetes pass the command as `args:`; setting `command:` replaces `tini`.
 | `BIRBCREW_STATE_DIR` | worker | `/var/lib/birbcrew/native` | Native state directory. Keep the image default. |
 | `HOME` | both | `/tmp` | Writable home for SDK caches. |
 | `BIRBCREW_WORKER_HEARTBEAT_FILE` | worker | unset | Absolute path the worker touches every 5 seconds from the start of its Temporal workers until shutdown begins. See [Health](#health). |
+| `BIRBCREW_WEBHOOK_ALLOW_INSECURE_TARGETS` | gateway | unset | `1` lets webhooks use plain `http` and loopback or private addresses, for local testing only. Any other value leaves it off. See [outbound webhooks](webhooks.md#network-safety). |
 | `BIRBCREW_PI_ATTESTATION`, `OPENCODE_GO_API_KEY` | worker | unset | Pi on OpenCode Go. See [Provider accounts](#provider-accounts). |
 | `BIRBCREW_CODEX_ATTESTATION`, `BIRBCREW_CODEX_AUTH_HOME` | worker | unset | Codex with a ChatGPT subscription. |
 
@@ -210,8 +224,11 @@ Migration 31 (usage metering) takes `members` and `native_launches` in
 `SHARE ROW EXCLUSIVE` and `audit_events` and `routine_firings` in `ACCESS EXCLUSIVE`, with
 `NOWAIT` and retries like 25 to 30; after 27 to 30 in one transaction it retries while
 holding their locks, and a running native turn never delays it (see
-[usage metering](usage-metering.md#upgrade-and-recovery)). From the release that adds
-migration 31 on, every gateway, worker and CLI process refuses to start with
+[usage metering](usage-metering.md#upgrade-and-recovery)). Migration 32 (outbound
+webhooks) takes `audit_events` alone in `ACCESS EXCLUSIVE` the same way; after 31 in
+one transaction it already holds it (see [outbound webhooks](webhooks.md#upgrade)).
+From the release that adds migration 31 on, every gateway, worker and CLI process
+refuses to start with
 `Migration N would apply after migration M` when it would apply a migration numbered 27
 or above below one the database already has, because applying the older one would
 silently narrow constraints the newer one widened.

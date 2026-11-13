@@ -16,6 +16,10 @@ const routineFact = "((payload->>'routineId'), (payload->>'revision')) WHERE eve
 const routineChange = { routineId: uuid, revision: z.int().min(2).max(2_147_483_647) };
 const grantFact = "(event_type, (payload->>'grantId'), (payload->>'approvalId')) WHERE event_type IN ('approval.auto_approved', 'grant.created', 'grant.revoked')";
 const memoryFact = "((payload->>'memoryId'), event_type) WHERE event_type IN ('memory.created', 'memory.deleted', 'memory.suspended')";
+const webhookFact = "((payload->>'webhookId'), (payload->>'revision')) WHERE event_type IN ('webhook.created', 'webhook.enabled', 'webhook.disabled', 'webhook.deleted')";
+// URL.host: lowercase ASCII (IDNs arrive as punycode), an optional port, brackets for IPv6. Never a path.
+const webhookHost = z.string().max(300).regex(/^[a-z0-9._\-[\]:]+$/);
+const webhookChange = { webhookId: uuid, revision: z.int().min(2).max(2_147_483_647), host: webhookHost };
 const budgetFact = "(member_id, (payload->>'revision')) WHERE event_type IN ('usage.budget_set', 'usage.budget_cleared')";
 const tokenLimit = z.int().min(1).max(1_000_000_000_000);
 
@@ -23,10 +27,11 @@ const tokenLimit = z.int().min(1).max(1_000_000_000_000);
 export const actorKinds = ["owner", "system"] as const;
 type Actor = (typeof actorKinds)[number];
 /** The closed audit vocabulary. 021-audit.sql repeats these types in a CHECK, widened by
- * 024-standing-grants.sql, 025-routines.sql, 026-memories.sql, 027-handoffs.sql, 028-approval-expiry.sql, 029-member-instructions.sql and 031-usage.sql. Payloads are strict: identifiers, digests, choices and statuses only,
+ * 024-standing-grants.sql, 025-routines.sql, 026-memories.sql, 027-handoffs.sql, 028-approval-expiry.sql, 029-member-instructions.sql, 031-usage.sql and 032-webhooks.sql. Payloads are strict: identifiers, digests, choices and statuses only,
  * never prompt/reply text, tool arguments or secrets. An actor given as a function is
  * decided by the validated payload. A routine acts with its owner's authority, so rows its
- * firings cause name the owner; Crew's own decisions about a routine name the system. */
+ * firings cause name the owner; Crew's own decisions about a routine name the system.
+ * `member: false` marks a type that belongs to no member: its rows have a null memberId. */
 export const auditEvents = {
   "member.spawned": { actor: "owner", key: "(member_id) WHERE event_type = 'member.spawned'",
     payload: z.strictObject({ spawnRequestId: uuid, engine: engineSchema, profile: z.string().min(1) }) },
@@ -104,12 +109,26 @@ export const auditEvents = {
   "usage.request_refused": { actor: "system", key: "(conversation_id, request_id) WHERE event_type = 'usage.request_refused'",
     payload: z.strictObject({ tokenLimit, usedTokens: z.int().min(0), period: z.literal("utc_day"), windowStart: z.iso.datetime(),
       budgetRevision: z.int().min(1), routineId: uuid.optional() }) },
+  // A card or question became pending: proposeLocked inserted a call no standing grant approved.
+  "approval.requested": { actor: "system", key: "((payload->>'approvalId')) WHERE event_type = 'approval.requested'",
+    payload: z.strictObject({ approvalId: uuid, invocationId: uuid, toolName: toolNameSchema, argumentDigest: sha256 }) },
+  // Webhook endpoints are the owner's, not a member's. The host only: a URL can carry a credential.
+  "webhook.created": { actor: "owner", member: false, key: webhookFact, payload: z.strictObject({
+    webhookId: uuid, revision: z.literal(1), host: webhookHost, kinds: z.array(z.string().regex(/^[a-z]+\.[a-z_]+$/)).min(1).max(4),
+  }) },
+  "webhook.enabled": { actor: "owner", member: false, key: webhookFact, payload: z.strictObject(webhookChange) },
+  // The owner disables an endpoint; Crew does after its tenth failed delivery in a row, and when a restore resumes.
+  "webhook.disabled": { actor: (payload: { reason: string }): Actor => payload.reason === "owner" ? "owner" : "system",
+    member: false, key: webhookFact,
+    payload: z.strictObject({ ...webhookChange, reason: z.enum(["owner", "consecutive_failures", "recovery_restore"]) }) },
+  "webhook.deleted": { actor: "owner", member: false, key: webhookFact, payload: z.strictObject(webhookChange) },
 } as const;
 export type AuditEventType = keyof typeof auditEvents;
 export const auditEventTypes = Object.keys(auditEvents) as AuditEventType[];
+type Memberless = { [T in AuditEventType]: (typeof auditEvents)[T] extends { member: false } ? T : never }[AuditEventType];
 
 export interface AuditFact<T extends AuditEventType> {
-  type: T; ownerId: string; memberId: string; conversationId?: string; requestId?: string;
+  type: T; ownerId: string; memberId: T extends Memberless ? null : string; conversationId?: string; requestId?: string;
   payload: z.input<(typeof auditEvents)[T]["payload"]>;
 }
 
@@ -226,7 +245,8 @@ export interface AuditEvent {
   eventId: string; occurredAt: string; type: AuditEventType;
   actor: { kind: "owner" | "system"; id: string | null };
   initiator: { kind: RequestInitiator["kind"]; id: string };
-  memberId: string; conversationId: string | null; requestId: string | null;
+  /** Null only for types that belong to no member (the webhook facts). */
+  memberId: string | null; conversationId: string | null; requestId: string | null;
   payload: Record<string, unknown>;
 }
 
@@ -243,13 +263,20 @@ export class AuditUnsettledError extends Error {
 // its maximum is a safe horizon. Polling with try-lock never queues ahead of writers.
 // The lock is global, so one stalled writer makes every owner's read wait out the window.
 // The backoff keeps those waiting readers from crowding the gateway's small pool.
-async function stableHorizon(pool: Pool): Promise<string> {
+// The webhook dispatcher reads its horizons the same way. Never call these inside a
+// transaction: the exclusive lock would then be held, against every writer, until commit.
+/** One try: the horizon, or null while an audited writer is in flight. */
+export async function settledHorizon(pool: Pool): Promise<string | null> {
+  const { rows: [row] } = await pool.query<{ horizon: string | null }>(`SELECT CASE
+    WHEN pg_try_advisory_xact_lock(hashtextextended('birbcrew_ts.audit_events', 0))
+    THEN (SELECT coalesce(max(event_id), 0) FROM birbcrew_ts.audit_events)::text END AS horizon`);
+  return row.horizon;
+}
+export async function stableHorizon(pool: Pool): Promise<string> {
   const deadline = Date.now() + auditSettleWindowMs;
   for (let wait = 10; ; wait = Math.min(wait * 2, 200)) {
-    const { rows: [row] } = await pool.query<{ horizon: string | null }>(`SELECT CASE
-      WHEN pg_try_advisory_xact_lock(hashtextextended('birbcrew_ts.audit_events', 0))
-      THEN (SELECT coalesce(max(event_id), 0) FROM birbcrew_ts.audit_events)::text END AS horizon`);
-    if (row.horizon !== null) return row.horizon;
+    const horizon = await settledHorizon(pool);
+    if (horizon !== null) return horizon;
     const left = deadline - Date.now();
     if (left <= 0) throw new AuditUnsettledError();
     await delay(Math.min(wait, left));

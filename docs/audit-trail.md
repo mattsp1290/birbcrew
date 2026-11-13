@@ -61,7 +61,8 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   Standing grants (migration 24) added no kind: a call a grant approves keeps its
   request's initiator, and `approval.auto_approved` names the system as its actor.
 - `event_type`, `member_id`, `conversation_id`, `request_id` and a small
-  `payload` object.
+  `payload` object. `member_id` is null only for the `webhook.*` types, which belong
+  to the owner and to no member (migration 32, `audit_events_member_check`).
 
 The audit row is written in the **same transaction** as the change it records, so
 a rolled-back change leaves no row, and a change committed by a release that
@@ -100,7 +101,7 @@ audit version may switch to a keyed per-owner digest.
 
 The registry is the `auditEvents` object in `src/service/audit.ts`.
 `audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
-`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql`, `027-handoffs.sql`, `028-approval-expiry.sql`, `029-member-instructions.sql` and then `031-usage.sql`, lists the same types.
+`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql`, `027-handoffs.sql`, `028-approval-expiry.sql`, `029-member-instructions.sql`, `031-usage.sql` and then `032-webhooks.sql`, lists the same types.
 Each widening replaces the whole constraint, so the last widening lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
@@ -132,6 +133,11 @@ A test checks that the two lists match. `GET /v1/capabilities` lists them under
 | `usage.budget_set` | owner | a member's [usage budget](usage-metering.md) is set or its limit changes | member + revision | `revision`, `tokenLimit`, `period` |
 | `usage.budget_cleared` | owner | a member's usage budget is cleared | member + revision | `revision` |
 | `usage.request_refused` | system | admission refuses a request because its member used its budget; the only refused call the trail records | conversation + request | `tokenLimit`, `usedTokens`, `period`, `windowStart`, `budgetRevision`, optional `routineId` |
+| `approval.requested` | system | `proposeLocked` inserts a call no standing grant approved: a card or question became pending | `approvalId` | `approvalId`, `invocationId`, `toolName`, `argumentDigest` |
+| `webhook.created` | owner | a [webhook endpoint](webhooks.md) is created; no member | endpoint + revision | `webhookId`, `revision` (1), `host`, `kinds` |
+| `webhook.enabled` | owner | an endpoint is enabled; no member | endpoint + revision | `webhookId`, `revision`, `host` |
+| `webhook.disabled` | owner, or system for `consecutive_failures` and `recovery_restore` | an endpoint is disabled; no member | endpoint + revision | `webhookId`, `revision`, `host`, `reason` |
+| `webhook.deleted` | owner | an endpoint is deleted and its URL and secret erased; no member | endpoint + revision | `webhookId`, `revision`, `host` |
 
 `approval.decided` names the deciding owner as its actor. Through the gateway, the
 owner comes from the bearer token at `POST .../human`. The operator CLI names the
@@ -344,6 +350,14 @@ plus the three usage types, and adds two partial unique indexes for them. It tak
 `audit_events` and `routine_firings` together with `members` and `native_launches`
 without queueing, so it never waits for a native turn;
 [usage metering](usage-metering.md#upgrade-and-recovery) lists its locks.
+
+Migration 32 drops `NOT NULL` from `member_id`, adds `audit_events_member_check`,
+which allows a null member only on the `webhook.*` types, and replaces
+`audit_events_type_check` with every type 31 lists and the five new ones, all
+`NOT VALID` and without a rewrite, and adds two partial unique indexes. It takes only
+`audit_events`, without queueing; after 31 in one transaction it already holds that
+table. [Outbound webhooks](webhooks.md#upgrade) lists its locks. `memberId` is `null`
+on `webhook.*` rows in JSON, and their CSV cell is empty.
 
 The audit table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest

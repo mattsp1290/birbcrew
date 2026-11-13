@@ -11,7 +11,7 @@ Keep all of the following at the same quiesced boundary:
 
 | Artifact | Required contents |
 | --- | --- |
-| `application-postgres` | Entire Crew application database: schema/version table, members/profiles, volume identities and account digests, conversation mappings, native checkpoints, admissions/turns, effect and delivery receipts, decisions, observation snapshots/events/cursors, append-only audit events, scheduled routines and their firings, member memory entries (including their text) and each conversation's references to them, member instructions (including their text), the usage ledger and member usage budgets, trusted sessions/generations and historical receipt authority, and recovery control row. |
+| `application-postgres` | Entire Crew application database: schema/version table, members/profiles, volume identities and account digests, conversation mappings, native checkpoints, admissions/turns, effect and delivery receipts, decisions, observation snapshots/events/cursors, append-only audit events, scheduled routines and their firings, member memory entries (including their text) and each conversation's references to them, member instructions (including their text), the usage ledger and member usage budgets, webhook endpoints (including their URLs and signing secrets), deliveries and fan-out cursor, trusted sessions/generations and historical receipt authority, and recovery control row. |
 | `native-volumes` | Full private Claude and Codex native session trees, SQLite indexes and sidecars (after teardown), rollout/transcript bytes, identity markers, and any consumer-owned native stores. A checkpoint digest is not the underlying file. Pi context normally lives in application checkpoints. |
 | `temporal-persistence` | Supported consistent backup of the actual self-hosted Temporal persistence, visibility and required cluster/configuration state. Include all relevant stores in one opaque archive or provider snapshot export. A workflow-history export is insufficient to recreate the service's execution identities, queues and cluster persistence. |
 | `configuration` | Non-secret deployment configuration, application commit, lockfile, image/package/native pins, profile identities, models/tool schemas, logical native mount paths, PostgreSQL/Temporal server versions and store layout. |
@@ -268,6 +268,15 @@ snapshot or copied from another fence, and never deleted. See
    on the restored database and give it to consumers that mirror usage records. See
    [usage metering](usage-metering.md#upgrade-and-recovery).
 
+   In the same transaction it disables every enabled webhook endpoint with reason
+   `recovery_restore`, auditing each `webhook.disabled`, cancels every undelivered
+   webhook delivery, and moves the webhook cursor past every restored audit event,
+   so no event from before the restore is sent: an undelivered row may already have
+   reached its receiver on the discarded timeline, and the restore can bring back an
+   endpoint the owner deleted. The owner enables each endpoint again. A held source
+   that resumes without a restore keeps its endpoints. See
+   [outbound webhooks](webhooks.md#recovery).
+
    After successful reconciliation and activation, restart matching Temporal
    services/workers **with consumer ingress still disabled**. Let recovery
    reconcile lost native processes and verify the required held/interrupted/
@@ -347,7 +356,10 @@ step of the restore procedure in [source fencing and restore](#source-fencing-an
 Schedule would fire whenever the Temporal server runs, including before `resume`;
 the dispatcher instead runs only in a gateway and checks the recovery phase before
 every pass, and both routine tables carry the write barrier, so a held or restored
-installation records no firing even if a gateway was left running.
+installation records no firing even if a gateway was left running. The
+[webhook](webhooks.md) dispatcher runs in gateways too, checks the phase the same
+way, and its three tables carry the barrier, so a held installation starts no new
+delivery; an attempt already in flight at the hold may still reach its receiver.
 
 Windows that fall while the installation is held or its gateways are stopped are
 never run late. The first gateway to start is armed from then on; a window it was not

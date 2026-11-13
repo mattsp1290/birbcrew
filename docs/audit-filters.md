@@ -48,7 +48,8 @@ exists. This is how `conversationId` already behaved.
   conversation and its member, so the source member's ID matches it and the
   target member's ID does not, unless the target is the source's own member. The
   target member's ID matches the target's `conversation.opened` row and its
-  reserved request's rows.
+  reserved request's rows. The [webhook](webhooks.md#audit) rows name no member
+  (`memberId` is `null`), so no `memberId` matches them; `eventType` selects them.
 - `eventType` takes names from `audit.eventTypes`. A name is case-sensitive. A
   registered type with no rows yet returns an empty page.
 - `actorKind` and `initiatorKind` match the `actor.kind` and `initiator.kind`
@@ -259,6 +260,12 @@ members, a denied card and a routine that fires and completes:
   members, handoff and conversations return empty pages; a handoff to the
   source's own member shows under that member, and an owner ID that is a UUID
   never matches its own rows through `initiatorId`;
+- two owners, each with a pending card and an endpoint created, disabled, enabled
+  and deleted, plus a system `webhook.disabled`: `memberId` never returns a
+  webhook row, alone or with `eventType`, each registered type, actor and
+  initiator kinds and the conversation return exactly the reading owner's rows,
+  CSV equals JSON with empty member, conversation and request cells on webhook
+  rows, and neither format holds a secret or a URL path;
 - a filtered read waits for a late commit like an unfiltered one, and answers
   `503 audit_unsettled` when a writer stays open;
 - each malformed value above returns `400 invalid_input`;

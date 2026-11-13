@@ -158,8 +158,9 @@ export class ApprovalStore {
     return this.transaction(db => this.proposeLocked(db, input, pendingCheckpoint, mode));
   }
 
-  /** A call an active grant covers is inserted already approved and appends approval.auto_approved,
-   * whose shared lock every owner's audit read waits on until commit. After it returns, run only
+  /** A call an active grant covers is inserted already approved and appends approval.auto_approved;
+   * any other new call is a pending card or question and appends approval.requested. Either holds
+   * the shared lock every owner's audit read waits on until commit. After it returns, run only
    * database statements and commit: await nothing outside the database. */
   async proposeLocked(db: PoolClient, input: Proposal, pendingCheckpoint?: unknown, mode?: ProposalMode): Promise<Approval> {
     const key = proposalSchema.parse(input);
@@ -250,6 +251,9 @@ export class ApprovalStore {
     if (standing.grant) await appendAudit(db, { type: "approval.auto_approved", ownerId: key.ownerId, memberId: key.memberId,
       conversationId: key.conversationId, requestId: key.requestId, payload: { approvalId: row.approvalId,
         invocationId: key.invocationId, toolName: "record_work_item", argumentDigest: digest, grantId: standing.grant.grantId } });
+    else await appendAudit(db, { type: "approval.requested", ownerId: key.ownerId, memberId: key.memberId,
+      conversationId: key.conversationId, requestId: key.requestId, payload: { approvalId: row.approvalId,
+        invocationId: key.invocationId, toolName: key.toolName, argumentDigest: digest } });
     return approval;
   }
 

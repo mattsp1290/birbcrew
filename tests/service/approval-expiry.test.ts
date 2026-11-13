@@ -164,7 +164,7 @@ test("a card shows its deadline; a decision before it wins and the deadline then
   assert.equal((await r.decide(card, "approve")).status, 409);
   assert.equal((await r.settle(card)).kind, "denied");
   assert.equal((await r.receipt()).expiredApproval, undefined);
-  assert.deepEqual((await r.audit()).map(row => row.type), ["conversation.opened", "request.accepted", "approval.decided"]);
+  assert.deepEqual((await r.audit()).map(row => row.type), ["conversation.opened", "request.accepted", "approval.requested", "approval.decided"]);
 
   const plain = await o.started();
   const unbounded = await plain.propose();
@@ -211,8 +211,9 @@ test("a card nobody decides expires once, cancelling its request distinguishably
   assert.deepEqual([completed.status, completed.expiredApproval], ["completed", running.expiredApproval]);
   assert.equal((await r.snapshot()).state.phase, "cancelled");
   const audit = await r.audit();
-  assert.deepEqual(audit.map(event => event.type), ["conversation.opened", "request.accepted", "approval.expired", "request.finished"]);
-  assert.deepEqual(audit[2], { type: "approval.expired", actor: "system", actorId: null, initiator: "owner",
+  assert.deepEqual(audit.map(event => event.type), ["conversation.opened", "request.accepted", "approval.requested", "approval.expired",
+    "request.finished"]);
+  assert.deepEqual(audit[3], { type: "approval.expired", actor: "system", actorId: null, initiator: "owner",
     payload: { approvalId: card.approvalId, invocationId: r.requestId, toolName: "record_work_item", expiresAt } });
 
   // An owner's deny and an owner's cancel leave none of these marks.

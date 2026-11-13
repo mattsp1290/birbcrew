@@ -139,7 +139,7 @@ How much to trust each column:
 | 31 | Desktop app | No | Yes | Yes | Yes | No | Yes | No | No | No |
 | 32 | Mobile app | No | Part | Yes | Yes | Part | Yes | Part | Yes | Part |
 | 33 | Slack, Teams, SMS, or another chat surface | No | Yes | Yes | Yes | No | Yes | Yes | No | Yes |
-| 34 | Notifications when nobody is watching | No | Yes | Yes | Part | Part | Part | No | Yes | Yes |
+| 34 | Notifications when nobody is watching | Part | Yes | Yes | Part | Part | Part | No | Yes | Yes |
 | 35 | Voice | No | Yes | Yes | Yes | No | Part | Yes | Part | Yes |
 
 ### Operations
@@ -186,11 +186,11 @@ that names a later pull request describes Crew after that pull request instead.
 | 13 | Yes | A `record_work_item` call opens an approval card. A `choose_next_step` call opens a question. See [the gateway guide](member-gateway.md). An owner can give a request or a routine an approval deadline of one minute to seven days, after which Crew cancels a Claude or Pi request whose card is still undecided and records the expiry; see [approval expiry](approval-expiry.md) (pull request #51). |
 | 14 | Yes | An owner can answer a card with `allow_conversation` or `allow_always`. A grant matches the tool, not its arguments. A grant never expires by time and never applies to a routine's request or to a handoff's first request. See [standing grants](standing-grants.md). |
 | 15 | No | Crew has no deny rule and no rule language. The eligibility of a grant is fixed in code. A routine's `fail_closed` approval policy cancels the waiting request rather than denying the call. |
-| 16 | Yes | `GET /v1/audit` returns an append-only trail of 25 event types (pull request #51 adds `approval.expired`, pull request #48 adds `member.instructions_set`, and pull request #53 adds `usage.budget_set`, `usage.budget_cleared`, and `usage.request_refused`) as JSON or CSV. It filters by conversation, member, event type, actor kind, initiator kind, initiator ID and time window, combined with AND (pull request #50). No filter reads payload fields, such as an approval's choice or the `routineId` of a routine's own rows. Refused HTTP calls leave no row, except a request that its member's usage budget refuses (pull request #53). No retention limit and no deletion route exist. See [the audit trail](audit-trail.md) and [audit filters](audit-filters.md). |
+| 16 | Yes | `GET /v1/audit` returns an append-only trail of 30 event types (pull request #51 adds `approval.expired`, pull request #48 adds `member.instructions_set`, pull request #53 adds `usage.budget_set`, `usage.budget_cleared`, and `usage.request_refused`, and pull request #52 adds `approval.requested` and four `webhook.*` types, whose rows name no member) as JSON or CSV. It filters by conversation, member, event type, actor kind, initiator kind, initiator ID and time window, combined with AND (pull request #50). No filter reads payload fields, such as an approval's choice or the `routineId` of a routine's own rows. Refused HTTP calls leave no row, except a request that its member's usage budget refuses (pull request #53). No retention limit and no deletion route exist. See [the audit trail](audit-trail.md) and [audit filters](audit-filters.md). |
 | 17 | Yes | Each request admission records an initiator of kind `owner`, `routine`, or `handoff`. The audit trail copies the initiator from the admission. |
 | 18 | No | Grant matching runs only inside the transaction that records a call. |
 | 19 | No | Members have no computer. |
-| 20 | No | Provider keys come from environment variables, operator-provided private files, the operator's Codex login, or an operator credential command for proxy profiles. Crew has no credential store and encrypts none of them. Native transcripts are plain text in the state directory. |
+| 20 | No | Provider keys come from environment variables, operator-provided private files, the operator's Codex login, or an operator credential command for proxy profiles. Crew has no credential store and encrypts none of them. Native transcripts are plain text in the state directory. Each webhook endpoint's signing secret is stored as plain text in PostgreSQL (pull request #52). |
 | 21 | Part | Clients cannot supply tools or context. An owner can set a member's instructions once, at spawn (pull request #48); they reach the model as instructions, not as reference data. Crew injects project notes and member memory under a header that labels them as reference data. Crew has no injection classifier. It checks tool arguments only against strict schemas and binds `operation_id` to the request; it does not inspect free text such as the `note` of a work item. A handoff passes the source's replies to the target inside a user message, which [the handoff guide](handoffs.md) says is not a security boundary. |
 | 22 | Part | A Landlock and seccomp launcher confines the Claude and Codex native processes. Pi does not use the launcher: it runs unconfined in a Node runner process that the worker's supervisor forks each time a turn runs or resumes. See [verification](verification.md). |
 
@@ -214,7 +214,7 @@ that names a later pull request describes Crew after that pull request instead.
 | 31 | No | None. |
 | 32 | No | None. The original first-milestone brief assigns the eventual phone interface to Birbforge. |
 | 33 | No | None. No Slack, Teams, or SMS integration exists. [The original first-milestone brief](first-milestone.md) excluded sending to Slack. |
-| 34 | No | A pending card and a finished routine appear only to a client that polls or holds an AG-UI stream open. Crew has no webhook and no push. |
+| 34 | Part | An owner registers up to 10 HTTPS webhook endpoints (pull request #52). Crew posts a signed body of IDs and a status when a card or question becomes pending, a request finishes, a routine firing settles, or Crew disables a routine. Crew sends no push, email, or chat message itself. See [outbound webhooks](webhooks.md). |
 | 35 | No | None. |
 
 ### Operations
@@ -524,7 +524,6 @@ Crew lacks the feature, and at least seven of the eight other products have it:
 - 29, proactive check-ins or suggestions (7 Yes, 0 Part, 1 No, 0 ?)
 - 30, web app (7 Yes, 1 Part, 0 No, 0 ?)
 - 32, mobile app (4 Yes, 4 Part, 0 No, 0 ?)
-- 34, notifications when nobody is watching (4 Yes, 3 Part, 1 No, 0 ?)
 - 35, voice (5 Yes, 2 Part, 1 No, 0 ?)
 
 Crew has the feature ("Yes" or "Part"), and at most four of the eight other

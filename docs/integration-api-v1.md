@@ -21,7 +21,9 @@ member memory route, limits, injection and deletion semantics per engine), `hand
 `approvalExpiry` (the deadline field, its bounds and the fields that report an
 expiry), `memberInstructions` (the spawn field, the read route, limits, order and
 restore), `usage` (the ledger states, what each engine reports, the budget period and
-refusal codes), health dependencies and listing limits. Additive
+refusal codes), `webhooks` (the webhook route, kinds, signature, retry and restore
+semantics, and `insecureTargets`, which says an operator setting for testing exists,
+not whether it is on), health dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
@@ -54,6 +56,9 @@ proof of the operator's provider access or configured profile availability.
 | `GET /v1/usage`, `GET /v1/usage/members`, `GET /v1/usage/conversations` | Token totals for the owner, per member (with its budget) and per conversation, over an optional time range |
 | `GET /v1/usage/records` | Usage ledger rows, one per native segment, newest first |
 | `GET`/`PUT`/`DELETE /v1/usage/budgets/{memberId}` | Read, set (`tokenLimit`) or clear a member's daily token budget |
+| `POST /v1/webhooks`, `GET /v1/webhooks` | Create (`requestId`, `url`, `kinds`; the response alone carries the signing secret) and list webhook endpoints |
+| `GET`/`DELETE /v1/webhooks/{webhookId}`, `POST .../enable`, `POST .../disable` | Read, tombstone, enable or disable one endpoint |
+| `GET /v1/webhooks/{webhookId}/deliveries` | Delivery rows, newest event first |
 
 Authentication is required even for capabilities and health. There is no
 unauthenticated route. A request without a valid token gets `401` before the gateway
@@ -386,7 +391,7 @@ upgrade without them.
 | `after` | Decimal event ID; return later events only. Default `0`. |
 | `limit` | Default 100 in both formats. At most 1000 for JSON and 10000 for CSV (the hard row cap). |
 | `conversationId` | Restrict to one conversation. Another owner's ID yields an empty page. |
-| `memberId` | Restrict to one member. Another owner's ID yields an empty page. |
+| `memberId` | Restrict to one member. Another owner's ID yields an empty page. `webhook.*` rows name no member and never match. |
 | `eventType` | Comma-separated registered event types. |
 | `actorKind`, `initiatorKind` | `owner` or `system`; one of `initiatorKinds`. |
 | `initiatorId` | Requests a routine or a handoff started, by routine or handoff ID. Another owner's ID yields an empty page. |
@@ -490,6 +495,28 @@ request fails `409 usage_limit` (or `409 usage_limit_closed` when the refusal al
 the conversation), and a routine's firing fails with reason `usage_limit`; a request already
 admitted is never refused or interrupted, so the cap can be passed by what running
 requests use. See [usage metering](usage-metering.md).
+
+## Outbound webhooks
+
+An owner can register up to 10 enabled HTTPS endpoints. Crew posts to an endpoint
+when an event it selected happens: a card or question became pending
+(`approval.pending`), a request finished (`request.finished`), a routine firing
+settled (`routine.firing_settled`), or Crew disabled a routine after ten failures
+(`routine.disabled`). Each is derived from a committed audit event. The body
+carries IDs, the kind, the time and a status only; fetch details with your token.
+Each request is signed with HMAC-SHA256 over a timestamp and the body, using a
+secret that only the create response returns. Delivery is at least once and
+unordered, with ten attempts over about three hours, and an endpoint that gives up
+ten deliveries in a row is disabled. Crew sends only to public addresses over
+HTTPS, unless the operator allows insecure targets for local testing, follows no
+redirect and sends no credential. `webhook.*` audit rows belong
+to no member, so their `memberId` is `null` and a `memberId` filter never matches
+them. An expired card, a handoff and a budget refusal add no kind: a handoff's
+reserved request and an expired card's request are sent as `request.finished`, and a
+refused request sends nothing (see
+[what they send](webhooks.md#handoffs-approval-expiry-and-usage-budgets)). See
+[outbound webhooks](webhooks.md) for the receiver's checks, the secret's storage and
+the restore behaviour.
 
 ## Validation
 

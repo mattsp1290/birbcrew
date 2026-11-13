@@ -684,7 +684,13 @@ test("migration 031 takes its locks without queueing, rewrites nothing, leaves i
     assert.equal(new Set(types(kept)).size, 22);
     assert.deepEqual(replaced.slice(0, kept.length), kept, "every clause 029 held, unchanged and in order");
     assert.deepEqual(types(replaced.slice(kept.length)), ["usage.budget_set", "usage.budget_cleared", "usage.request_refused"]);
-    assert.deepEqual([...new Set(types(replaced))].sort(), [...auditEventTypes].sort(), "the registry and the CHECK name the same types");
+    // The registry also holds the types later migrations add to the CHECK, read from their files.
+    const later = new Set<string>();
+    for (const file of (await readdir(sql)).filter(file => Number(file.split("-")[0]) > 31)) {
+      const check = /ADD CONSTRAINT audit_events_type_check CHECK \(([\s\S]*?)\) NOT VALID;/.exec(await readFile(new URL(file, sql), "utf8"));
+      for (const [, type] of check?.[1].matchAll(/'([a-z_]+\.[a-z_]+)'/g) ?? []) later.add(type);
+    }
+    assert.deepEqual([...new Set([...types(replaced), ...later])].sort(), [...auditEventTypes].sort(), "the registry and the CHECKs name the same types");
     const [reasons, widened] = [reasonBranches(previous.routine_firings_reason_check), reasonBranches(current.routine_firings_reason_check)];
     assert.ok(reasons.failed.includes("approval_expired"), previous.routine_firings_reason_check);
     assert.deepEqual([...widened.skipped].sort(), [...skipReasons].sort());

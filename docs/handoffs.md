@@ -317,6 +317,10 @@ the source's own member.
 as with prompt digests, anyone holding an export can confirm a guess of a whole
 transcript.
 
+A handoff sends no [outbound webhook](webhooks.md#handoffs-approval-expiry-and-usage-budgets);
+the reserved request's finish is sent as `request.finished` for the target, with no
+initiator and no transcript.
+
 ## Recovery
 
 `conversation_handoffs` carries the `recovery_write_barrier` trigger, so a held
