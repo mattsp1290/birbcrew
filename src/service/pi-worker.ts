@@ -3,13 +3,15 @@ import {
   type Api, type AssistantMessageEvent, type AssistantMessageEventStream, type Model, type ProviderStreams,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { Socket } from "node:net";
+import { readFrames, writeFrame } from "./pi-channel.ts";
 import { forwardedOptions } from "./pi-launch.ts";
 import { runSegment, type PiProfile } from "./pi.ts";
 import { runTrustedSession } from "./trusted-pi.ts";
 import type { DriverInput } from "./activities.ts";
 import type { TrustedNativeInput } from "./trusted-native-types.ts";
 
-// Started only by pi-launch.ts through the member launcher: no credentials, no sockets, only this IPC channel.
+// Started only by pi-launch.ts through the member launcher: no credentials, no sockets, only descriptor 3.
 type Command = { model: Model<Api>; instructions?: string; allowRecordWorkItem?: boolean } & (
   | { kind: "member"; mode: Parameters<typeof runSegment>[2]; input: Omit<DriverInput, "signal"> }
   | { kind: "trusted"; input: Pick<TrustedNativeInput, "text" | "context" | "checkpoint" | "tools"> });
@@ -20,7 +22,9 @@ const streams = new Map<number, { events: AssistantMessageEventStream; release: 
 const calls = new Map<number, { resolve: (result: { text: string; isError: boolean }) => void; reject: (error: Error) => void }>();
 let sequence = 0;
 let started = false;
-const send = (message: object) => { process.send?.(message); };
+// Wrapping the inherited descriptor needs no socket call, which the launcher denies.
+const channel = new Socket({ fd: 3, readable: true, writable: true });
+const send = (message: object) => writeFrame(channel, message);
 const forwarded = Object.keys(forwardedOptions.shape);
 
 async function hostModels(model: Model<Api>) {
@@ -57,7 +61,7 @@ function dispatch(call: { nativeCallId: string; toolName: string; args: unknown 
 
 async function run(command: Command) {
   const { model, instructions, allowRecordWorkItem } = command;
-  const profile: PiProfile = { model, modelRuntime: await hostModels(model), ...(instructions && { instructions }), allowRecordWorkItem };
+  const profile: PiProfile = { model, modelRuntime: await hostModels(model), ...(instructions !== undefined && { instructions }), allowRecordWorkItem };
   const onText = (delta: string) => send({ delta });
   if (command.kind === "trusted") {
     return runTrustedSession({ ...command.input, signal, dispatch, onText,
@@ -67,13 +71,12 @@ async function run(command: Command) {
     onToolArgs: (toolArgs, matchedOperation) => send({ toolArgs, matchedOperation }) }, profile, command.mode);
 }
 
-process.once("disconnect", () => process.exit(1));
-process.on("message", (message: unknown) => {
+function receive(message: unknown) {
   if (!started) {
     started = true;
     run(message as Command).then((result) => ({ result }), (error: unknown) =>
       ({ error: (error instanceof Error ? error.message : "Pi worker failed").slice(0, 1024) }))
-      .then((reply) => process.send?.(reply, () => process.exit(0)));
+      .then((reply) => writeFrame(channel, reply, () => process.exit(0)));
     return;
   }
   const value = message as { stream?: number; event?: AssistantMessageEvent; dispatch?: number; result?: { text: string; isError: boolean }; error?: string };
@@ -91,4 +94,9 @@ process.on("message", (message: unknown) => {
     if (value.result) call?.resolve(value.result);
     else call?.reject(new Error(value.error ?? "Trusted application tool failed"));
   }
-});
+}
+
+// Losing the host ends the worker.
+channel.once("end", () => process.exit(1));
+channel.once("error", () => process.exit(1));
+readFrames(channel, receive, () => process.exit(1));

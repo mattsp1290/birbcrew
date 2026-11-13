@@ -3,38 +3,39 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Api, AssistantMessage, AssistantMessageEvent, Context, Model, ProviderResponse } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { PI_ATTRIBUTION, type Api, type AssistantMessage, type AssistantMessageEvent, type Context, type Model, type ProviderResponse } from "@earendil-works/pi-ai";
+import { VERSION, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { Duplex } from "node:stream";
 import { z } from "zod";
+import { readFrames, writeFrame } from "./pi-channel.ts";
 import type { PiProfile } from "./pi.ts";
 
 const source = fileURLToPath(new URL("../..", import.meta.url)).replace(/\/$/, "");
 const launcher = join(source, ".proof/bin/member-launch");
 const worker = fileURLToPath(new URL("./pi-worker.ts", import.meta.url));
 
-/** The member launcher invocation of every Pi worker. Its private directory is its only writable state. */
+/** The member launcher invocation of every Pi worker. Its private directory is its only writable state,
+ * and descriptor 3 (a socket pair) is its only channel. */
 export function piLaunch(directory: string, args: string[], invocationGroup?: number) {
   return {
     command: launcher,
     args: [String(process.pid), process.execPath, ...args],
     options: {
-      cwd: directory, detached: !invocationGroup, stdio: ["ignore", "ignore", "ignore", "ipc"] as ("ignore" | "ipc")[],
+      cwd: directory, detached: !invocationGroup, stdio: ["ignore", "ignore", "ignore", "pipe"] as ("ignore" | "pipe")[],
       env: { HOME: directory, TMPDIR: directory, BIRBCREW_NATIVE_SOURCE: source },
     },
   };
 }
 
-/** Request options that may cross from the worker. Credentials, headers and callbacks stay on the host. */
+/** The request options the worker's session may set. The host fixes retries and identity, and keeps
+ * credentials, headers and callbacks; Crew runs Pi with thinking off, so reasoning never crosses. */
 export const forwardedOptions = z.strictObject({
-  sessionId: z.string().max(256).optional(),
-  reasoning: z.string().max(32).optional(),
-  thinkingBudgets: z.record(z.string(), z.int().min(0)).optional(),
+  sessionId: z.uuid().optional(),
   transport: z.enum(["sse", "websocket", "websocket-cached", "auto"]).optional(),
-  identity: z.json().optional(),
-  timeoutMs: z.int().min(0).optional(),
-  websocketConnectTimeoutMs: z.int().min(0).optional(),
-  maxRetries: z.int().min(0).optional(),
-  maxRetryDelayMs: z.int().min(0).optional(),
+  timeoutMs: z.int().min(1).max(2_147_483_647).optional(),
+  websocketConnectTimeoutMs: z.int().min(1).max(600_000).optional(),
+  maxRetries: z.literal(0).optional(),
+  maxRetryDelayMs: z.int().min(0).max(60_000).optional(),
 });
 const text = z.string().max(65_536);
 const id = z.int().min(1);
@@ -60,9 +61,19 @@ export interface PiHost {
   /** A member segment ends after one model reply; a trusted turn adds one per registered tool call. */
   modelRequests: number;
   onText?: (delta: string) => void | Promise<void>;
+  /** Whether this segment may publish argument previews, as only a fresh record_work_item call does. */
+  previews?: boolean;
   onToolArgs?: (nativeCallId: string, matchedOperation: boolean) => void;
+  /** Present only for trusted turns: the registered tools run here, never in the worker. */
   dispatch?: (call: { nativeCallId: string; toolName: string; args: unknown; signal: AbortSignal }) => Promise<{ text: string; isError: boolean }>;
   onToolDelivered?: (call: z.infer<typeof toolCall>) => void | Promise<void>;
+}
+
+// The identity the SDK's own session sends for this host (pi-coding-agent core/client-identity.js).
+function identity() {
+  const telemetry = process.env.PI_TELEMETRY;
+  return { userAgent: "detailed" as const, version: VERSION,
+    attribution: telemetry === undefined || ["1", "true", "yes"].includes(telemetry.toLowerCase()) ? PI_ATTRIBUTION : null };
 }
 
 const providerEvents = new Set(["before_provider_headers", "before_provider_request", "after_provider_response", "provider_stream_event"]);
@@ -122,7 +133,8 @@ function failed(model: Model<Api>, aborted: boolean): AssistantMessageEvent {
 /**
  * Runs one Pi command in a worker confined by the member launcher. The worker gets no credentials and no
  * sockets: this host makes each model request with the operator's profile and runs each tool dispatch.
- * Resolves with the worker's unvalidated result and the assistant messages this host observed.
+ * Resolves with the worker's unvalidated result, the assistant messages this host relayed, and the text
+ * the worker published.
  */
 export async function runPiWorker(command: PiCommand, host: PiHost) {
   host.signal.throwIfAborted();
@@ -138,22 +150,38 @@ function supervise(directory: string, command: PiCommand, host: PiHost) {
   const { profile, signal } = host;
   const { headers: _, ...model } = profile.model;
   const launch = piLaunch(directory, [worker], profile.invocationGroup);
-  return new Promise<{ result: unknown; observed: AssistantMessage[] }>((resolve, reject) => {
+  return new Promise<{ result: unknown; observed: AssistantMessage[]; streamed: string }>((resolve, reject) => {
     const child = spawn(launch.command, launch.args, launch.options);
-    const gone = new AbortController();
+    const channel = child.stdio[3] as Duplex | null;
+    const halted = new AbortController(), exited = new AbortController();
     const streams = new Map<number, AbortController>();
     const observed: AssistantMessage[] = [];
-    let reply: z.infer<typeof workerMessage> | undefined, failure: unknown, requests = 0;
+    // Trusted tool calls the model made, those dispatched, and those whose results the worker has yet to deliver.
+    const relayed = new Map<string, string>(), dispatched = new Set<string>(), undelivered = new Map<string, string>();
+    let reply: z.infer<typeof workerMessage> | undefined, failure: unknown, requests = 0, inflight = 0;
+    let streamed = "", streamedBytes = 0;
     let hooks: ReturnType<typeof providerHooks> | undefined;
     let callbacks = Promise.resolve();
-    const stop = () => {
-      if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
-      try { process.kill(profile.invocationGroup ? child.pid : -child.pid, "SIGKILL"); }
-      catch (error) { if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) failure ??= error; }
+    const record = (error: unknown) => { if (!halted.signal.aborted) { failure = error; halted.abort(); } };
+    const kill = (target: number) => {
+      try { process.kill(target, "SIGKILL"); }
+      catch (error) { if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) record(error); }
     };
-    const fail = (error: unknown) => { failure ??= error; stop(); };
-    const later = (action: () => unknown) => { callbacks = callbacks.then(async () => { await action(); }).catch(fail); };
-    const post = (message: object) => { if (child.connected) child.send(message, (error) => { if (error) fail(error); }); };
+    // A worker in its own group is killed with the group, which lives while any process in it does.
+    const stop = () => {
+      if (!child.pid) return;
+      if (!profile.invocationGroup) kill(-child.pid);
+      else if (child.exitCode === null && child.signalCode === null) kill(child.pid);
+    };
+    // After a failure nothing the worker sent is acted on, and every request made for it is cancelled.
+    const fail = (error: unknown) => { record(error); stop(); };
+    const inOrder = (action: () => unknown) => {
+      callbacks = callbacks.then(async () => { if (!halted.signal.aborted) await action(); }).catch(fail);
+    };
+    const post = (message: object) => {
+      if (channel?.writable && !exited.signal.aborted) writeFrame(channel, message, (error) => { if (error) fail(error); });
+    };
+    const working = () => AbortSignal.any([signal, halted.signal, exited.signal]);
 
     async function serve(id: number, context: Context, options: z.infer<typeof forwardedOptions>) {
       if (streams.has(id) || ++requests > host.modelRequests) throw new Error("Pi worker exceeded its model requests");
@@ -163,12 +191,15 @@ function supervise(directory: string, command: PiCommand, host: PiHost) {
       try {
         const extension = await (hooks ??= providerHooks(profile));
         const events = profile.modelRuntime.streamSimple(profile.model, context, {
-          ...options as object, ...extension.options, signal: AbortSignal.any([signal, gone.signal, controller.signal]),
+          ...options, maxRetries: 0, identity: identity(), ...extension.options, signal: AbortSignal.any([working(), controller.signal]),
         });
         for await (const event of events) {
-          if (event.type === "done") observed.push(event.message);
-          if (event.type === "error") observed.push(event.error);
-          settled = event.type === "done" || event.type === "error";
+          if (event.type === "done" || event.type === "error") {
+            const message = event.type === "done" ? event.message : event.error;
+            observed.push(message);
+            for (const part of message.content) if (part.type === "toolCall") relayed.set(part.id, part.name);
+            settled = true;
+          }
           post({ stream: id, event });
           if (settled) break;
         }
@@ -178,49 +209,79 @@ function supervise(directory: string, command: PiCommand, host: PiHost) {
       }
     }
 
-    async function dispatch(id: number, call: { nativeCallId: string; toolName: string; args: unknown }) {
-      if (!host.dispatch) throw new Error("Unexpected Pi tool dispatch");
+    async function dispatch(id: number, call: z.infer<typeof toolCall> & { args: unknown }) {
+      if (!host.dispatch || relayed.get(call.nativeCallId) !== call.toolName || dispatched.has(call.nativeCallId)) {
+        throw new Error("Pi worker dispatched a tool call its model did not make");
+      }
+      dispatched.add(call.nativeCallId);
+      inflight++;
       try {
-        const { text, isError } = await host.dispatch({ ...call, signal: AbortSignal.any([signal, gone.signal]) });
+        const { text, isError } = await host.dispatch({ ...call, signal: working() });
+        undelivered.set(call.nativeCallId, call.toolName);
         post({ dispatch: id, result: { text, isError } });
       } catch (error) {
         post({ dispatch: id, error: error instanceof Error ? error.message : "Trusted application tool failed" });
+      } finally {
+        inflight--;
       }
     }
 
-    child.on("message", (value) => {
+    function receive(value: unknown) {
+      if (halted.signal.aborted) return;
       const parsed = workerMessage.safeParse(value);
       if (!parsed.success || reply) return fail(new Error("Unexpected Pi worker message"));
       const message = parsed.data;
-      if ("delta" in message) later(() => host.onText?.(message.delta));
-      else if ("toolArgs" in message) later(() => host.onToolArgs?.(message.toolArgs, message.matchedOperation));
-      else if ("request" in message) serve(message.request, message.context as unknown as Context, message.options).catch(fail);
+      if ("delta" in message) {
+        streamedBytes += Buffer.byteLength(message.delta);
+        if (streamedBytes > 65_536) return fail(new Error("Pi worker exceeded its reply bound"));
+        streamed += message.delta;
+        inOrder(() => host.onText?.(message.delta));
+      } else if ("toolArgs" in message) {
+        if (!host.previews) return fail(new Error("Unexpected Pi tool preview"));
+        inOrder(() => host.onToolArgs?.(message.toolArgs, message.matchedOperation));
+      } else if ("request" in message) serve(message.request, message.context as unknown as Context, message.options).catch(fail);
       else if ("cancel" in message) streams.get(message.cancel)?.abort();
       else if ("dispatch" in message) {
         const { dispatch: id, ...call } = message;
         dispatch(id, call).catch(fail);
-      } else if ("delivered" in message) later(() => host.onToolDelivered?.(message.delivered));
+      } else if ("delivered" in message) {
+        const { nativeCallId, toolName } = message.delivered;
+        if (undelivered.get(nativeCallId) !== toolName) return fail(new Error("Unpaired Pi tool result"));
+        undelivered.delete(nativeCallId);
+        inOrder(() => host.onToolDelivered?.(message.delivered));
+      } else if ("result" in message && (inflight || undelivered.size)) fail(new Error("Pi worker finished before its tool results"));
       else reply = message;
-    });
+    }
+
+    if (channel) {
+      channel.on("error", fail);
+      readFrames(channel, receive, fail);
+    }
     child.once("error", (error) => {
       if (child.pid === undefined) reject(error);
       else fail(error);
     });
-    // close, not exit: it follows the last IPC message.
+    child.once("exit", () => {
+      exited.abort();
+      if (!profile.invocationGroup) stop();
+      // Settle even if something still holds the channel open.
+      const grace = setTimeout(() => { fail(new Error("Pi worker left its channel open")); channel?.destroy(); }, 5_000);
+      grace.unref();
+      child.once("close", () => clearTimeout(grace));
+    });
+    // close, not exit: it follows the last frame on the channel.
     child.once("close", async (code) => {
       signal.removeEventListener("abort", stop);
-      gone.abort();
       try {
         await callbacks;
         signal.throwIfAborted();
-        if (failure) throw failure;
+        if (code === 126) throw new Error("The native launcher refused to start the Pi worker");
+        if (halted.signal.aborted) throw failure ?? new Error("Pi worker failed");
         if (code !== 0 || !reply || !("result" in reply || "error" in reply)) throw new Error("Pi worker exited without a result");
         if ("error" in reply) throw new Error(reply.error);
-        if (profile.prepare) {
-          if (!hooks) throw new Error("Pi turn did not reach its model");
-          (await hooks).verify();
-        }
-        resolve({ result: reply.result, observed });
+        if (!observed.length) throw new Error("Pi worker answered without a model request");
+        if (profile.prepare) (await hooks!).verify();
+        resolve({ result: reply.result, observed, streamed });
       } catch (error) {
         reject(error);
       }
