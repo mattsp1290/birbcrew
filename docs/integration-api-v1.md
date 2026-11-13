@@ -506,15 +506,15 @@ settled (`routine.firing_settled`), or Crew disabled a routine after ten failure
 (`routine.disabled`). Each is derived from a committed audit event. The body
 carries IDs, the kind, the time and a status only; fetch details with your token.
 Each request in the default `crew` format is signed with HMAC-SHA256 over a
-timestamp and the body, using a secret that only the create response returns. An endpoint can choose another
-`format` at creation, fixed for its life and returned by every read: `slack` posts
-`{"text": ...}`, which Slack, Mattermost and Discord's Slack-compatible incoming
-webhooks show, and `ntfy` posts plain text with a `Title` header to an ntfy topic.
-Both are a fixed template of the same IDs, status, tool name and time, unsigned,
-because those services check no signature. Such a URL is itself a credential: the
-routes return it to the owner's token only, and the audit trail keeps its host. An
-unknown format fails `400 invalid_input`, and a replay with another format
-`409 conflict`. Delivery is at least once and
+timestamp and the body, using a secret that only the create response returns. An
+endpoint can choose another `format` at creation, fixed for its life and returned
+by every read. `slack` posts `{"text": ...}`, which Slack, Mattermost and Discord's
+Slack-compatible incoming webhooks show. `ntfy` posts plain text with a `Title`
+header to an ntfy topic. Both send a fixed template of the same IDs, status, tool
+name and time to a third-party service, unsigned, because those services check no
+signature. Such a URL is itself a credential: the routes return it to the owner's
+token only, and the audit trail keeps only its host. An unknown format fails
+`400 invalid_input`, and a replay with another format `409 conflict`. Delivery is at least once and
 unordered, with ten attempts over about three hours, and an endpoint that gives up
 ten deliveries in a row is disabled. Crew sends only to public addresses over
 HTTPS, unless the operator allows insecure targets for local testing, follows no
