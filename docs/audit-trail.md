@@ -134,7 +134,7 @@ A test checks that the two lists match. `GET /v1/capabilities` lists them under
 | `usage.budget_cleared` | owner | a member's usage budget is cleared | member + revision | `revision` |
 | `usage.request_refused` | system | admission refuses a request because its member used its budget; the only refused call the trail records | conversation + request | `tokenLimit`, `usedTokens`, `period`, `windowStart`, `budgetRevision`, optional `routineId` |
 | `approval.requested` | system | `proposeLocked` inserts a call no standing grant approved: a card or question became pending | `approvalId` | `approvalId`, `invocationId`, `toolName`, `argumentDigest` |
-| `webhook.created` | owner | a [webhook endpoint](webhooks.md) is created; no member | endpoint + revision | `webhookId`, `revision` (1), `host`, `kinds` |
+| `webhook.created` | owner | a [webhook endpoint](webhooks.md) is created; no member | endpoint + revision | `webhookId`, `revision` (1), `host`, `kinds`, `format` (absent on rows from before migration 35, whose endpoints are `crew`) |
 | `webhook.enabled` | owner | an endpoint is enabled; no member | endpoint + revision | `webhookId`, `revision`, `host` |
 | `webhook.disabled` | owner, or system for `consecutive_failures` and `recovery_restore` | an endpoint is disabled; no member | endpoint + revision | `webhookId`, `revision`, `host`, `reason` |
 | `webhook.deleted` | owner | an endpoint is deleted and its URL and secret erased; no member | endpoint + revision | `webhookId`, `revision`, `host` |

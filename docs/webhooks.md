@@ -5,7 +5,10 @@ reach only a client that polled or held an AG-UI stream open. Routines run with
 nobody watching, so their outcomes went unseen. Migration 32 lets an owner
 register webhook endpoints. Crew calls an endpoint when one of the events it
 selected happens, with a small signed body that names what happened. The
-receiver fetches the details with the owner's own token.
+receiver fetches the details with the owner's own token. Migration 35 lets an
+endpoint ask instead for a short readable message that a chat or push service's
+incoming-webhook URL accepts, so a person can be reached without a service of the
+owner's own in between (see [formats](#formats)).
 
 ## What an endpoint receives
 
@@ -23,7 +26,8 @@ rolled back.
 
 Every body also has `webhookId`, `eventId` (the audit event ID, a decimal
 string), `kind`, `occurredAt` (the database time of the change, with
-microseconds) and `memberId`. For example:
+microseconds) and `memberId`. This is what an endpoint in the default `crew` format
+receives; the other formats send a message made from it. For example:
 
 ```json
 {"kind": "request.finished", "status": "completed", "eventId": "1234",
@@ -45,9 +49,124 @@ with the owner's bearer token: the request receipt
 snapshot, whose `pendingApprovals` or `pendingQuestions` holds the card, or the
 routine's firings (`GET /v1/routines/{routineId}/firings`).
 
+## Formats
+
+An endpoint chooses its format when it is created and keeps it: like the URL and
+the kinds, a different format is a different endpoint. `webhookFormats` in
+`src/service/webhooks.ts` is the registry, so a format is one entry there.
+
+| Format | `Content-Type` | Body | Signed | Made for |
+| --- | --- | --- | --- | --- |
+| `crew` (the default) | `application/json` | the body above | yes | a receiver the owner runs |
+| `slack` | `application/json` | `{"text": "..."}` | no | Slack incoming webhooks, Mattermost incoming webhooks, and Discord's Slack-compatible path (`.../api/webhooks/{id}/{token}/slack`) |
+| `ntfy` | `text/plain; charset=utf-8` | the lines below, with the title in a `Title` header | no | an ntfy topic URL |
+
+`slack` and `ntfy` send one fixed template per kind: a title, the kind's own
+lines, and three lines every message ends with: `Member`, `Event` (the `eventId`)
+and `Occurred at` (`occurredAt`).
+
+| Kind | Title | The kind's own lines |
+| --- | --- | --- |
+| `approval.pending` | `Crew: approval pending` | `Tool`, `Conversation`, `Request`, `Approval` |
+| `request.finished` | `Crew: request <status>` | `Conversation`, `Request` |
+| `routine.firing_settled` | `Crew: routine firing <status>` | `Routine`, `Scheduled for` |
+| `routine.disabled` | `Crew: routine disabled` | `Routine`, `Reason` (`consecutive_failures`) |
+
+`slack` puts the title on the first line of `text` and each value in backticks, so
+Slack, Mattermost and Discord show it as code. `ntfy` sends the lines as they are.
+For one `request.finished`:
+
+```text
+slack: {"text":"Crew: request completed\nConversation: `UUID`\nRequest: `UUID`\nMember: `UUID`\nEvent: `1234`\nOccurred at: `2026-11-12T08:15:30.123456Z`"}
+
+ntfy:  Title: Crew: request completed
+
+       Conversation: UUID
+       Request: UUID
+       Member: UUID
+       Event: 1234
+       Occurred at: 2026-11-12T08:15:30.123456Z
+```
+
+**A message carries what the `crew` body carries, and nothing else.** Crew builds
+it when it sends each attempt, from the stored body, after the kind's strict schema
+has accepted that body again. A body the schema refuses, which only direct SQL
+could store, is never sent; its attempt fails as `network`. So no format carries
+prompt or reply text, a work-item note, tool arguments, member memory or
+instructions, a handoff transcript, the owner ID, a token or a secret. Every value
+is a UUID, a decimal event ID, a timestamp, a status or a tool name from a closed
+list, so none can hold markup or a mention that the service would act on. Every
+attempt of one delivery sends the same bytes. Delivery is at least once, so a
+channel can show one event twice; the `Event` line tells a person it is the same
+event.
+
+The format changes only the body and headers of each attempt. The audit source,
+the fan-out, the outbox row and the body it stores, the target checks before every
+attempt, the timeouts, the 4 KiB response read, the retries and the disabling of
+an endpoint after ten deliveries given up in a row are the same for every format.
+
+### Signing
+
+Crew signs only `crew` deliveries. A `slack` or `ntfy` request has no
+`Crew-Webhook-*` header. No chat or push service checks Crew's signature, so the
+headers would only add an endpoint ID and an event ID to what the service logs,
+and would suggest an authentication that nobody performs. A message in a channel
+or on a topic is not authenticated by Crew: anyone who has the URL can post one
+that looks the same. A receiver that has to know a request came from Crew uses
+`crew`. The create response still returns a secret for every format, so it has one
+shape; Crew never uses the secret of a `slack` or `ntfy` endpoint.
+
+### The URL is a credential
+
+An incoming-webhook URL is the only thing that lets a sender post: Slack states
+that the URL "contains a secret", Mattermost says to treat it as one, and Discord's
+URL holds the webhook's token. On an ntfy server without access control, anyone who
+knows a topic can both publish to it and subscribe to it, so the topic name is what
+keeps the messages private. Crew sends no `Authorization` header, so a server with
+access control has to take its token from the URL; ntfy reads one from an `auth`
+query parameter.
+
+Crew treats every endpoint's URL the same way, whatever its format, so a `slack` or
+`ntfy` endpoint exposes nothing that a `crew` endpoint with a secret path did not:
+
+- It is stored as plain text in `birbcrew_ts.webhook_endpoints`, beside the
+  secret, and erased with it when the endpoint is deleted. Copies remain in earlier
+  backups and in dead tuples until vacuum, as for the secret.
+- The create, read and list routes return it in full, to the owner's token only.
+  Anyone who holds that token can read it; another owner gets `404 not_found`.
+- The audit trail, its CSV export and the delivery rows hold the host and port,
+  never the path or the query. Crew prints no URL, an error never names one, and
+  `target_refused` gives no reason.
+- The recovery manifest counts rows; the `application-postgres` artifact of a
+  recovery generation holds every URL, as it holds every secret.
+
+If a URL leaks, revoke it at the service, delete the endpoint, and create one with
+the new URL.
+
+### What the service does with a message
+
+This is not a Slack, Mattermost, Discord or ntfy integration. Crew holds no
+credential for any of them, calls none of their APIs, and posts only to the URL the
+owner registered; the service then shows the message to whoever the owner set it up
+for. [The first-milestone brief](first-milestone.md) excluded a Slack send; Crew
+still never chooses a destination itself. It sends no email, SMS or push of its own.
+
+- What the service does next is the service's and the owner's choice. ntfy reads
+  options from the URL's query as well as from headers; an `email` parameter in a
+  topic URL, for example, makes ntfy forward each message by email. Crew adds only
+  the `Title` header.
+- A message names a card but cannot decide one: a person still uses a client with
+  the owner's token. There are no buttons and no replies.
+- Crew does not read `Retry-After`. A service that answers `429` gets the attempt
+  retried on Crew's own schedule, so a burst larger than a service's rate limit can
+  be given up after ten attempts, and ten given up in a row disable the endpoint.
+  Each endpoint's due deliveries go one after another, without a pause.
+- A hook the service has revoked or archived answers with a `4xx` status: an
+  ordinary failed attempt.
+
 ## Signature
 
-Each request carries:
+Each `crew` request carries:
 
 | Header | Value |
 | --- | --- |
@@ -142,7 +261,7 @@ repeated field fails `400 invalid_input`.
 
 | Route | Purpose |
 | --- | --- |
-| `POST /v1/webhooks` | Create `{ "requestId", "url", "kinds" }`; `201` with the endpoint and its `secret` |
+| `POST /v1/webhooks` | Create `{ "requestId", "url", "kinds" }`, optionally with `"format"`; `201` with the endpoint and its `secret` |
 | `GET /v1/webhooks?after=&limit=` | The owner's endpoints in every state, including deleted ones, ordered by `webhookId`; `{ apiVersion, webhooks, nextAfter, hasMore }` |
 | `GET /v1/webhooks/{webhookId}` | One endpoint, including a deleted one |
 | `POST /v1/webhooks/{webhookId}/enable` | Body `{}`; `200` with the endpoint |
@@ -154,16 +273,20 @@ repeated field fails `400 invalid_input`.
 {
   "apiVersion": "1", "webhookId": "UUID", "url": "https://hooks.example.com/crew",
   "host": "hooks.example.com", "kinds": ["approval.pending", "request.finished"],
-  "state": "enabled", "disabledReason": null, "consecutiveFailures": 0,
+  "format": "crew", "state": "enabled", "disabledReason": null, "consecutiveFailures": 0,
   "createdAt": "2026-11-12T08:03:12.421Z", "secret": "43 base64url characters, create only"
 }
 ```
 
-`kinds` is one to four distinct kinds and is returned sorted. `url` is
+`kinds` is one to four distinct kinds and is returned sorted. `format` is `crew`,
+`slack` or `ntfy`, and `crew` when the create leaves it out; any other value fails
+`400 invalid_input`. Every read returns it, including a tombstone's, and an endpoint
+created before migration 35 reads as `crew`. `url` is
 normalized (lowercase host, default port dropped) and is `null` once the endpoint
 is deleted; `host` stays. `requestId` makes a create idempotent: the same owner
-sending the same `requestId`, URL and kinds gets the endpoint back without its
-secret. A different URL or kinds with that `requestId` fails `409 conflict`, and a
+sending the same `requestId`, URL, kinds and format gets the endpoint back without
+its secret. A different URL, kinds or format with that `requestId` fails
+`409 conflict` (a replay that leaves the format out names `crew`), and a
 replay of a deleted endpoint fails `409 webhook_deleted`. A target that the
 [network rules](#network-safety) refuse, or whose name does not resolve within 5
 seconds, fails `400 target_refused`, with no reason, so the route does not tell a
@@ -288,7 +411,7 @@ they commit.
 A webhook is a request from inside the installation to an address an owner
 chose. `src/service/webhook-target.ts` is the one module that decides where Crew
 may connect and makes the request. It checks a target when it is created and
-again before every attempt:
+again before every attempt, whatever the endpoint's format:
 
 - `https` only. A URL with a user name, password or fragment is refused, as is a
   host that is not a plain DNS name or an IP literal. URLs are at most 2048 bytes.
@@ -341,13 +464,15 @@ Node's bundled certificate authorities, plus any the operator adds through
 | Type | Actor | Recorded when | One row per | Payload |
 | --- | --- | --- | --- | --- |
 | `approval.requested` | system | `proposeLocked` inserts a call no standing grant approved: a pending card or question | `approvalId` | `approvalId`, `invocationId`, `toolName`, `argumentDigest` |
-| `webhook.created` | owner | an endpoint is created | endpoint + revision | `webhookId`, `revision` (1), `host`, `kinds` |
+| `webhook.created` | owner | an endpoint is created | endpoint + revision | `webhookId`, `revision` (1), `host`, `kinds`, `format` |
 | `webhook.enabled` | owner | enable | endpoint + revision | `webhookId`, `revision`, `host` |
 | `webhook.disabled` | owner, or system for `consecutive_failures` and `recovery_restore` | disable, the tenth delivery given up in a row, or a restore resuming | endpoint + revision | `webhookId`, `revision`, `host`, `reason` |
 | `webhook.deleted` | owner | delete | endpoint + revision | `webhookId`, `revision`, `host` |
 
 `host` is the URL's host and port. The trail never holds the path, the query or the
-secret: a URL path can itself be a credential. Endpoints belong to the owner, not
+secret: a URL path can itself be a credential, and for a `slack` or `ntfy` endpoint
+it always is. A `webhook.created` row written before migration 35 has no `format`;
+that endpoint is `crew`. Endpoints belong to the owner, not
 to a member, so `webhook.*` rows are the only audit rows whose `memberId` is
 `null`, and their CSV cell is empty. A [`memberId` filter](audit-filters.md) never
 matches them; select them with `eventType`. Deliveries are not audited; their rows
@@ -421,6 +546,23 @@ now also appends `approval.requested`. Processes of an earlier release write no
 such row, so stop them before the first upgraded process starts, as for every
 migration (see [persistent deployment](persistent-deployment.md#upgrades)).
 
+Migration 35 adds `webhook_endpoints.format`, `NOT NULL` with the constant default
+`crew` and a CHECK on the shape of a name (lowercase, at most 32 characters), and
+replaces 032's guard function with one that also keeps the format from changing.
+It changes no other table. The default is a constant, so no row is rewritten.
+Until `migrate()` commits it holds `ACCESS EXCLUSIVE` on `webhook_endpoints`
+alone (observed in `pg_locks` on PostgreSQL 17), and nothing on `audit_events`. No
+audited transaction touches a webhook table, so no change waits for it; with the
+earlier release's processes stopped, nothing else holds the table either.
+
+Three changes reach existing clients. An endpoint gains `format` in every route's
+response, `webhook.created` rows gain `format`, and `capabilities.webhooks` gains
+`formats`, `defaultFormat` and `signature.formats`. An earlier release run against
+the upgraded database ignores the column and sends the `crew` body to every
+endpoint, including `slack` and `ntfy` ones. Slack refuses it for lack of `text`, and
+ntfy shows the JSON as the message, which still holds only IDs. Disable such
+endpoints before you run an earlier release.
+
 ## Limits
 
 | Limit | Value |
@@ -428,7 +570,8 @@ migration (see [persistent deployment](persistent-deployment.md#upgrades)).
 | Enabled endpoints per owner | 10, enforced by a trigger under a per-owner lock, as routines are |
 | URL | 2048 bytes |
 | Kinds per endpoint | 1 to 4 |
-| Body | 1 KiB |
+| Formats | `crew`, `slack`, `ntfy`; one per endpoint, fixed at creation |
+| Body | 1 KiB, in every format |
 | Attempts per delivery | 10, over about three hours |
 | Deliveries given up in a row before the endpoint is disabled | 10 |
 | Lease | 60 s |
@@ -445,7 +588,13 @@ migration (see [persistent deployment](persistent-deployment.md#upgrades)).
   Adding a kind means adding it to `webhookKinds` and to the two CHECKs in a
   migration.
 - Inbound webhooks that start a request (row 24 of the comparison).
-- Delivery to anything but an HTTPS endpoint: no push, email or chat message.
+- Delivery to anything but an HTTPS endpoint. Crew sends no email or SMS and runs
+  no push service or chat app of its own; a `slack` or `ntfy` endpoint posts to a
+  URL the owner supplies, and that service does the rest.
+- A message template an owner writes, another layout (Microsoft Teams cards,
+  Google Chat, Gotify, Pushover), ntfy priority, tags or click actions, Slack
+  blocks or buttons, and deciding a card from a chat.
+- Honouring `Retry-After`, and pacing deliveries to a service's rate limit.
 - Secret rotation in place, custom headers, a certificate authority for one
   endpoint, client certificates and egress through a proxy.
 - Ordering, a manual redelivery route, and retention of delivery rows, which grow
@@ -533,14 +682,33 @@ receiver in the test process and a settable clock. It checks:
   installation (the database accepting its own capture as a restore, as
   `recovery.test.ts` does without `pg_dump`) disabling them, cancelling the pending
   row, moving the cursor and sending only later events after an enable;
+- each format through the real proposal and commit paths: the exact bytes and
+  headers of every kind; the `crew` body unchanged byte for byte, in PostgreSQL's
+  key order, and equal to the stored row; the same outbox row for every format; a
+  signature on `crew` only; and no prompt, reply, note, memory or instruction text
+  or secret in any body or header;
+- a readable message refused for any body its kind's strict schema refuses, and
+  such a body never sent;
+- a `slack` endpoint made through the routes and delivered by the gateway's own
+  loop to a local stub that answers as Slack documents (`ok`, `invalid_payload`,
+  `no_text`, `no_service`); a revoked hook's `404` retried like any failure; the
+  format in every read, its replay rules, and the hook's path absent from the
+  trail, its CSV and the delivery rows;
+- the backoff schedule for each format, every attempt sending the same bytes;
 - the tombstone, history and cursor triggers, and the audit member CHECK;
 - migration 32 on a version-31 database: every constraint and trigger it finds
   kept, and its type CHECK keeping every clause of 031's, as PostgreSQL stores
   them, unchanged and in order; its locks, no rewrite, `NOT VALID` CHECKs,
   the cursor at the newest event, that it retries instead of queueing behind an
-  audited writer, and that it completes while a native turn holds its admission.
+  audited writer, and that it completes while a native turn holds its admission;
+- migration 35 on a database without it: an existing endpoint read as `crew`,
+  every other constraint, trigger, function, index and column kept, the guard
+  changed only by the format, the format refused as a change, no rewrite, and
+  `webhook_endpoints` the only table it locks.
 
-Not claimed: no test sends over TLS, so certificate verification and the
+Not claimed: no test posts to a real Slack, Mattermost, Discord or ntfy service.
+The stub follows Slack's documented answers, and the other shapes rest on each
+service's documentation. No test sends over TLS, so certificate verification and the
 `secureConnect` path are exercised only by the connect-timeout test, which never
 completes a handshake. No test queries real DNS: the resolver is replaced, so the
 c-ares lookup and its timeouts are not exercised. No test races a create, enable

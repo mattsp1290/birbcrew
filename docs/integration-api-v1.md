@@ -21,7 +21,8 @@ member memory route, limits, injection and deletion semantics per engine), `hand
 `approvalExpiry` (the deadline field, its bounds and the fields that report an
 expiry), `memberInstructions` (the spawn field, the read route, limits, order and
 restore), `usage` (the ledger states, what each engine reports, the budget period and
-refusal codes), `webhooks` (the webhook route, kinds, signature, retry and restore
+refusal codes), `webhooks` (the webhook route, kinds, formats and the default one,
+signature and the formats it covers, retry and restore
 semantics, and `insecureTargets`, which says an operator setting for testing exists,
 not whether it is on), health dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
@@ -56,7 +57,7 @@ proof of the operator's provider access or configured profile availability.
 | `GET /v1/usage`, `GET /v1/usage/members`, `GET /v1/usage/conversations` | Token totals for the owner, per member (with its budget) and per conversation, over an optional time range |
 | `GET /v1/usage/records` | Usage ledger rows, one per native segment, newest first |
 | `GET`/`PUT`/`DELETE /v1/usage/budgets/{memberId}` | Read, set (`tokenLimit`) or clear a member's daily token budget |
-| `POST /v1/webhooks`, `GET /v1/webhooks` | Create (`requestId`, `url`, `kinds`; the response alone carries the signing secret) and list webhook endpoints |
+| `POST /v1/webhooks`, `GET /v1/webhooks` | Create (`requestId`, `url`, `kinds`, optional `format`; the response alone carries the signing secret) and list webhook endpoints |
 | `GET`/`DELETE /v1/webhooks/{webhookId}`, `POST .../enable`, `POST .../disable` | Read, tombstone, enable or disable one endpoint |
 | `GET /v1/webhooks/{webhookId}/deliveries` | Delivery rows, newest event first |
 
@@ -504,8 +505,16 @@ when an event it selected happens: a card or question became pending
 settled (`routine.firing_settled`), or Crew disabled a routine after ten failures
 (`routine.disabled`). Each is derived from a committed audit event. The body
 carries IDs, the kind, the time and a status only; fetch details with your token.
-Each request is signed with HMAC-SHA256 over a timestamp and the body, using a
-secret that only the create response returns. Delivery is at least once and
+Each request in the default `crew` format is signed with HMAC-SHA256 over a
+timestamp and the body, using a secret that only the create response returns. An endpoint can choose another
+`format` at creation, fixed for its life and returned by every read: `slack` posts
+`{"text": ...}`, which Slack, Mattermost and Discord's Slack-compatible incoming
+webhooks show, and `ntfy` posts plain text with a `Title` header to an ntfy topic.
+Both are a fixed template of the same IDs, status, tool name and time, unsigned,
+because those services check no signature. Such a URL is itself a credential: the
+routes return it to the owner's token only, and the audit trail keeps its host. An
+unknown format fails `400 invalid_input`, and a replay with another format
+`409 conflict`. Delivery is at least once and
 unordered, with ten attempts over about three hours, and an endpoint that gives up
 ten deliveries in a row is disabled. Crew sends only to public addresses over
 HTTPS, unless the operator allows insecure targets for local testing, follows no
@@ -515,8 +524,8 @@ them. An expired card, a handoff and a budget refusal add no kind: a handoff's
 reserved request and an expired card's request are sent as `request.finished`, and a
 refused request sends nothing (see
 [what they send](webhooks.md#handoffs-approval-expiry-and-usage-budgets)). See
-[outbound webhooks](webhooks.md) for the receiver's checks, the secret's storage and
-the restore behaviour.
+[outbound webhooks](webhooks.md) for the receiver's checks, the formats and their
+templates, the secret's storage and the restore behaviour.
 
 ## Validation
 
