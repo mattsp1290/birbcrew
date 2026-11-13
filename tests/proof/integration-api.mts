@@ -19,6 +19,13 @@ await writeFile(config, JSON.stringify({ port: 0, tokenHashes: {
   [createHash("sha256").update(token).digest("hex")]: ownerId,
   [createHash("sha256").update(stranger).digest("hex")]: randomUUID(),
 } }), { mode: 0o600 });
+// The operator's price table, which the worker's supervisor reads at startup and applies to each
+// reported segment as it writes the segment's ledger row.
+const prices = join(s.directory, "prices.json");
+await writeFile(prices, JSON.stringify({ version: 1, unit: "usd-per-million-tokens", models: {
+  "claude-sonnet-4-6": { input: "3", output: "15" }, "gpt-5.4": { input: "1.25", cachedInput: "0.125", output: "10" },
+} }), { mode: 0o600 });
+s.env.BIRBCREW_USAGE_PRICES_PATH = prices;
 let endpoint = "";
 let stopGateway: (() => Promise<void>) | undefined;
 async function gateway() {
@@ -53,7 +60,8 @@ function observe(conversationId: string) {
   return { agent, seen, stop: async () => { agent.abortRun(); await done; } };
 }
 try {
-  const fixtures = await startRestartFixtures();
+  const fixtures = await startRestartFixtures({ codexUsage: () => ({ input_tokens: 1000, input_tokens_details: { cached_tokens: 400 },
+    output_tokens: 50, output_tokens_details: { reasoning_tokens: 10 }, total_tokens: 1050 }) });
   try {
     s.env.BIRBCREW_PROXY_FIXTURE_ENDPOINTS = JSON.stringify(fixtures.endpoints);
     const stopTemporal = await s.startTemporal();
@@ -119,9 +127,24 @@ try {
           assert.equal((await request(`/v1/conversations/${conversationId}/events?after=0`, runInput)).status, 410);
           await observer.stop();
           assert.equal(fixtures.evidence()[engine].requests, counters, "observer disconnect does not execute work");
-          console.log(`${engine}: v1 HTTP acceptance, six turns across rollover, gateway SIGKILL/restart, original results, official AG-UI observation and no-inference duplicate reconciliation passed`);
+          // Every turn's segment has one ledger row, priced when written where the engine named a
+          // priced model: Claude's fixture reports 10 and 10 tokens a call, so (10 × $3 + 10 × $15) per
+          // million; Codex's 1000 input of which 400 cached and 50 output, with the model from its
+          // rollout, so (600 × $1.25 + 400 × $0.125 + 50 × $10); Pi's provider reports nothing.
+          const usage = await (await request(`/v1/usage/records?conversationId=${conversationId}`)).json();
+          const metered = { claude: { state: "reported", model: "claude-sonnet-4-6", inputTokens: 10, outputTokens: 10, estimatedCostUsd: "0.00018" },
+            codex: { state: "reported", model: "gpt-5.4", inputTokens: 1000, outputTokens: 50, estimatedCostUsd: "0.0013" },
+            pi: { state: "unknown", model: "fixture-chat", inputTokens: null, outputTokens: null, estimatedCostUsd: null } }[engine];
+          assert.deepEqual(usage.records.map((r: Record<string, unknown>) => ({ lane: r.lane, state: r.state, model: r.model,
+            inputTokens: r.inputTokens, outputTokens: r.outputTokens, costUsd: r.costUsd, estimatedCostUsd: r.estimatedCostUsd })),
+          Array.from({ length: 6 }, () => ({ lane: "member", costUsd: null, ...metered })));
+          console.log(`${engine}: v1 HTTP acceptance, six turns across rollover, gateway SIGKILL/restart, original results, official AG-UI observation, no-inference duplicate reconciliation and metered usage passed`);
         } finally { await observer.stop(); }
       }
+      // Billed and estimated cost stay apart in the owner's totals: no provider billed these turns.
+      const { total } = await (await request("/v1/usage")).json();
+      assert.deepEqual([total.segments, total.costUsd, total.costReportedSegments, total.estimatedCostUsd, total.costEstimatedSegments],
+        [18, null, 0, "0.00888", 12]);
       await stopWorker();
       stopWorker = await s.worker();
       await until(async () => {
