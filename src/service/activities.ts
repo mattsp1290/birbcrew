@@ -7,6 +7,8 @@ import { recoverClaudeProposal } from "./claude.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Delegation, ChildOutcome } from "@birbcrew/pi-subagents";
 import { ChildStore, type ChildKey } from "./children.ts";
+import type { ChildProfile } from "./child-target.ts";
+import { activityQueue } from "./queues.ts";
 import { Context } from "@temporalio/activity";
 import { ApplicationFailure } from "@temporalio/client";
 import { ApprovalStore, type Approval, type Decision, type ToolOutcome } from "./approvals.ts";
@@ -26,7 +28,7 @@ export interface DriverInput {
   onToolDelivered?: (text:string) => void | Promise<void>;
   onToolArgs?: (nativeCallId: string, matchedOperation: boolean) => void;
   onText?: (delta: string) => void | Promise<void>;
-  childProfile?: Delegation["profile"];
+  childProfile?: ChildProfile;
   childResults?: ChildOutcome[];
   continuation?: { nativeCallId: string; result: ToolOutcome };
 }
@@ -76,6 +78,12 @@ export function memberActivities(store: MemberStore, supervisor: Supervisor, pro
       if (execution?.workflowId !== `birbcrew-ts/child/${key.childId}`) throw ApplicationFailure.nonRetryable("Incorrect child workflow");
       const timer = setInterval(() => ctx.heartbeat(), 2000);
       try {
+        // A workflow worker from before child targets schedules every child on its parent's Pi queue.
+        // Refuse to run a child anywhere but the queue its row names; the workflow then settles it failed.
+        const target = await children.target(key);
+        if (ctx.info.taskQueue !== activityQueue(target.engine, target.profile)) {
+          throw ApplicationFailure.nonRetryable("Child scheduled on another engine queue", "ChildTargetMismatch");
+        }
         const identity = {workflowRunId: execution.runId, activityId: ctx.info.activityId, attempt: ctx.info.attempt};
         let start = await children.begin(key, identity, !!resume);
         if (start.kind === "draining") {

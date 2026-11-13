@@ -7,10 +7,11 @@ import type { Pool, PoolClient } from "pg";
 import type { ChildOutcome, Delegation } from "@birbcrew/pi-subagents";
 import { ApprovalStore, confirmedApproval, type Approval } from "./approvals.ts";
 import { appendAudit } from "./audit.ts";
+import { childTarget, ChildTargetError, childTargetSchema, storedTarget, type ChildProfile, type ChildTarget } from "./child-target.ts";
 import { checkpointSchema, MemberStoreError, type Conversation, type Checkpoint, type TurnRequest } from "./domain.ts";
 
 type PersistedDelegation = Omit<Delegation, "profile"> & {
-  profile: Omit<Delegation["profile"], "instructions"> & {instructions:string};
+  profile: Omit<ChildProfile, "instructions"> & {instructions:string};
 };
 
 export interface ChildKey {
@@ -19,11 +20,13 @@ export interface ChildKey {
   conversationId: string;
   requestId: string;
   childId: string;
+  /** Absent: the child runs on its parent's Pi profile, as every key recorded before targets. */
+  target?: ChildTarget;
 }
 interface ChildRow {
   native_call_id: string;
   task: string;
-  role_profile: Delegation["profile"];
+  role_profile: ChildProfile;
   phase: "ready" | "running" | "waiting" | "resuming" | "complete" | "failed" | "cancelled";
   approval_id: string | null;
   generation: string | null;
@@ -75,9 +78,24 @@ async function retireChild(db: PoolClient, key: ChildKey, row: ChildRow) {
   else await db.query("UPDATE birbcrew_ts.pi_children SET launch_revoked=true WHERE child_id=$1", [key.childId]);
 }
 export async function childrenFor(db: PoolClient, conversation: Conversation, requestId: string): Promise<ChildKey[]> {
-  const { rows } = await db.query<{ child_id: string }>(`SELECT child_id FROM birbcrew_ts.pi_children
-    WHERE conversation_id=$1 AND request_id=$2 ORDER BY ordinal`, [conversation.conversationId, requestId]);
-  return rows.map(({ child_id }) => ({ ownerId: conversation.ownerId, memberId: conversation.memberId, conversationId: conversation.conversationId, requestId, childId: child_id }));
+  const { rows } = await db.query<{ child_id: string; target: unknown }>(`SELECT child_id,role_profile->'target' AS target
+    FROM birbcrew_ts.pi_children WHERE conversation_id=$1 AND request_id=$2 ORDER BY ordinal`, [conversation.conversationId, requestId]);
+  return rows.map(({ child_id, target }) => {
+    const stored = storedTarget(target);
+    // A key without a target keeps exactly the shape recorded in histories before targets.
+    return { ownerId: conversation.ownerId, memberId: conversation.memberId, conversationId: conversation.conversationId, requestId,
+      childId: child_id, ...(stored && { target: stored }) };
+  });
+}
+
+/** Refuses a proposal's target before anything is written. Absent, the child runs on its parent's
+ * profile. A Claude or Codex target has no child driver yet. */
+function proposedTarget(proposal: PersistedDelegation) {
+  if (proposal.profile.target === undefined) return undefined;
+  const target = childTargetSchema.safeParse(proposal.profile.target);
+  if (!target.success) throw new ChildTargetError("invalid_target");
+  if (target.data.engine !== "pi") throw new ChildTargetError("unsupported_engine");
+  return target.data;
 }
 async function cancelLocked(db: PoolClient, key: ChildKey, row: ChildRow, ledger: ApprovalStore) {
   const outcome: ChildOutcome = { kind: "cancelled", nativeCallId: row.native_call_id };
@@ -99,12 +117,23 @@ export class ChildStore {
     }
     const checkpoint = checkpointSchema.parse(rawCheckpoint);
     if (checkpoint.engine !== "pi") throw new MemberStoreError("conflict");
+    const targets = proposals.map(proposedTarget);
     return transaction(this.pool, async db => {
       await lockParent(db, { ...conversation, requestId });
       const args = [conversation.conversationId, requestId];
+      // Only the parent turn's own token delegates: a child's launch generation is never a turn
+      // token, so a child cannot delegate further.
       const admitted = await db.query(`SELECT 1 FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2
         AND token=$3 AND phase='started'`, [...args, token]);
       if (!admitted.rowCount) throw new MemberStoreError("stale");
+      for (const [index, target] of targets.entries()) {
+        // The same profile rule the target's Pi driver applies before it runs a child (profiles.ts).
+        if (target && !(await db.query(`SELECT 1 FROM birbcrew_ts.profiles WHERE name=$1 AND engine=$2 AND delegate_task
+            AND (NOT $3 OR protected_tool='record_work_item')`,
+        [target.profile, target.engine, proposals[index].profile.tools.length > 0])).rowCount) {
+          throw new ChildTargetError("unregistered_target");
+        }
+      }
       await db.query(`INSERT INTO birbcrew_ts.delegations (conversation_id,request_id,parent_checkpoint)
         VALUES ($1,$2,$3)`, [...args, JSON.stringify(checkpoint)]);
       for (const [index, proposal] of proposals.entries()) {
@@ -116,6 +145,17 @@ export class ChildStore {
         children:children.map(({childId}, index) => ({childId, role:proposals[index].profile.role}))});
       return children;
     });
+  }
+
+  /** The (engine, profile) the child's row says it runs on, whatever its key claims. */
+  async target(key: ChildKey): Promise<ChildTarget> {
+    const { rows: [row] } = await this.pool.query<{ target: unknown; profile: string }>(`SELECT j.role_profile->'target' AS target,
+      m.profile FROM birbcrew_ts.pi_children j JOIN birbcrew_ts.conversations c USING (conversation_id)
+      JOIN birbcrew_ts.members m USING (owner_id,member_id)
+      WHERE c.owner_id=$1 AND c.member_id=$2 AND j.conversation_id=$3 AND j.request_id=$4 AND j.child_id=$5`,
+    [key.ownerId, key.memberId, key.conversationId, key.requestId, key.childId]);
+    if (!row) throw new MemberStoreError("not_found");
+    return childTarget(storedTarget(row.target), row.profile);
   }
 
   async begin(key: ChildKey, exec: Execution, resume = false): Promise<ChildStart> {

@@ -2,6 +2,7 @@ import { runCodexTurn } from "./codex.ts";
 import { runPiTurn, runPiSegment, runPiDelegatingSegment } from "./pi.ts";
 import { runClaudeTurn, runClaudeSegment } from "./claude.ts";
 import type { MemberProfiles, TurnDriver } from "./activities.ts";
+import { ChildTargetError } from "./child-target.ts";
 import type { Engine } from "./domain.ts";
 
 export interface MemberProfile {
@@ -32,13 +33,16 @@ export function memberProfiles(config: ReadonlyMap<string, MemberProfile>, state
       if (delegateTask) return runPiDelegatingSegment(input, { ...pi, allowRecordWorkItem: !!protectedTool });
       return tool ? runPiSegment(input, pi, tool) : { kind: "complete", ...await runPiTurn(input, pi) };
     };
+    // Only Pi runs delegated children so far. Refuse one here rather than run it as a member turn.
     if (claude) drivers.claude = async (input, { ownerId, memberId }) => {
+      if (input.childProfile) throw new ChildTargetError("unsupported_engine");
       const options = { ...claude, ownerId, memberId, stateDir, invocationGroup };
       return tool ? runClaudeSegment(input, options, tool) : { kind: "complete", ...await runClaudeTurn(input, options) };
     };
     if (codex) drivers.codex = async (input, { ownerId, memberId }) => {
+      if (input.childProfile) throw new ChildTargetError("unsupported_engine");
       const turn: Parameters<typeof runCodexTurn>[0] = input;
-      if (input.childProfile || input.childResults || input.continuation || turn.mcp?.tool !== tool) {
+      if (input.childResults || input.continuation || turn.mcp?.tool !== tool) {
         throw new Error("Codex invocation differs from the member profile");
       }
       return { kind: "complete", ...await runCodexTurn(turn, { ...codex, ownerId, memberId, stateDir }) };

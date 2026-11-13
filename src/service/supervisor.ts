@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { z } from "zod";
 import { approvalSchema } from "./approvals.ts";
+import { childTargetSchema } from "./child-target.ts";
 import { commitSchema, executionSchema, turnRequestSchema, openSchema } from "./domain.ts";
 
 export const launchSchema = turnRequestSchema.extend({ token: z.uuid(), execution: executionSchema, childId: z.uuid().optional() });
@@ -13,7 +14,8 @@ export const commandSchema = z.strictObject({
 const segmentSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("complete"), text: commitSchema.shape.reply }),
   z.strictObject({ kind: z.literal("pending"), approval: approvalSchema }),
-  z.strictObject({ kind: z.literal("delegated"), children: z.array(openSchema.extend({requestId:z.uuid(),childId:z.uuid()})).min(1).max(2) }),
+  z.strictObject({ kind: z.literal("delegated"), children: z.array(openSchema.extend({requestId:z.uuid(),childId:z.uuid(),
+    target:childTargetSchema.optional()})).min(1).max(2) }),
   z.strictObject({ kind: z.literal("childDone") }),
 ]);
 type Segment = z.infer<typeof segmentSchema>;
