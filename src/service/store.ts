@@ -12,7 +12,7 @@ import { firingConversation, firingInitiator } from "./routines.ts";
 import { snapshotMemories } from "./memories.ts";
 import { instructionsOf, type InstructionsSummary } from "./instructions.ts";
 import { handoffAdmission } from "./handoffs.ts";
-import { checkUsageAdmission, refuseOverBudget } from "./usage.ts";
+import { budgetApplies, refuseOverBudget } from "./usage.ts";
 import { ApplicationFailure } from "@temporalio/client";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -58,6 +58,30 @@ async function conversationFor(
 function sameTerms(admission: { prompt_digest: Buffer; approval_deadline_seconds: number | null }, request: TurnRequest) {
   return admission.prompt_digest.equals(createHash("sha256").update(request.text).digest())
     && admission.approval_deadline_seconds === (request.approvalDeadlineSeconds ?? null);
+}
+
+/** recordAcceptance's checks of a request with no admission row that come before its member's
+ * budget, in its order, inside the caller's transaction after it locked the conversation: a turn
+ * a legacy submit already started, the conversation's request bound, a handoff's seal or
+ * reservation, a routine firing's terms and the prompt bound. A refusal throws. Returns the
+ * initiator an admission would record, and whether the request's turn already started. */
+async function admissionTerms(db: PoolClient, key: TurnRequest, conversation: Conversation, attested: RequestInitiator) {
+  const digest=createHash("sha256").update(key.text).digest();
+  const {rows:[existingTurn]}=await db.query<{prompt_digest:Buffer}>(
+    "SELECT prompt_digest FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
+  if(existingTurn) {
+    if(!existingTurn.prompt_digest.equals(digest))throw new MemberStoreError("conflict");
+  } else {
+    const {rows:[budget]}=await db.query<{limit:number;used:number}>(`SELECT turn_limit AS "limit",
+      (SELECT count(*) FROM (SELECT request_id FROM birbcrew_ts.request_admissions WHERE conversation_id=$1
+       UNION SELECT request_id FROM birbcrew_ts.turns WHERE conversation_id=$1) ids)::integer AS used
+      FROM birbcrew_ts.conversations WHERE conversation_id=$1`,[key.conversationId]);
+    if(budget.used>=budget.limit)throw new MemberStoreError("input_limit");
+  }
+  const handoff=existingTurn?null:await handoffAdmission(db,key);
+  const recorded=handoff??await firingInitiator(db,key,conversation)??attested;
+  if(recorded.kind!=="handoff")submitSchema.parse(key);
+  return {recorded,started:Boolean(existingTurn)};
 }
 
 /** The initiator a request's admission recorded, read inside the caller's open transaction,
@@ -235,7 +259,22 @@ export class MemberStore {
     if (turn.rowCount) return;
     if ((await handoffAdmission(this.pool, key))?.kind === "handoff") return;
     submitSchema.parse(key);
-    await checkUsageAdmission(this, key);
+    if (!await budgetApplies(this.pool, key)) return;
+    // The lock waits for an admission, turn start or handoff that holds the conversation, and
+    // recordAcceptance's earlier checks run again under it, so a request refused under the budget
+    // and audited as such is one admission would refuse for the budget alone.
+    const refused = await this.transaction(async db => {
+      await db.query("SELECT 1 FROM birbcrew_ts.conversations WHERE owner_id=$1 AND conversation_id=$2 FOR KEY SHARE",
+        [key.ownerId, key.conversationId]);
+      const conversation = await conversationFor(db, key, false);
+      const admitted = await db.query("SELECT 1 FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2",
+        [key.conversationId, key.requestId]);
+      if (admitted.rowCount) return false;
+      const { recorded, started } = await admissionTerms(db, key, conversation, ownerInitiator);
+      return !started && recorded.kind !== "handoff"
+        && refuseOverBudget(db, key, conversation.memberId, recorded.kind === "routine" ? recorded.id : undefined);
+    });
+    if (refused) throw new MemberStoreError("usage_limit");
   }
 
   /** A replay of an admitted request keeps the initiator its first admission recorded. A routine
@@ -257,23 +296,10 @@ export class MemberStore {
         if(prior.phase==="rejected")throw new MemberStoreError("request_rejected");
         return;
       }
-      const {rows:[existingTurn]}=await db.query<{prompt_digest:Buffer}>(
-        "SELECT prompt_digest FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2",[key.conversationId,key.requestId]);
-      if(existingTurn) {
-        if(!existingTurn.prompt_digest.equals(digest))throw new MemberStoreError("conflict");
-      } else {
-        const {rows:[budget]}=await db.query<{limit:number;used:number}>(`SELECT turn_limit AS "limit",
-          (SELECT count(*) FROM (SELECT request_id FROM birbcrew_ts.request_admissions WHERE conversation_id=$1
-           UNION SELECT request_id FROM birbcrew_ts.turns WHERE conversation_id=$1) ids)::integer AS used
-          FROM birbcrew_ts.conversations WHERE conversation_id=$1`,[key.conversationId]);
-        if(budget.used>=budget.limit)throw new MemberStoreError("input_limit");
-      }
-      const handoff=existingTurn?null:await handoffAdmission(db,key);
-      const recorded=handoff??await firingInitiator(db,key,conversation)??attested;
-      if(recorded.kind!=="handoff")submitSchema.parse(key);
+      const {recorded,started}=await admissionTerms(db,key,conversation,attested);
       // A request whose turn already started (a legacy non-durable submit) is running, never refused,
       // and a handoff's reserved request met its target's budget when the handoff committed.
-      if(!existingTurn&&recorded.kind!=="handoff"&&await refuseOverBudget(db,key,conversation.memberId,recorded.kind==="routine"?recorded.id:undefined))return true;
+      if(!started&&recorded.kind!=="handoff"&&await refuseOverBudget(db,key,conversation.memberId,recorded.kind==="routine"?recorded.id:undefined))return true;
       const [initiatorKind,initiatorId]=initiatorColumns(recorded);
       await db.query(`INSERT INTO birbcrew_ts.request_admissions(conversation_id,request_id,prompt_digest,initiator_kind,initiator_id,approval_deadline_seconds)
         VALUES($1,$2,$3,$4,$5,$6)`,[key.conversationId,key.requestId,digest,initiatorKind,initiatorId,key.approvalDeadlineSeconds??null]);

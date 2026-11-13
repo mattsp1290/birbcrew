@@ -210,10 +210,11 @@ Migration 31 (usage metering) takes `members` and `native_launches` in
 `SHARE ROW EXCLUSIVE` and `audit_events` and `routine_firings` in `ACCESS EXCLUSIVE`, with
 `NOWAIT` and retries like 25 to 30; after 27 to 30 in one transaction it retries while
 holding their locks, and a running native turn never delays it (see
-[usage metering](usage-metering.md#upgrade-and-recovery)). From migration 27 on, every
-gateway, worker and CLI process refuses to start with `Migration N would apply after
-migration M` when the database already has a newer migration than one it would apply,
-because applying the older one would silently narrow constraints the newer one widened.
+[usage metering](usage-metering.md#upgrade-and-recovery)). From the release that adds
+migration 31 on, every gateway, worker and CLI process refuses to start with
+`Migration N would apply after migration M` when it would apply a migration numbered 27
+or above below one the database already has, because applying the older one would
+silently narrow constraints the newer one widened.
 Nothing was applied, and the previous release still starts: keep running it. The usual
 cause is a release that numbered a migration below one an earlier release already
 shipped; report it and deploy a release that renumbers that migration. Do not delete the

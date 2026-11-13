@@ -220,8 +220,11 @@ request can be sent again later. The check runs twice:
    practice. The workflow never sees the request, and the conversation stays open. It
    is the last of `MemberStore.checkAdmission`'s checks: a sealed source
    (`409 handed_off`), a target whose handoff request is not yet admitted
-   (`409 handoff_pending`) and a prompt over 16 KiB are refused first, so such a
-   request is never refused, or audited, under the budget.
+   (`409 handoff_pending`) and a prompt over 16 KiB are refused first. For a member with
+   a budget it then locks the conversation and makes `recordAcceptance`'s checks again,
+   with the conversation's request bound (`409 input_limit`) and a routine firing's terms
+   (`409 conflict`), so a request is refused, and audited, under the budget only when
+   admission would refuse it for the budget alone.
 2. `recordAcceptance`, the admission transaction, after it has locked the
    conversation and made the same checks. This is the enforcing check. It catches
    usage recorded, or a budget set or lowered, between the two checks. Its refusal
@@ -332,6 +335,23 @@ nothing. Applying them there would be wrong: 27 to 29 would each replace 31's ty
 CHECK with one that lacks the usage types, and 28 would fail to find the reason CHECK
 it replaces. Recreate such a database, or restore a backup taken before that build. Do
 not delete its `schema_versions` row.
+
+A database that was at version 30 when it ran such a build is not refused: 31 applied
+above 30, with the CHECKs as they stood before 27 to 30, and this release finds 31
+applied and starts. Its audit rows of types `conversation.handed_off`,
+`approval.expired` and `member.instructions_set`, and firings that fail
+`approval_expired`, then fail with `23514`. On a database at version 31 this query
+returns `f` in either column in that case:
+
+```sql
+SELECT bool_or(conname = 'routine_firings_reason_check' AND pg_get_constraintdef(oid) LIKE '%approval_expired%') AS reasons,
+       bool_or(conname = 'audit_events_type_check' AND pg_get_constraintdef(oid) LIKE '%member.instructions_set%') AS types
+  FROM pg_constraint WHERE conrelid IN ('birbcrew_ts.routine_firings'::regclass, 'birbcrew_ts.audit_events'::regclass);
+```
+
+Recreate it, restore a backup taken before that build, or run this release's two
+`ALTER TABLE` statements from `031-usage.sql` (the reason CHECK and the type CHECK) on
+it by hand.
 
 A coordinated restore rewinds the ledger and the budgets with the rest of the
 database, and Crew changes neither when the restored installation resumes:

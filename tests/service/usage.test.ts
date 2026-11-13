@@ -21,7 +21,7 @@ import { FileRecoveryFence } from "../../src/service/recovery-fence.ts";
 import { failReasons, RoutineApi, RoutineDispatcher, skipReasons, type Clock } from "../../src/service/routines.ts";
 import { MemberStore, ownerAdmissionActivity } from "../../src/service/store.ts";
 import type { Launch } from "../../src/service/supervisor.ts";
-import { checkUsageAdmission, recordSegmentUsage, UsageApi } from "../../src/service/usage.ts";
+import { recordSegmentUsage, UsageApi } from "../../src/service/usage.ts";
 import type { SegmentUsage } from "../../src/service/usage-capture.ts";
 
 const url = process.env.BIRBCREW_TEST_DATABASE_URL;
@@ -340,7 +340,7 @@ test("a member at or over its budget is refused at admission; an admitted or run
   assert.deepEqual((await usage.budget(owner.ownerId, owner.memberId)).usedTokens, 1500, "a soft cap: one request can pass the limit");
 
   const refused = { ownerId: owner.ownerId, conversationId: await conversation(store, owner), requestId: randomUUID(), text: "refused" };
-  await assert.rejects(checkUsageAdmission(store, refused), { code: "usage_limit" });
+  await assert.rejects(store.checkAdmission(refused), { code: "usage_limit" });
   await assert.rejects(store.recordAcceptance(refused, ownerInitiator), { code: "usage_limit" });
   await assert.rejects(ownerAdmissionActivity(store)(refused), (error: unknown) =>
     error instanceof ApplicationFailure && error.type === "usage_limit" && error.nonRetryable);
@@ -354,7 +354,7 @@ test("a member at or over its budget is refused at admission; an admitted or run
 
   // The running request is not interrupted and its admission is replayed, not refused.
   await store.recordAcceptance(running.request, ownerInitiator);
-  await checkUsageAdmission(store, running.request);
+  await store.checkAdmission(running.request);
   assert.equal(await running.commit(), "done");
   // The workflow's own admission refusing in a race reaches the caller as 409 usage_limit_closed.
   await usage.setBudget(owner.ownerId, owner.memberId, { tokenLimit: 5000 });
@@ -465,6 +465,61 @@ test("a request refused as handed off, pending its handoff or over the prompt bo
   // The budget itself still refuses an ordinary request of either member.
   await assert.rejects(store.checkAdmission({ ownerId: source.ownerId, conversationId: await conversation(store, source), requestId: randomUUID(),
     text: "ordinary" }), { code: "usage_limit" });
+});
+
+test("the budget pre-check repeats admission's earlier refusals under its lock before it refuses or audits", async () => {
+  const owner = await member(store);
+  const usage = new UsageApi(store);
+  const refusals = async () => (await audit(owner.ownerId, "usage.request_refused")).length;
+  // A conversation at its request bound: admission refuses input_limit before it looks at the budget.
+  const bounded = await conversation(store, owner);
+  await pool.query("UPDATE birbcrew_ts.conversations SET turn_limit=4 WHERE conversation_id=$1", [bounded]);
+  for (let i = 0; i < 4; i++) await store.recordAcceptance({ ownerId: owner.ownerId, conversationId: bounded, requestId: randomUUID(), text: "fill" }, ownerInitiator);
+  // A routine firing's identity sent with other text: admission refuses conflict and names no routine.
+  const routine = await new RoutineApi(store, () => new Date("2031-01-06T10:00:00.000Z")).create(owner.ownerId, { requestId: randomUUID(),
+    memberId: owner.memberId, schedule: "*/15 * * * *", prompt: "scheduled prompt", approvalPolicy: "wait" });
+  const firing = { ownerId: owner.ownerId, conversationId: randomUUID(), requestId: randomUUID(), text: "not the routine's prompt" };
+  await pool.query(`INSERT INTO birbcrew_ts.routine_firings (routine_id,scheduled_for,status,conversation_id,request_id,recorded_at,lease_until)
+    VALUES ($1,clock_timestamp(),'claimed',$2,$3,clock_timestamp(),clock_timestamp()+interval '1 day')`,
+  [routine.routineId, firing.conversationId, firing.requestId]);
+  await store.openConversation({ ...owner, conversationId: firing.conversationId });
+  await spend(store, owner, reported(10));
+  await usage.setBudget(owner.ownerId, owner.memberId, { tokenLimit: 10 });
+  const overBound = { ownerId: owner.ownerId, conversationId: bounded, requestId: randomUUID(), text: "fifth" };
+  await assert.rejects(store.checkAdmission(overBound), { code: "input_limit" });
+  await assert.rejects(store.recordAcceptance(overBound, ownerInitiator), { code: "input_limit" });
+  await assert.rejects(store.checkAdmission(firing), { code: "conflict" });
+  await assert.rejects(store.recordAcceptance(firing, ownerInitiator), { code: "conflict" });
+  assert.equal(await refusals(), 0);
+
+  // A handoff that seals the source after the pre-check's first, unlocked read and commits while
+  // the pre-check waits for the conversation: the pre-check sees the seal under its lock.
+  const source = await conversation(store, owner), target = await conversation(store, owner);
+  const holder = await pool.connect();
+  let checked: Promise<void> | undefined;
+  try {
+    await holder.query("BEGIN");
+    await holder.query("SELECT 1 FROM birbcrew_ts.conversations WHERE conversation_id=$1 FOR UPDATE", [source]);
+    await holder.query(`INSERT INTO birbcrew_ts.conversation_handoffs (owner_id,request_id,source_conversation_id,source_member_id,
+        target_conversation_id,target_member_id,transcript,transcript_digest,carried_turns,omitted_turns,uncertain_turns)
+      VALUES ($1,$2,$3,$4,$5,$4,'t',sha256(convert_to('t','UTF8')),1,0,0)`, [owner.ownerId, randomUUID(), source, owner.memberId, target]);
+    const { rows: [{ pid }] } = await holder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+    checked = store.checkAdmission({ ownerId: owner.ownerId, conversationId: source, requestId: randomUUID(), text: "during the handoff" });
+    void checked.catch(() => {});
+    let waiting = false;
+    for (let i = 0; i < 200 && !waiting; i++) {
+      waiting = Boolean((await pool.query("SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))", [pid])).rowCount);
+      if (!waiting) await delay(10);
+    }
+    assert.ok(waiting, "the pre-check waits for the conversation");
+    await holder.query("COMMIT");
+  } finally { holder.release(); }
+  await assert.rejects(checked!, { code: "handed_off" });
+  assert.equal(await refusals(), 0);
+  // An ordinary request of the member is still refused under its budget, once.
+  await assert.rejects(store.checkAdmission({ ownerId: owner.ownerId, conversationId: await conversation(store, owner), requestId: randomUUID(),
+    text: "ordinary" }), { code: "usage_limit" });
+  assert.equal(await refusals(), 1);
 });
 
 test("an expired card's request is metered for the segment that proposed it and the one that resumes with the cancelled result", async () => {

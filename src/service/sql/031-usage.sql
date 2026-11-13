@@ -5,7 +5,7 @@
 -- Locks on existing tables, held until migrate() commits: SHARE ROW EXCLUSIVE on members and
 -- native_launches for the new foreign keys; ACCESS EXCLUSIVE on audit_events to replace its type
 -- CHECK (dropped and re-added NOT VALID, so no row is scanned) and to build two empty partial
--- unique indexes, which read audit_events once; ACCESS EXCLUSIVE on routine_firings to replace
+-- unique indexes, each of which reads audit_events once; ACCESS EXCLUSIVE on routine_firings to replace
 -- its reason CHECK the same way. As in 025 to 030 they are taken together with NOWAIT and
 -- retried, so the migration never waits in a lock queue and never joins a deadlock. Applied
 -- alone, from version 30, it holds nothing while it retries; applied with earlier migrations in
@@ -175,7 +175,7 @@ ALTER TABLE birbcrew_ts.audit_events
         OR (event_type = 'usage.request_refused' AND conversation_id IS NOT NULL AND request_id IS NOT NULL)) NOT VALID;
 
 -- Natural keys for the new facts. No existing row matches either predicate, so each index is
--- empty, but building it reads audit_events once while the lock above is held.
+-- empty, but building each reads audit_events once while the lock above is held.
 CREATE UNIQUE INDEX audit_events_usage_budget_fact ON birbcrew_ts.audit_events (member_id, (payload->>'revision'))
     WHERE event_type IN ('usage.budget_set', 'usage.budget_cleared');
 CREATE UNIQUE INDEX audit_events_usage_refusal_fact ON birbcrew_ts.audit_events (conversation_id, request_id)

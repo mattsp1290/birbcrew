@@ -120,9 +120,9 @@ When the database is ready, `schemaVersion` is the highest migration number appl
 it. It is `null` when the database is unavailable. Migration numbers are not
 contiguous. Up to migration 26, a later release could add a migration numbered below one
 that an earlier release had already applied (22 came after 26), so a database can gain a
-migration without `schemaVersion` changing. (From migration 27 on, every gateway,
-worker and CLI process refuses to start rather than apply a migration below the newest
-applied one.) `schemaVersion` therefore names the newest migration present, not the full
+migration without `schemaVersion` changing. (From the release that adds migration 31 on,
+every gateway, worker and CLI process refuses to start rather than apply a migration
+numbered 27 or above below the newest applied one.) `schemaVersion` therefore names the newest migration present, not the full
 applied set, and cannot by itself identify a release. The gateway applies its
 migrations at startup, so a value below the largest number in the deployed release's
 migration list (in `src/service/store.ts`) means the database is behind that release;

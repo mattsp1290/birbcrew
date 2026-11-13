@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { appendAudit } from "./audit.ts";
-import { initiatorFromColumns, MemberStoreError, type TurnRequest } from "./domain.ts";
+import { initiatorFromColumns, MemberStoreError } from "./domain.ts";
 import type { MemberStore } from "./store.ts";
 import type { Launch } from "./supervisor.ts";
 import type { SegmentUsage } from "./usage-capture.ts";
@@ -94,30 +94,16 @@ export async function refuseOverBudget(db: Queryable, key: { ownerId: string; co
   return true;
 }
 
-/** Checked before a request reaches its workflow, so a refusal leaves the conversation open and
- * answers at once; recordAcceptance checks again in the admission transaction. A request that
- * already has an admission or a turn is never refused: a retry gets the answer it got before.
- * Callers exclude a handoff's reserved request, as MemberStore.checkAdmission does. */
-export async function checkUsageAdmission(store: MemberStore, request: TurnRequest) {
-  // Most members have no budget. A trusted-context conversation is refused by admission itself.
-  const budgeted = await store.pool.query(`SELECT 1 FROM birbcrew_ts.conversations c JOIN birbcrew_ts.usage_budgets b USING (member_id)
+/** Whether the request's member has an active budget, which MemberStore.checkAdmission then
+ * checks before the request reaches its workflow, so a refusal leaves the conversation open and
+ * answers at once. Most members have none, and they cost this one read. A trusted-context
+ * conversation is refused by admission itself. */
+export async function budgetApplies(db: Queryable, request: { ownerId: string; conversationId: string }) {
+  const { rowCount } = await db.query(`SELECT 1 FROM birbcrew_ts.conversations c JOIN birbcrew_ts.usage_budgets b USING (member_id)
     WHERE c.owner_id=$1 AND c.conversation_id=$2 AND b.state='active'
       AND NOT EXISTS (SELECT 1 FROM birbcrew_ts.trusted_sessions s WHERE s.conversation_id=c.conversation_id)`,
   [request.ownerId, request.conversationId]);
-  if (!budgeted.rowCount) return;
-  const refused = await store.transaction(async db => {
-    const { rows: [conversation] } = await db.query<{ member_id: string }>(`SELECT member_id FROM birbcrew_ts.conversations
-      WHERE owner_id=$1 AND conversation_id=$2 FOR KEY SHARE`, [request.ownerId, request.conversationId]);
-    if (!conversation) return false;
-    const key = [request.conversationId, request.requestId];
-    const known = await db.query(`SELECT 1 FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2
-      UNION ALL SELECT 1 FROM birbcrew_ts.turns WHERE conversation_id=$1 AND request_id=$2`, key);
-    if (known.rowCount) return false;
-    const { rows: [firing] } = await db.query<{ routine_id: string }>(
-      "SELECT routine_id FROM birbcrew_ts.routine_firings WHERE conversation_id=$1 AND request_id=$2", key);
-    return refuseOverBudget(db, request, conversation.member_id, firing?.routine_id);
-  });
-  if (refused) throw new MemberStoreError("usage_limit");
+  return Boolean(rowCount);
 }
 
 const lowerUuid = z.uuid().transform(value => value.toLowerCase());
