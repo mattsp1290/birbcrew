@@ -26,7 +26,7 @@ export function ownerText(bytes: number) {
  * 029-member-instructions.sql repeats it. */
 export const instructionsBytes = 16_384;
 /** The most instruction packs a member can be spawned with (docs/instruction-packs.md); the
- * position CHECK in 034-instruction-packs.sql repeats it. */
+ * position CHECK in 033-instruction-packs.sql repeats it. */
 export const instructionPacksPerMember = 8;
 
 const uuid = z.uuid().transform((value) => value.toLowerCase());

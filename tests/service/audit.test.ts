@@ -1350,7 +1350,7 @@ test("migration 30 indexes a version-29 trail without queueing for an open audit
   const current = new MemberStore(upgraded);
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
   const { memberId } = await current.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
-  // Opened and admitted by the previous release, in SQL: this release's open also reads the packs 034
+  // Opened and admitted by the previous release, in SQL: this release's open also reads the packs 033
   // adds, and its admission the budgets 031 adds.
   await current.transaction(async db => {
     await db.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)", [ownerId, memberId, conversationId]);

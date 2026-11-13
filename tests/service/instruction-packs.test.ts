@@ -631,10 +631,10 @@ async function databaseAt(t: TestContext, version: number) {
   }
   return db;
 }
-const packMigration = "034-instruction-packs.sql";
+const packMigration = "033-instruction-packs.sql";
 const previous = 32;
 
-test("migration 034 takes its locks without queueing, rewrites nothing and leaves its CHECKs unvalidated", async (t) => {
+test("migration 033 takes its locks without queueing, rewrites nothing and leaves its CHECKs unvalidated", async (t) => {
   const upgraded = await databaseAt(t, previous);
   const ownerId = "owner-" + randomUUID();
   const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
@@ -683,10 +683,10 @@ test("migration 034 takes its locks without queueing, rewrites nothing and leave
     await holder.query("COMMIT");
     await migrating;
   } finally { holder.release(); }
-  assert.equal((await upgraded.query("SELECT count(*)::integer AS n FROM birbcrew_ts.schema_versions WHERE version=34")).rows[0].n, 1);
+  assert.equal((await upgraded.query("SELECT count(*)::integer AS n FROM birbcrew_ts.schema_versions WHERE version=33")).rows[0].n, 1);
 });
 
-test("migration 034 completes while a native turn holds its admission", async (t) => {
+test("migration 033 completes while a native turn holds its admission", async (t) => {
   const upgraded = await databaseAt(t, previous);
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
   const { rows: [{ member_id: memberId }] } = await upgraded.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
@@ -700,7 +700,7 @@ test("migration 034 completes while a native turn holds its admission", async (t
     VALUES ($1,$2,$3,$4,$5,1)`, [conversationId, requestId, start.token, execution.workflowRunId, execution.activityId]);
   await withNativeAdmission(upgraded, { ownerId, conversationId, requestId, text, token: start.token, execution }, AbortSignal.timeout(30_000), async () => {
     const migrated = await Promise.race([current.migrate().then(() => true), delay(5_000, false)]);
-    assert.equal(migrated, true, "migration 034 must not wait for a running native turn");
+    assert.equal(migrated, true, "migration 033 must not wait for a running native turn");
     await current.appendText({ ownerId, conversationId, requestId, token: start.token }, requestId + "/assistant", 0, "still running");
   });
   await current.commitTurn({ ownerId, conversationId, requestId, token: start.token, reply: "still running", checkpoint: { version: 1, engine: "pi", state: {} } });

@@ -306,7 +306,7 @@ safe: two gateways never fire one window twice. With several gateways:
 - a firing whose gateway stopped mid-attempt is retried by any gateway after its
   2-minute lease, with the same identity.
 
-The gateway cannot see a profile's attestation status, which only the worker reads.
+The gateway cannot see whether a profile's credential works, which only the worker checks.
 A firing whose profile is unavailable is admitted, its turn fails or becomes
 uncertain in the worker, and the firing fails, counting toward the limit of ten.
 

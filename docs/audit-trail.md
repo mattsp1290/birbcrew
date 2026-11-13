@@ -64,7 +64,7 @@ Each row in `birbcrew_ts.audit_events` records one fact:
 - `event_type`, `member_id`, `conversation_id`, `request_id` and a small
   `payload` object. `member_id` is null only for the `webhook.*` and
   `instruction_pack.*` types, which belong to the owner and to no member (migrations
-  32 and 34, `audit_events_member_check`).
+  32 and 33, `audit_events_member_check`).
 
 The audit row is written in the **same transaction** as the change it records, so
 a rolled-back change leaves no row, and a change committed by a release that
@@ -104,7 +104,7 @@ audit version may switch to a keyed per-owner digest.
 
 The registry is the `auditEvents` object in `src/service/audit.ts`.
 `audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
-`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql`, `027-handoffs.sql`, `028-approval-expiry.sql`, `029-member-instructions.sql`, `031-usage.sql`, `032-webhooks.sql` and then `034-instruction-packs.sql`, lists the same types.
+`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql`, `027-handoffs.sql`, `028-approval-expiry.sql`, `029-member-instructions.sql`, `031-usage.sql`, `032-webhooks.sql` and then `033-instruction-packs.sql`, lists the same types.
 Each widening replaces the whole constraint, so the last widening lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
@@ -365,7 +365,7 @@ which allows a null member only on the `webhook.*` types, and replaces
 table. [Outbound webhooks](webhooks.md#upgrade) lists its locks. `memberId` is `null`
 on `webhook.*` rows in JSON, and their CSV cell is empty.
 
-Migration 34 replaces `audit_events_member_check`, so that a null member is also allowed on
+Migration 33 replaces `audit_events_member_check`, so that a null member is also allowed on
 the two `instruction_pack.*` types, and `audit_events_type_check`, with every clause 32 lists
 and the three pack types, both `NOT VALID` and without a rewrite, and adds two partial unique
 indexes. It takes `audit_events` together with `members` without queueing;

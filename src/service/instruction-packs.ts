@@ -10,10 +10,10 @@ import type { MemberStore } from "./store.ts";
  * and one attached to a member is never deleted, so a member's packs stay what it was spawned with.
  * instructions.ts gives them to every native launch, before the member's own instructions. */
 export const packLimits = {
-  textBytes: instructionsBytes, // the body CHECK in 034-instruction-packs.sql repeats it
+  textBytes: instructionsBytes, // the body CHECK in 033-instruction-packs.sql repeats it
   nameBytes: 128, // the name CHECK repeats it
   descriptionBytes: 512, // the description CHECK repeats it
-  activePerOwner: 32, // limit_active_instruction_packs in 034-instruction-packs.sql repeats it
+  activePerOwner: 32, // limit_active_instruction_packs in 033-instruction-packs.sql repeats it
   perMember: instructionPacksPerMember,
   // A member's own instructions and the texts of its packs, together. The same budget instructions
   // had alone, so the fixed part of the context still fits every engine on its own.

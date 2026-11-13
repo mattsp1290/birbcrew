@@ -3,7 +3,7 @@
 An instruction pack is owner-written instruction text that several members share: "Write
 commit messages in the imperative mood and explain why", or a team's review checklist. An
 owner writes a pack once, through `/v1/instruction-packs`, and attaches up to eight packs,
-in order, when they spawn a member. Migration 34 stores them. Every native launch of every
+in order, when they spawn a member. Migration 33 stores them. Every native launch of every
 conversation of that member gives the packs' text to the model as system context, before
 the member's own [instructions](member-instructions.md), [project notes](../README.md)
 and [memory](memories.md). A pack never changes, and a member's packs are fixed for its
@@ -303,7 +303,7 @@ restore, list your packs and delete again any you had deleted after the recovery
 
 ## Upgrade
 
-Migration 34 creates `instruction_packs` and `member_instruction_packs`, replaces
+Migration 33 creates `instruction_packs` and `member_instruction_packs`, replaces
 `audit_events_member_check` and `audit_events_type_check` with `NOT VALID` constraints that
 list every earlier clause and the three new types, and adds two partial unique indexes on
 `audit_events`. Existing rows are neither rewritten nor checked. Until `migrate()` commits
@@ -319,22 +319,22 @@ It takes both with `LOCK ... NOWAIT` together and retries every 20 to 100 ms, as
 `ACCESS SHARE` and `ROW SHARE` on `members`, so the migration does not wait for it. After
 60 s without the locks it fails with `55P03`, applies nothing, and the process exits.
 
-`migrate()` applies every pending migration in one transaction. From version 32, 34 holds
-nothing while it retries, so a spawn in flight commits and 34 then proceeds. From version
-31, 34 retries for `members` while holding 32's `ACCESS EXCLUSIVE` lock on `audit_events`,
+`migrate()` applies every pending migration in one transaction. From version 32, 33 holds
+nothing while it retries, so a spawn in flight commits and 33 then proceeds. From version
+31, 33 retries for `members` while holding 32's `ACCESS EXCLUSIVE` lock on `audit_events`,
 so every audited write waits for it, and a spawn that started before the upgrade, which
 holds `members` and must append its audit row before it can commit, makes it fail after
 60 s with `55P03`, 32 included. From version 30 or earlier, 31 already holds both tables
-when 34 runs, so 34 never retries; the earlier migrations decide whether the upgrade waits. Stop every process of the
+when 33 runs, so 33 never retries; the earlier migrations decide whether the upgrade waits. Stop every process of the
 previous release first, as for every migration; then no spawn is in flight.
 
-The migration is numbered 34 because another change in review claims 33. Whichever of the
-two merges second repeats the other's audit types in its CHECKs and may be renumbered;
-`migrate()` refuses to apply a migration numbered below one already applied, so a database
-that ran this branch before 33 merged needs a fresh database.
+The migration was numbered 34 in review and took 33, the next number after 32, when it
+was restacked onto `main`. `migrate()` refuses to apply a migration numbered below one
+already applied, so a database that ran the branch while it was numbered 34 needs a fresh
+database.
 
 Members spawned before the upgrade have no packs, and the API cannot give them any. After a rollback
-to a release without migration 34, the rows stay but launches no longer include them, so
+to a release without migration 33, the rows stay but launches no longer include them, so
 members with packs lose them until the release returns.
 
 ## Not covered
@@ -375,7 +375,7 @@ conversation exists; the context order with instructions, notes and memory, name
 reach the model, and hostile text that stays in its frame; the largest fixed context, which
 opens on every engine, and `instructions_limit` and `memory_limit` with packs; a handoff
 target of each engine whose context holds its own member's packs while the transcript, the
-handoff record and the trail carry none; migration 34's locks, that it never queues and does
+handoff record and the trail carry none; migration 33's locks, that it never queues and does
 not wait for a native turn; and an upgrade from version 32.
 
 `recovery.test.ts` checks that capture counts both tables, that a held installation refuses
