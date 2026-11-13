@@ -20,8 +20,8 @@ export const trustedClaudeCommand = z.strictObject({
   continuation: z.strictObject({nativeCallId:text(256),toolName:text(64),text:text(65_536),isError:z.boolean()}).optional(),
 });
 const pending = z.strictObject({ kind:z.literal("pending"),text:text(65_536),checkpoint:claudeCheckpoint,
-  proposal:z.strictObject({nativeCallId:text(256),toolName:text(64),args:z.record(z.string(),z.json())}),usage:segmentUsage.optional() });
-const response = z.union([pending,z.strictObject({kind:z.literal("complete"),text:text(65_536),checkpoint:claudeCheckpoint,usage:segmentUsage.optional()}),
+  proposal:z.strictObject({nativeCallId:text(256),toolName:text(64),args:z.record(z.string(),z.json())}),usage:segmentUsage });
+const response = z.union([pending,z.strictObject({kind:z.literal("complete"),text:text(65_536),checkpoint:claudeCheckpoint,usage:segmentUsage}),
   z.strictObject({error:z.string()})]);
 type Profile = Parameters<typeof runClaudeTurn>[1];
 type Command = z.infer<typeof trustedClaudeCommand>;
@@ -39,7 +39,7 @@ export async function runTrustedClaude(input: TrustedNativeInput, profile: Profi
     const result = await execute(command,input,profile);
     checkpoint = result.checkpoint;
     combined += result.text;
-    usage.push(result.usage ?? {state:"unknown",model:null});
+    usage.push(result.usage);
     if (Buffer.byteLength(combined)>65_536) throw new Error("Claude response exceeds limit");
     if (result.kind === "complete") {
       return {text:combined,checkpoint,usage:combinedUsage(usage)};
