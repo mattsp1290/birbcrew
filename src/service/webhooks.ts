@@ -43,13 +43,25 @@ const uuid = z.uuid();
 const envelope = {
   eventId: z.string().regex(/^[1-9][0-9]{0,18}$/), occurredAt: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/), memberId: uuid,
 };
+type Envelope = z.output<z.ZodObject<typeof envelope>>;
 /** A readable message: a title and labelled values, every one a field of the body. */
 type Message = { title: string; details: readonly (readonly [string, string])[] };
 type KindDefinition = { auditType: AuditEventType; when?: (row: AuditRow) => boolean; body: z.ZodType;
-  fields: (row: AuditRow) => Record<string, unknown>; message(body: Readonly<Record<string, string>>): Message };
-/** Types a kind's template by that kind's own body, so it can only name fields the body has. */
-const defineKind = <S extends z.ZodType>(definition: Omit<KindDefinition, "body" | "message"> & { body: S; message: (body: z.output<S>) => Message }) =>
-  definition;
+  fields: (row: AuditRow) => Record<string, unknown>; toMessage: (fields: unknown) => Message };
+/** Pairs a kind's strict body with its fixed template. `toMessage` parses with this kind's own
+ * schema, so a template only ever sees a body that schema accepted and can only name its fields,
+ * then adds the lines every message ends with. */
+const defineKind = <S extends z.ZodType<Envelope>>({ message, ...definition }:
+  Omit<KindDefinition, "body" | "toMessage"> & { body: S; message: (body: z.output<S>) => Message }) => ({
+  ...definition,
+  toMessage: (fields: unknown): Message => {
+    const body: z.output<S> & Envelope = definition.body.parse(fields);
+    const { title, details } = message(body);
+    return { title, details: [...details, ["Member", body.memberId], ["Event", body.eventId], ["Occurred at", body.occurredAt]] };
+  },
+});
+// A stored outbox body: the kind's body plus the webhookId the fan-out added.
+const storedBody = z.looseObject({ webhookId: uuid });
 
 /** What an endpoint can subscribe to. Each kind is one committed audit event type (and, for
  * routine.disabled, one reason), so a delivery exists only for a change that committed. A body
@@ -89,12 +101,8 @@ const deliveredAuditTypes = [...new Set(webhookKindNames.map(kind => webhookKind
  * strict schema first, so a message can only ever hold what the signed `crew` body holds. A schema
  * tightened later would fail rows queued under the old one, for these formats only, until they give up. */
 export function webhookMessage(kind: WebhookKind, stored: string): Message {
-  const { webhookId, ...fields } = JSON.parse(stored) as Record<string, unknown>;
-  uuid.parse(webhookId);
-  const definition: KindDefinition = webhookKinds[kind];
-  const body = definition.body.parse(fields) as Record<string, string>;
-  const { title, details } = definition.message(body);
-  return { title, details: [...details, ["Member", body.memberId], ["Event", body.eventId], ["Occurred at", body.occurredAt]] };
+  const { webhookId: _webhookId, ...fields } = storedBody.parse(JSON.parse(stored));
+  return webhookKinds[kind].toMessage(fields);
 }
 
 type Rendered = { body: string; headers: Record<string, string> };
@@ -162,7 +170,8 @@ type EndpointState = "enabled" | "disabled" | "deleted";
 type DisabledReason = "owner" | "consecutive_failures" | "recovery_restore";
 type EndpointRow = {
   webhook_id: string; owner_id: string; create_request_id: string; url: string | null; host: string; kinds: WebhookKind[];
-  format: WebhookFormat; secret: string | null; state: EndpointState; disabled_reason: DisabledReason | null; consecutive_failures: number;
+  // Any name the column's CHECK allows: a later release can store a format this one does not know.
+  format: string; secret: string | null; state: EndpointState; disabled_reason: DisabledReason | null; consecutive_failures: number;
   enabled_at: Date | null; created_at: Date; revision: number;
 };
 type DeliveryState = "pending" | "delivering" | "delivered" | "failed" | "cancelled";
@@ -356,6 +365,7 @@ export class WebhookApi {
 }
 
 type Claim = { webhook_id: string; event_id: string; attempts: number; prior_attempts: number; lease_until: Date;
+  // claim() takes only endpoints whose format webhookFormats knows.
   kind: WebhookKind; body: string; url: string; format: WebhookFormat; secret: string };
 type Result = { outcome: Outcome; status?: number };
 

@@ -62,18 +62,21 @@ async function databaseAt(t: TestContext, version = Infinity) {
 }
 
 type Received = { path: string; headers: IncomingHttpHeaders; body: string; at: number };
-type Reply = number | "hang";
-/** A local receiver. `reply` decides each answer by path; "hang" never answers. */
+type Reply = number | "hang" | { status: number; text: string };
+/** A local receiver. `reply` decides each answer by path, or by the whole request; a status alone
+ * answers "ok", and "hang" never answers. */
 async function receiver(t: TestContext) {
   const received: Received[] = [];
   const sockets = new Set<Socket>();
-  const state = { reply: (_path: string): Reply => 200 };
+  const state = { reply: (_path: string, _request: { method: string; headers: IncomingHttpHeaders; body: string }): Reply => 200 };
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(chunk as Buffer);
-    received.push({ path: request.url!, headers: request.headers, body: Buffer.concat(chunks).toString(), at: Date.now() });
-    const answer = state.reply(request.url!);
-    if (answer !== "hang") response.writeHead(answer).end("ok");
+    const body = Buffer.concat(chunks).toString();
+    received.push({ path: request.url!, headers: request.headers, body, at: Date.now() });
+    const answer = state.reply(request.url!, { method: request.method!, headers: request.headers, body });
+    if (typeof answer === "number") response.writeHead(answer).end("ok");
+    else if (answer !== "hang") response.writeHead(answer.status, { "Content-Type": "text/plain" }).end(answer.text);
   });
   server.on("connection", socket => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
   server.listen(0, "127.0.0.1");
@@ -126,6 +129,43 @@ type Harness = Awaited<ReturnType<typeof harness>>;
 async function pass(...dispatchers: WebhookDispatcher[]) {
   await Promise.all(dispatchers.map(d => d.tick()));
   await Promise.all(dispatchers.map(d => d.idle()));
+}
+
+/** Each kind once, through its real path where one exists: a card through the proposal path, a
+ * finished request through the commit path, and the routine dispatcher's two rows as it appends
+ * them. The prompt, note and reply carry marker text that no delivery may hold. */
+async function everyKind(h: Harness, memberId = h.member.memberId) {
+  const carded = await h.conversation(h.ownerId, memberId);
+  const request: TurnRequest = { ownerId: h.ownerId, conversationId: carded, requestId: randomUUID(), text: "private PROMPT-MARKER" };
+  await h.store.recordAcceptance(request, ownerInitiator);
+  const turn = await h.store.beginTurn(request);
+  if (turn.kind !== "start") throw new Error("the card's turn did not start");
+  const approval = await new ApprovalStore(h.db).propose({ ownerId: h.ownerId, memberId, conversationId: carded,
+    requestId: request.requestId, token: turn.token, invocationId: request.requestId, nativeCallId: "card",
+    toolName: "record_work_item", arguments: { operation_id: request.requestId, note: "private NOTE-MARKER" } });
+  const committed = await h.conversation(h.ownerId, memberId);
+  const done = { ownerId: h.ownerId, conversationId: committed, requestId: randomUUID(), text: "another PROMPT-MARKER" };
+  await h.store.recordAcceptance(done, ownerInitiator);
+  const started = await h.store.beginTurn(done);
+  if (started.kind !== "start") throw new Error("the finished request's turn did not start");
+  await h.store.commitTurn({ ownerId: h.ownerId, conversationId: committed, requestId: done.requestId, token: started.token,
+    reply: "private REPLY-MARKER", checkpoint: { version: 1, engine: "pi", state: {} } });
+  const routineId = randomUUID();
+  await h.store.transaction(async db => {
+    await appendAudit(db, { type: "routine.firing_settled", ownerId: h.ownerId, memberId,
+      payload: { routineId, scheduledFor: "2031-01-06T10:15:00.000Z", status: "failed", reason: "turn_failed" } });
+    await appendAudit(db, { type: "routine.disabled", ownerId: h.ownerId, memberId, payload: { routineId, revision: 2, reason: "consecutive_failures" } });
+  });
+  return { carded, request, approval, committed, done, routineId };
+}
+
+/** The audit rows of every delivered kind, oldest first (or only `requestId`'s), with the eventId and
+ * occurredAt a body states. */
+async function deliveredEvents(db: Pool, requestId?: string) {
+  return (await db.query<{ eventId: string; occurredAt: string }>(`SELECT event_id::text AS "eventId",
+    to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt" FROM birbcrew_ts.audit_events
+    WHERE event_type IN ('approval.requested','request.finished','routine.firing_settled','routine.disabled')
+      AND ($1::uuid IS NULL OR request_id=$1::uuid) ORDER BY event_id`, [requestId ?? null])).rows;
 }
 
 async function gateway(t: TestContext, store: MemberStore, clock: Clock, webhookTargets: TargetPolicy) {
@@ -323,41 +363,15 @@ test("each kind is delivered once to each endpoint that selected it, signed, wit
   const all = await h.create(r.url("all"));
   const finishedOnly = await h.create(r.url("finished"), ["request.finished"]);
 
-  // A card that becomes pending, through the real proposal path.
-  const carded = await h.conversation();
-  const request: TurnRequest = { ownerId: h.ownerId, conversationId: carded, requestId: randomUUID(), text: "private prompt PROMPT-MARKER" };
-  await h.store.recordAcceptance(request, ownerInitiator);
-  const turn = await h.store.beginTurn(request);
-  assert.equal(turn.kind, "start"); if (turn.kind !== "start") return;
-  const approval = await new ApprovalStore(h.db).propose({ ownerId: h.ownerId, memberId: h.member.memberId, conversationId: carded,
-    requestId: request.requestId, token: turn.token, invocationId: request.requestId, nativeCallId: "card",
-    toolName: "record_work_item", arguments: { operation_id: request.requestId, note: "private NOTE-MARKER" } });
-  // A finished request, through the real commit path.
-  const committed = await h.conversation();
-  const done = { ownerId: h.ownerId, conversationId: committed, requestId: randomUUID(), text: "another PROMPT-MARKER" };
-  await h.store.recordAcceptance(done, ownerInitiator);
-  const started = await h.store.beginTurn(done);
-  assert.equal(started.kind, "start"); if (started.kind !== "start") return;
-  await h.store.commitTurn({ ownerId: h.ownerId, conversationId: committed, requestId: done.requestId, token: started.token,
-    reply: "private REPLY-MARKER", checkpoint: { version: 1, engine: "pi", state: {} } });
-  // The routine dispatcher's own facts; an owner's own disable is not delivered.
-  const routineId = randomUUID(), quiet = randomUUID();
-  await h.store.transaction(async db => {
-    await appendAudit(db, { type: "routine.firing_settled", ownerId: h.ownerId, memberId: h.member.memberId,
-      payload: { routineId, scheduledFor: "2031-01-06T10:15:00.000Z", status: "failed", reason: "turn_failed" } });
-    await appendAudit(db, { type: "routine.disabled", ownerId: h.ownerId, memberId: h.member.memberId,
-      payload: { routineId, revision: 2, reason: "consecutive_failures" } });
-    await appendAudit(db, { type: "routine.disabled", ownerId: h.ownerId, memberId: h.member.memberId,
-      payload: { routineId: quiet, revision: 2, reason: "owner" } });
-  });
+  const { carded, request, approval, committed, done, routineId } = await everyKind(h);
+  // An owner's own disable is not delivered.
+  await h.store.transaction(db => appendAudit(db, { type: "routine.disabled", ownerId: h.ownerId, memberId: h.member.memberId,
+    payload: { routineId: randomUUID(), revision: 2, reason: "owner" } }));
 
   const dispatcher = h.dispatcher();
   // One pass sends every due delivery: an endpoint's deliveries go one after another.
   await pass(dispatcher);
-  const { rows: events } = await h.db.query(`SELECT event_id::text AS "eventId", event_type AS type,
-    to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt" FROM birbcrew_ts.audit_events
-    WHERE event_type IN ('approval.requested','request.finished','routine.firing_settled','routine.disabled') ORDER BY event_id`);
-  const [, card, finished, settled, exhausted] = events;
+  const [, card, finished, settled, exhausted] = await deliveredEvents(h.db);
   const envelope = (event: { eventId: string; occurredAt: string }, kind: string, webhookId: string) =>
     ({ webhookId, eventId: event.eventId, kind, occurredAt: event.occurredAt, memberId: h.member.memberId });
   const expected = (webhookId: string) => [
@@ -388,7 +402,7 @@ test("each kind is delivered once to each endpoint that selected it, signed, wit
 
   const listed = await h.api.deliveries(h.ownerId, all.webhookId, {});
   assert.deepEqual(listed.deliveries.map(d => [d.eventId, d.kind, d.state, d.attempts, d.lastOutcome, d.lastStatusCode, d.reason]),
-    [[exhausted, "routine.disabled"], [settled, "routine.firing_settled"], [finished, "request.finished"], [card, "approval.pending"]]
+    ([[exhausted, "routine.disabled"], [settled, "routine.firing_settled"], [finished, "request.finished"], [card, "approval.pending"]] as const)
       .map(([event, kind]) => [event.eventId, kind, "delivered", 1, "delivered", 200, null]));
   const older = await h.api.deliveries(h.ownerId, all.webhookId, { limit: "2", before: exhausted.eventId });
   assert.deepEqual([older.deliveries.map(d => d.eventId), older.nextBefore, older.hasMore], [[settled.eventId, finished.eventId], finished.eventId, true]);
@@ -1215,37 +1229,14 @@ test("every format writes each kind as its fixed template from the body's identi
   const r = await receiver(t);
   const endpoints = {} as Record<WebhookFormat, Awaited<ReturnType<Harness["create"]>>>;
   for (const format of webhookFormatNames) endpoints[format] = await h.create(r.url(format), webhookKindNames, h.ownerId, format);
-  // Each kind through its real path, around text no message may carry.
-  const instructed = await h.store.spawn({ ownerId: h.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture",
+  // Each kind through its real path, around text no message may carry: the fixture's, and this member's instructions and memory.
+  const { memberId } = await h.store.spawn({ ownerId: h.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture",
     instructions: "INSTRUCTIONS-MARKER" });
-  const memberId = instructed.memberId;
   await new MemoryApi(h.store).create(h.ownerId, { requestId: randomUUID(), memberId, text: "MEMORY-MARKER" });
-  const carded = await h.conversation(h.ownerId, memberId);
-  const request: TurnRequest = { ownerId: h.ownerId, conversationId: carded, requestId: randomUUID(), text: "private PROMPT-MARKER" };
-  await h.store.recordAcceptance(request, ownerInitiator);
-  const turn = await h.store.beginTurn(request);
-  assert.equal(turn.kind, "start"); if (turn.kind !== "start") return;
-  const approval = await new ApprovalStore(h.db).propose({ ownerId: h.ownerId, memberId, conversationId: carded,
-    requestId: request.requestId, token: turn.token, invocationId: request.requestId, nativeCallId: "card",
-    toolName: "record_work_item", arguments: { operation_id: request.requestId, note: "private NOTE-MARKER" } });
-  const committed = await h.conversation(h.ownerId, memberId);
-  const done = { ownerId: h.ownerId, conversationId: committed, requestId: randomUUID(), text: "another PROMPT-MARKER" };
-  await h.store.recordAcceptance(done, ownerInitiator);
-  const started = await h.store.beginTurn(done);
-  assert.equal(started.kind, "start"); if (started.kind !== "start") return;
-  await h.store.commitTurn({ ownerId: h.ownerId, conversationId: committed, requestId: done.requestId, token: started.token,
-    reply: "private REPLY-MARKER", checkpoint: { version: 1, engine: "pi", state: {} } });
-  const routineId = randomUUID();
-  await h.store.transaction(async db => {
-    await appendAudit(db, { type: "routine.firing_settled", ownerId: h.ownerId, memberId,
-      payload: { routineId, scheduledFor: "2031-01-06T10:15:00.000Z", status: "failed", reason: "turn_failed" } });
-    await appendAudit(db, { type: "routine.disabled", ownerId: h.ownerId, memberId, payload: { routineId, revision: 2, reason: "consecutive_failures" } });
-  });
+  const { carded, request, approval, committed, done, routineId } = await everyKind(h, memberId);
   await pass(h.dispatcher());
 
-  const { rows: [card, finished, settled, exhausted] } = await h.db.query<{ eventId: string; occurredAt: string }>(`SELECT event_id::text AS "eventId",
-    to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt" FROM birbcrew_ts.audit_events
-    WHERE event_type IN ('approval.requested','request.finished','routine.firing_settled','routine.disabled') ORDER BY event_id`);
+  const [card, finished, settled, exhausted] = await deliveredEvents(h.db);
   const at = (format: WebhookFormat) => r.received.filter(item => item.path === "/" + format);
   for (const format of webhookFormatNames) assert.equal(at(format).length, 4, format);
 
@@ -1322,47 +1313,50 @@ test("a readable message is built only from a body its kind's strict schema acce
   await h.db.query(`INSERT INTO birbcrew_ts.webhook_deliveries (webhook_id,event_id,kind,body,state,next_attempt_at,created_at)
     VALUES ($1, 1, 'request.finished', $2, 'pending', $3, $3)`, [endpoint.webhookId, JSON.stringify({ ...body, webhookId: endpoint.webhookId,
     note: "NOTE-MARKER" }), h.clock()]);
-  // A format this release does not know, as a later release could write: its rows are left alone, unattempted.
-  const { rows: [{ webhook_id: later }] } = await h.db.query<{ webhook_id: string }>(`INSERT INTO birbcrew_ts.webhook_endpoints
-      (owner_id,create_request_id,url,host,kinds,format,secret,state,enabled_at)
-    VALUES ($1, gen_random_uuid(), $2, $3, '{request.finished}', 'teams', repeat('a', 43), 'enabled', clock_timestamp()) RETURNING webhook_id`,
-    [h.ownerId, r.url("later"), `127.0.0.1:${r.port}`]);
   const good = await h.finished(await h.conversation());
   await pass(h.dispatcher());
   assert.deepEqual(r.received.map(item => [item.path, (JSON.parse(item.body) as { text: string }).text.includes(good)]), [["/in", true]]);
   assertCarriesNoText(r.received);
   assert.deepEqual((await h.deliveries(endpoint.webhookId)).map(d => [d.eventId === "1", d.state, d.attempts, d.outcome]),
     [[true, "pending", 1, "network"], [false, "delivered", 1, "delivered"]]);
-  assert.deepEqual((await h.deliveries(later)).map(d => [d.state, d.attempts]), [["pending", 0]]);
+});
+
+test("an endpoint whose format this release does not know keeps its deliveries pending and unattempted", async (t) => {
+  const h = await harness(t);
+  const r = await receiver(t);
+  const known = await h.create(r.url("known"), ["request.finished"]);
+  // As a later release with another format could write it.
+  const { rows: [{ webhook_id: later }] } = await h.db.query<{ webhook_id: string }>(`INSERT INTO birbcrew_ts.webhook_endpoints
+      (owner_id,create_request_id,url,host,kinds,format,secret,state,enabled_at)
+    VALUES ($1, gen_random_uuid(), $2, $3, '{request.finished}', 'teams', repeat('a', 43), 'enabled', clock_timestamp()) RETURNING webhook_id`,
+    [h.ownerId, r.url("later"), `127.0.0.1:${r.port}`]);
+  await h.finished(await h.conversation());
+  await pass(h.dispatcher());
+  assert.deepEqual(r.received.map(item => item.path), ["/known"]);
+  assert.deepEqual((await h.deliveries(known.webhookId)).map(d => [d.state, d.attempts]), [["delivered", 1]]);
+  assert.deepEqual((await h.deliveries(later)).map(d => [d.state, d.attempts, d.outcome]), [["pending", 0, null]]);
+  assert.deepEqual([(await h.endpoint(later)).state, (await h.endpoint(later)).consecutive_failures], ["enabled", 0]);
 });
 
 /** A Slack-compatible incoming webhook, as Slack documents it: a JSON body whose `text` is a
  * non-empty string is answered `200 ok`; malformed JSON `400 invalid_payload`; no text `400 no_text`;
  * a path that names no hook `404 no_service`. The path is the hook's credential. */
 async function slackReceiver(t: TestContext, hook: string) {
+  const r = await receiver(t);
   const accepted: { text: string; raw: string; headers: IncomingHttpHeaders }[] = [];
   const answers: string[] = [];
-  const sockets = new Set<Socket>();
-  const server = createServer(async (request, response) => {
-    const chunks: Buffer[] = [];
-    for await (const chunk of request) chunks.push(chunk as Buffer);
-    const raw = Buffer.concat(chunks).toString();
-    const answer = (status: number, text: string) => { answers.push(text); response.writeHead(status, { "Content-Type": "text/plain" }).end(text); };
-    if (request.method !== "POST" || request.url !== hook) return answer(404, "no_service");
-    if (!request.headers["content-type"]?.startsWith("application/json")) return answer(400, "invalid_payload");
+  const answer = (status: number, text: string) => { answers.push(text); return { status, text }; };
+  r.state.reply = (path, { method, headers, body }) => {
+    if (method !== "POST" || path !== hook) return answer(404, "no_service");
+    if (!headers["content-type"]?.startsWith("application/json")) return answer(400, "invalid_payload");
     let payload: unknown;
-    try { payload = JSON.parse(raw); } catch { return answer(400, "invalid_payload"); }
+    try { payload = JSON.parse(body); } catch { return answer(400, "invalid_payload"); }
     const text = (payload as { text?: unknown } | null)?.text;
     if (typeof text !== "string" || !text) return answer(400, "no_text");
-    accepted.push({ text, raw, headers: request.headers });
-    answer(200, "ok");
-  });
-  server.on("connection", socket => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  t.after(async () => { for (const socket of sockets) socket.destroy(); server.close(); await once(server, "close"); });
-  const { port } = server.address() as { port: number };
-  return { accepted, answers, port, url: (path = hook) => `http://127.0.0.1:${port}${path}` };
+    accepted.push({ text, raw: body, headers });
+    return answer(200, "ok");
+  };
+  return { accepted, answers, port: r.port, url: (path = hook) => `http://127.0.0.1:${r.port}${path}` };
 }
 
 test("a slack endpoint made through the routes posts a message a Slack-compatible receiver accepts, and its URL reaches no one but the owner", async (t) => {
@@ -1401,9 +1395,7 @@ test("a slack endpoint made through the routes posts a message a Slack-compatibl
   for (let i = 0; i < 200 && await settled() !== expected; i++) await delay(25);
   assert.equal(await settled(), expected, "delivered to the hook; an ordinary failed attempt for the revoked hook and each unreadable body");
   assert.deepEqual(slack.answers.sort(), ["invalid_payload", "no_service", "no_text", "ok"]);
-  const { rows: [event] } = await db.query<{ eventId: string; occurredAt: string }>(`SELECT event_id::text AS "eventId",
-    to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt" FROM birbcrew_ts.audit_events
-    WHERE event_type='request.finished' AND request_id=$1`, [requestId]);
+  const [event] = await deliveredEvents(db, requestId);
   assert.deepEqual(slack.accepted.map(message => message.text), [["Crew: request failed", `Conversation: \`${conversationId}\``,
     `Request: \`${requestId}\``, `Member: \`${memberId}\``, `Event: \`${event.eventId}\``, `Occurred at: \`${event.occurredAt}\``].join("\n")]);
   const [message] = slack.accepted;
