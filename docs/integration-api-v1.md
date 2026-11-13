@@ -391,7 +391,7 @@ upgrade without them.
 | `after` | Decimal event ID; return later events only. Default `0`. |
 | `limit` | Default 100 in both formats. At most 1000 for JSON and 10000 for CSV (the hard row cap). |
 | `conversationId` | Restrict to one conversation. Another owner's ID yields an empty page. |
-| `memberId` | Restrict to one member. Another owner's ID yields an empty page. |
+| `memberId` | Restrict to one member. Another owner's ID yields an empty page. `webhook.*` rows name no member and never match. |
 | `eventType` | Comma-separated registered event types. |
 | `actorKind`, `initiatorKind` | `owner` or `system`; one of `initiatorKinds`. |
 | `initiatorId` | Requests a routine or a handoff started, by routine or handoff ID. Another owner's ID yields an empty page. |
