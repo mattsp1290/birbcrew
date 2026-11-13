@@ -45,9 +45,10 @@ exists. This is how `conversationId` already behaved.
 - `memberId` matches every row of the member, including the routine and memory
   rows, which name the routine's or the entry's member, and
   `member.instructions_set`. A `conversation.handed_off` row names the source
-  conversation and its member, so the target member's ID does not match it. That
-  ID matches the target's `conversation.opened` row and its reserved request's
-  rows.
+  conversation and its member, so the source member's ID matches it and the
+  target member's ID does not, unless the target is the source's own member. The
+  target member's ID matches the target's `conversation.opened` row and its
+  reserved request's rows.
 - `eventType` takes names from `audit.eventTypes`. A name is case-sensitive. A
   registered type with no rows yet returns an empty page.
 - `actorKind` and `initiatorKind` match the `actor.kind` and `initiator.kind`
@@ -61,10 +62,14 @@ exists. This is how `conversationId` already behaved.
   (`routine.created`, `routine.enabled`, `routine.disabled`, `routine.deleted`,
   `routine.firing_settled`), the `conversation.opened` row of a firing or of a
   handoff's target, or the `conversation.handed_off` row. Those rows name the
-  owner as initiator, and the routine and handoff rows carry `routineId` or
-  `handoffId` in their payload, which no filter reads. An owner-initiated row
-  stores the owner ID as its initiator ID, so `initiatorId` never matches it.
-  Select the owner's own rows with `initiatorKind=owner`. `initiatorId` combines
+  owner as initiator. The routine's rows and a firing's `conversation.opened`
+  carry `routineId` in their payload, and `conversation.handed_off` carries
+  `handoffId`, which no filter reads. For everything in a handoff's target, pass
+  the `targetConversationId` of its `conversation.handed_off` row as
+  `conversationId`. An owner-initiated row stores the owner ID as its initiator
+  ID, and `initiatorId` skips owner-initiated rows, so it never matches one, even
+  when the owner ID is itself a UUID. Select the owner's own rows with
+  `initiatorKind=owner`. `initiatorId` combines
   with `initiatorKind` like any filter, so `initiatorKind=owner&initiatorId=...`
   matches nothing, and `initiatorKind=routine` with a handoff ID matches nothing.
 - `from` and `to` form a half-open window: `from` is inclusive and `to` is
@@ -127,8 +132,9 @@ leaves the cursor where it was, so a client polling such a filter would walk the
 owner's trail from its last match on every poll. Migration 30 adds an index for
 each filter where that happens, so the read touches only matching rows. One
 member, one type, one routine or one handoff reads a single range that is already
-in event ID order. Several types, or `initiatorKind=routine` or
-`initiatorKind=handoff` alone, read their matching rows and sort them.
+in event ID order. Several types read their matching rows and sort them.
+`initiatorKind=routine` or `initiatorKind=handoff` alone reads every row that a
+routine or a handoff started, keeps the rows of its kind and sorts them.
 
 | Index | Columns | Serves |
 | --- | --- | --- |
@@ -248,7 +254,9 @@ members, a denied card and a routine that fires and completes:
   `actorKind=system`, each registered event type, and the member, conversation
   and kind combinations around them return exactly the matching rows of the
   reading owner, with CSV equal cell for cell to JSON, and the other owner's
-  members, handoff and conversations return empty pages;
+  members, handoff and conversations return empty pages; a handoff to the
+  source's own member shows under that member, and an owner ID that is a UUID
+  never matches its own rows through `initiatorId`;
 - a filtered read waits for a late commit like an unfiltered one, and answers
   `503 audit_unsettled` when a writer stays open;
 - each malformed value above returns `400 invalid_input`;

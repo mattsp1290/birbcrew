@@ -5,8 +5,8 @@
 -- that polls such a filter walks the owner's trail from its last match on every poll. Each index
 -- below lets one such filter read only its matching rows, as audit_events_conversation_page does
 -- for conversationId. One member, one type, one routine or one handoff is a single (owner, value) range
--- already in event_id order; several types, or initiatorKind=routine or handoff alone, read their few
--- rows and sort them.
+-- already in event_id order. Several types read their few rows and sort them. initiatorKind=routine
+-- or handoff alone reads every row a routine or a handoff started, keeps its kind's and sorts them.
 --   member_page: one member among all the owner's members.
 --   type_page: one or a few of the event types; grants, memories, spawns and routine changes are rare.
 --   initiator_page: one routine's or one handoff's requests. Partial, so it holds only rows that a

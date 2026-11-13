@@ -204,7 +204,8 @@ function filterClause(filters: AuditFilters, first: number) {
     if (value === undefined) return [];
     values.push(value);
     const filter: { where: (p: string, value: never) => string } = auditFilters[name];
-    return [" AND " + filter.where("$" + (first + values.length - 1), value as never)];
+    // Parenthesised, so a predicate with an OR could never escape the owner and cursor terms.
+    return [" AND (" + filter.where("$" + (first + values.length - 1), value as never) + ")"];
   });
   return { where: where.join(""), values };
 }
@@ -244,7 +245,7 @@ async function stableHorizon(pool: Pool): Promise<string> {
 }
 
 /** Owner comes from authentication only, and filters narrow that owner's rows: another owner's
- * conversation, member or routine matches nothing. */
+ * conversation, member, routine or handoff matches nothing. */
 export async function readAudit(pool: Pool, ownerId: string, query: AuditQuery) {
   const horizon = await stableHorizon(pool);
   const filters = filterClause(query.filters, 4);

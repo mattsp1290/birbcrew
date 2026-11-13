@@ -1043,27 +1043,28 @@ test("handoff, expiry and instructions rows answer every filter alike in JSON an
     assert.equal(response.status, status, await response.clone().text());
     return response.json();
   }
+  /** A new conversation of the member with one request, submitted through the gateway and started. */
+  async function started(ownerId: string, credential: string, memberId: string, terms: { approvalDeadlineSeconds?: number } = {}) {
+    const conversationId = randomUUID(), request = { ownerId, conversationId, requestId: randomUUID(), text: "audited prompt", ...terms };
+    await created(await f.api("/v1/conversations", { conversationId, memberId }, credential), 201);
+    await created(await f.api(`/v1/conversations/${conversationId}/requests`, { requestId: request.requestId, text: request.text, ...terms },
+      credential), 202);
+    const turn = await store.beginTurn(request);
+    assert.equal(turn.kind, "start"); if (turn.kind !== "start") throw new Error("unreachable");
+    return { ownerId, conversationId, requestId: request.requestId, token: turn.token };
+  }
   /** One owner's trail: a member spawned with instructions, a card on it that expires, and a handoff of
    * another of its conversations to a second member, whose reserved request then completes. */
   async function trail(ownerId: string, credential: string) {
     const spawn = async (instructions?: string) => (await created(await f.api("/v1/members",
       { requestId: randomUUID(), engine: "pi", profile, ...(instructions ? { instructions } : {}) }, credential), 201)).memberId as string;
     const instructed = await spawn("Answer in one sentence."), target = await spawn();
-    async function started(terms: { approvalDeadlineSeconds?: number } = {}) {
-      const conversationId = randomUUID(), request = { ownerId, conversationId, requestId: randomUUID(), text: "audited prompt", ...terms };
-      await created(await f.api("/v1/conversations", { conversationId, memberId: instructed }, credential), 201);
-      await created(await f.api(`/v1/conversations/${conversationId}/requests`, { requestId: request.requestId, text: request.text, ...terms },
-        credential), 202);
-      const turn = await store.beginTurn(request);
-      assert.equal(turn.kind, "start"); if (turn.kind !== "start") throw new Error("unreachable");
-      return { ownerId, conversationId, requestId: request.requestId, token: turn.token };
-    }
-    const expiring = await started({ approvalDeadlineSeconds: 60 });
+    const expiring = await started(ownerId, credential, instructed, { approvalDeadlineSeconds: 60 });
     const card = await approvals.propose({ ...expiring, memberId: instructed, invocationId: expiring.requestId,
       nativeCallId: "expiring-call", toolName: "record_work_item", arguments: { operation_id: expiring.requestId } });
     await pool.query("UPDATE birbcrew_ts.deferred_calls SET expires_at=clock_timestamp() WHERE approval_id=$1", [card.approvalId]);
     assert.deepEqual(await approvals.expireTurn(card), { kind: "expired" });
-    const source = await started();
+    const source = await started(ownerId, credential, instructed);
     await store.commitTurn({ ...source, reply: "done", checkpoint });
     const handoff = await created(await f.api(`/v1/conversations/${source.conversationId}/handoffs`,
       { requestId: randomUUID(), memberId: target }, credential), 201);
@@ -1140,6 +1141,23 @@ test("handoff, expiry and instructions rows answer every filter alike in JSON an
       assert.equal(await csv.text(), auditCsv(page.events as unknown as AuditEvent[]), query);
     }
   }
+
+  // A handoff to the source's own member is recorded on that member, so the target's memberId returns it.
+  const [first] = owners;
+  const own = await started(first.ownerId, first.credential, first.instructed);
+  await store.commitTurn({ ...own, reply: "done", checkpoint });
+  await created(await f.api(`/v1/conversations/${own.conversationId}/handoffs`, { requestId: randomUUID(), memberId: first.instructed },
+    first.credential), 201);
+  assert.deepEqual((await f.audit(`?memberId=${first.instructed}&eventType=conversation.handed_off`, first.credential)).events
+    .map(event => [event.conversationId, event.payload.targetMemberId]), [[first.source, first.target], [own.conversationId, first.instructed]]);
+
+  // An owner ID may itself be a UUID. Its own rows store it as initiator_id, and initiatorId still skips them.
+  const uuidOwner = randomUUID();
+  await store.spawn({ ownerId: uuidOwner, requestId: randomUUID(), engine: "pi", profile });
+  const types = async (filters: Record<string, string>) =>
+    (await readAudit(pool, uuidOwner, auditQuerySchema.parse(filters))).events.map(event => [event.type, event.initiator.id]);
+  assert.deepEqual(await types({ initiatorKind: "owner" }), [["member.spawned", uuidOwner]]);
+  assert.deepEqual(await types({ initiatorId: uuidOwner }), []);
 });
 
 test("migration 30 indexes a version-29 trail without queueing for an open audited write or waiting for a native turn", async (t) => {
