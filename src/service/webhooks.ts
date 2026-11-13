@@ -1,7 +1,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import type { PoolClient } from "pg";
 import { z } from "zod";
-import { appendAudit, settledHorizon, stableHorizon, type AuditEventType } from "./audit.ts";
+import { appendAudit, auditEvents, settledHorizon, stableHorizon, type AuditEventType } from "./audit.ts";
 import { toolNameSchema } from "./deferral.ts";
 import { MemberStoreError } from "./domain.ts";
 import type { MemberStore } from "./store.ts";
@@ -49,7 +49,8 @@ type KindDefinition = { auditType: AuditEventType; when?: (row: AuditRow) => boo
 /** What an endpoint can subscribe to. Each kind is one committed audit event type (and, for
  * routine.disabled, one reason), so a delivery exists only for a change that committed. A body
  * carries identifiers, the kind, the time and a status, never prompt, reply, note or memory
- * text: the strict schema refuses anything else. 032-webhooks.sql repeats the names. */
+ * text: the strict schema refuses anything else. A status is whatever its audit payload allows,
+ * so a status the trail gains is delivered, not skipped. 032-webhooks.sql repeats the names. */
 export const webhookKinds = {
   "approval.pending": { auditType: "approval.requested",
     body: z.strictObject({ ...envelope, kind: z.literal("approval.pending"), conversationId: uuid, requestId: uuid,
@@ -58,11 +59,11 @@ export const webhookKinds = {
       toolName: row.payload.toolName }) },
   "request.finished": { auditType: "request.finished",
     body: z.strictObject({ ...envelope, kind: z.literal("request.finished"), conversationId: uuid, requestId: uuid,
-      status: z.enum(["completed", "failed", "cancelled", "uncertain"]) }),
+      status: auditEvents["request.finished"].payload.shape.status }),
     fields: row => ({ conversationId: row.conversationId, requestId: row.requestId, status: row.payload.status }) },
   "routine.firing_settled": { auditType: "routine.firing_settled",
     body: z.strictObject({ ...envelope, kind: z.literal("routine.firing_settled"), routineId: uuid, scheduledFor: z.iso.datetime().max(32),
-      status: z.enum(["succeeded", "failed", "skipped"]) }),
+      status: auditEvents["routine.firing_settled"].payload.shape.status }),
     fields: row => ({ routineId: row.payload.routineId, scheduledFor: row.payload.scheduledFor, status: row.payload.status }) },
   // Only Crew's own decision: an owner who disables a routine already knows.
   "routine.disabled": { auditType: "routine.disabled", when: row => row.payload.reason === "consecutive_failures",

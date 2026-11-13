@@ -10,14 +10,19 @@ import { after, test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { Pool } from "pg";
 import { ApprovalStore } from "../../src/service/approvals.ts";
-import { appendAudit } from "../../src/service/audit.ts";
+import { appendAudit, auditEventTypes } from "../../src/service/audit.ts";
 import type { MemberClient } from "../../src/service/client.ts";
 import { ownerInitiator, type TurnRequest } from "../../src/service/domain.ts";
 import { createGateway } from "../../src/service/gateway.ts";
+import { HandoffApi } from "../../src/service/handoffs.ts";
+import { IntegrationApi } from "../../src/service/integration-api.ts";
+import { MemoryApi } from "../../src/service/memories.ts";
 import { withNativeAdmission } from "../../src/service/native-admission.ts";
 import { InstallationRecovery, readRecoveryManifest, type RecoveryHooks, type RecoveryPins } from "../../src/service/recovery.ts";
 import { FileRecoveryFence } from "../../src/service/recovery-fence.ts";
+import { failReasons, RoutineApi, RoutineDispatcher, skipReasons } from "../../src/service/routines.ts";
 import { MemberStore } from "../../src/service/store.ts";
+import { recordSegmentUsage, UsageApi } from "../../src/service/usage.ts";
 import type { ResolvedAddress, TargetPolicy } from "../../src/service/webhook-target.ts";
 import { retryDelayMs, WebhookApi, WebhookDispatcher, webhookKindNames, webhookLimits, type Clock } from "../../src/service/webhooks.ts";
 
@@ -30,7 +35,6 @@ const sql = new URL("../../src/service/sql/", import.meta.url);
 const migrations = (await readdir(sql)).sort();
 const webhookMigration = migrations.find(file => file.endsWith("-webhooks.sql"))!;
 const webhookVersion = Number(webhookMigration.split("-")[0]);
-const latestVersion = Number(migrations.at(-1)!.split("-")[0]);
 
 /** A fresh database, migrated up to `version`, dropped after the test. Every test that enables an
  * endpoint uses its own, so no other suite's gateway finds one to deliver to. */
@@ -117,6 +121,7 @@ async function harness(t: TestContext, options: { policy?: TargetPolicy } = {}) 
     endpoint: async (webhookId: string) => (await db.query("SELECT * FROM birbcrew_ts.webhook_endpoints WHERE webhook_id=$1", [webhookId])).rows[0],
   };
 }
+type Harness = Awaited<ReturnType<typeof harness>>;
 async function pass(...dispatchers: WebhookDispatcher[]) {
   await Promise.all(dispatchers.map(d => d.tick()));
   await Promise.all(dispatchers.map(d => d.idle()));
@@ -383,6 +388,203 @@ test("each kind is delivered once to each endpoint that selected it, signed, wit
   // Nothing more is sent on later passes.
   await pass(dispatcher);
   assert.equal(r.received.length, 5);
+});
+
+/** Runs `change` while another session holds every webhook table ACCESS EXCLUSIVE, as a stalled
+ * dispatcher could. No audited transaction touches those tables, so the change commits at once. */
+async function whileWebhookTablesLocked<T>(h: Harness, change: () => Promise<T>): Promise<T> {
+  const blocker = await h.db.connect();
+  try {
+    await blocker.query("BEGIN");
+    await blocker.query("LOCK TABLE birbcrew_ts.webhook_deliveries, birbcrew_ts.webhook_endpoints, birbcrew_ts.webhook_cursor IN ACCESS EXCLUSIVE MODE");
+    return await Promise.race([change(), delay(5_000).then((): never => { throw new Error("the change waited on a webhook table"); })]);
+  } finally {
+    await blocker.query("ROLLBACK");
+    blocker.release();
+  }
+}
+/** Text a member's owner or model wrote, which no body or header may carry. */
+const privateText = ["PROMPT-MARKER", "NOTE-MARKER", "REPLY-MARKER", "INSTRUCTIONS-MARKER", "MEMORY-MARKER"];
+function assertCarriesNoText(received: Received[], ...more: string[]) {
+  assert.ok(received.length > 0);
+  for (const item of received) {
+    for (const text of [...privateText, ...more]) assert.ok(!item.body.includes(text) && !JSON.stringify(item.headers).includes(text), text);
+  }
+}
+const bodyKeys = {
+  "approval.pending": ["approvalId", "conversationId", "eventId", "kind", "memberId", "occurredAt", "requestId", "toolName", "webhookId"],
+  "request.finished": ["conversationId", "eventId", "kind", "memberId", "occurredAt", "requestId", "status", "webhookId"],
+};
+
+test("an expired card is delivered as pending and then as its request's finish, which carries no expiry mark and no text", async (t) => {
+  const h = await harness(t);
+  const r = await receiver(t);
+  const endpoint = await h.create(r.url("all"));
+  const instructed = await h.store.spawn({ ownerId: h.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture",
+    instructions: "INSTRUCTIONS-MARKER" });
+  await new MemoryApi(h.store).create(h.ownerId, { requestId: randomUUID(), memberId: instructed.memberId, text: "MEMORY-MARKER" });
+  const conversationId = await h.conversation(h.ownerId, instructed.memberId);
+  const request: TurnRequest = { ownerId: h.ownerId, conversationId, requestId: randomUUID(), text: "PROMPT-MARKER", approvalDeadlineSeconds: 60 };
+  await h.store.recordAcceptance(request, ownerInitiator);
+  const turn = await h.store.beginTurn(request);
+  assert.equal(turn.kind, "start"); if (turn.kind !== "start") return;
+  const approvals = new ApprovalStore(h.db);
+  const card = await approvals.propose({ ownerId: h.ownerId, memberId: instructed.memberId, conversationId, requestId: request.requestId,
+    token: turn.token, invocationId: request.requestId, nativeCallId: "expiring", toolName: "record_work_item",
+    arguments: { operation_id: request.requestId, note: "NOTE-MARKER" } });
+  assert.ok(card.expiresAt, "the card has its request's deadline");
+  await h.db.query("UPDATE birbcrew_ts.deferred_calls SET expires_at=clock_timestamp() WHERE approval_id=$1", [card.approvalId]);
+  // The workflow's timer settles the expiry; it commits while every webhook table is locked.
+  assert.deepEqual(await whileWebhookTablesLocked(h, () => approvals.expireTurn(card)), { kind: "expired" });
+  // The turn goes on to its reply with the cancelled result, as after an owner's cancel.
+  await h.store.commitTurn({ ownerId: h.ownerId, conversationId, requestId: request.requestId, token: turn.token, reply: "REPLY-MARKER",
+    checkpoint: { version: 1, engine: "pi", state: {} } });
+  await pass(h.dispatcher());
+
+  const { rows: trail } = await h.db.query(`SELECT event_id::text AS "eventId", event_type AS type FROM birbcrew_ts.audit_events
+    WHERE conversation_id=$1 AND request_id IS NOT NULL ORDER BY event_id`, [conversationId]);
+  assert.deepEqual(trail.map(row => row.type), ["request.accepted", "approval.requested", "approval.expired", "request.finished"]);
+  const bodies = r.received.map(item => JSON.parse(item.body));
+  // approval.expired is no kind: the request's finish is the delivery that follows the pending one.
+  assert.deepEqual(bodies.map(body => [body.kind, body.eventId, body.memberId, body.conversationId, body.requestId]), [
+    ["approval.pending", trail[1].eventId, instructed.memberId, conversationId, request.requestId],
+    ["request.finished", trail[3].eventId, instructed.memberId, conversationId, request.requestId],
+  ]);
+  assert.equal(bodies[0].approvalId, card.approvalId);
+  // A finish after an expiry looks like any other: the receipt's expiredApproval tells them apart.
+  assert.deepEqual([Object.keys(bodies[0]).sort(), Object.keys(bodies[1]).sort(), bodies[1].status],
+    [bodyKeys["approval.pending"], bodyKeys["request.finished"], "completed"]);
+  assert.deepEqual((await h.deliveries(endpoint.webhookId)).map(d => [d.kind, d.state]), [["approval.pending", "delivered"], ["request.finished", "delivered"]]);
+  assertCarriesNoText(r.received, endpoint.secret);
+});
+
+test("a handoff's reserved request is delivered as the target's finish without its transcript, and the handoff itself is not", async (t) => {
+  const h = await harness(t);
+  const r = await receiver(t);
+  const endpoint = await h.create(r.url("all"));
+  const target = await h.store.spawn({ ownerId: h.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture",
+    instructions: "INSTRUCTIONS-MARKER" });
+  await new MemoryApi(h.store).create(h.ownerId, { requestId: randomUUID(), memberId: target.memberId, text: "MEMORY-MARKER" });
+  const checkpoint = { version: 1 as const, engine: "pi" as const, state: {} };
+  // The source's one committed turn is what the transcript carries.
+  const source = await h.conversation();
+  const first: TurnRequest = { ownerId: h.ownerId, conversationId: source, requestId: randomUUID(), text: "PROMPT-MARKER" };
+  await h.store.recordAcceptance(first, ownerInitiator);
+  const turn = await h.store.beginTurn(first);
+  assert.equal(turn.kind, "start"); if (turn.kind !== "start") return;
+  await h.store.commitTurn({ ownerId: h.ownerId, conversationId: source, requestId: first.requestId, token: turn.token, reply: "REPLY-MARKER",
+    checkpoint });
+  const members = {
+    open: (input: Parameters<MemberStore["openConversation"]>[0]) => h.store.openConversation(input),
+    async accept(input: TurnRequest) { await h.store.recordAcceptance(input, ownerInitiator); return { requestId: input.requestId }; },
+  } as unknown as MemberClient;
+  // The handoff transaction and the reserved request's admission commit while every webhook table is locked.
+  const handoff = await whileWebhookTablesLocked(h, () => new HandoffApi(h.store, members).create(h.ownerId, source,
+    { requestId: randomUUID(), memberId: target.memberId }));
+  assert.equal(handoff.firstRequestAdmitted, true);
+  const { rows: [{ transcript }] } = await h.db.query<{ transcript: string }>(
+    "SELECT transcript FROM birbcrew_ts.conversation_handoffs WHERE handoff_id=$1", [handoff.handoffId]);
+  assert.ok(transcript.includes("PROMPT-MARKER") && transcript.includes("REPLY-MARKER"), "the transcript quotes the source");
+  const reserved = { ownerId: h.ownerId, conversationId: handoff.target.conversationId, requestId: handoff.firstRequestId };
+  const delivered = await h.store.beginTurn({ ...reserved, text: transcript });
+  assert.equal(delivered.kind, "start"); if (delivered.kind !== "start") return;
+  await h.store.commitTurn({ ...reserved, token: delivered.token, reply: "TARGET-MARKER", checkpoint });
+  await pass(h.dispatcher());
+
+  const bodies = r.received.map(item => JSON.parse(item.body));
+  assert.deepEqual(bodies.map(body => [body.kind, body.memberId, body.conversationId, body.requestId, body.status]), [
+    ["request.finished", h.member.memberId, source, first.requestId, "completed"],
+    ["request.finished", target.memberId, reserved.conversationId, reserved.requestId, "completed"],
+  ]);
+  // The body names no initiator; the trail and the receipt say the handoff started the request.
+  assert.deepEqual(Object.keys(bodies[1]).sort(), bodyKeys["request.finished"]);
+  const { rows } = await h.db.query(`SELECT event_type AS type, initiator_kind AS kind, initiator_id AS id FROM birbcrew_ts.audit_events
+    WHERE request_id=$1 OR event_type='conversation.handed_off' ORDER BY event_id`, [reserved.requestId]);
+  assert.deepEqual(rows, [{ type: "conversation.handed_off", kind: "owner", id: h.ownerId },
+    { type: "request.accepted", kind: "handoff", id: handoff.handoffId }, { type: "request.finished", kind: "handoff", id: handoff.handoffId }]);
+  assert.deepEqual((await h.deliveries(endpoint.webhookId)).map(d => d.kind), ["request.finished", "request.finished"]);
+  assertCarriesNoText(r.received, transcript, "TARGET-MARKER", endpoint.secret);
+});
+
+test("a request refused for its budget sends nothing; a routine's refused firings and its switch-off are delivered", async (t) => {
+  const h = await harness(t);
+  const r = await receiver(t);
+  const endpoint = await h.create(r.url("all"));
+  // Spend the member's day: one finished request that reported 10 tokens.
+  const spent = await h.conversation();
+  const request: TurnRequest = { ownerId: h.ownerId, conversationId: spent, requestId: randomUUID(), text: "metered" };
+  await h.store.recordAcceptance(request, ownerInitiator);
+  const execution = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
+  const turn = await h.store.beginTurn(request, execution);
+  assert.equal(turn.kind, "start"); if (turn.kind !== "start") return;
+  await h.db.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
+    VALUES ($1,$2,$3,$4,$5,1)`, [spent, request.requestId, turn.token, execution.workflowRunId, execution.activityId]);
+  await recordSegmentUsage(h.db, { ...request, token: turn.token, execution }, { state: "reported", model: "m", inputTokens: 10,
+    outputTokens: 0, cachedInputTokens: null, cacheWriteTokens: null, reasoningTokens: null, costUsd: null });
+  await h.store.commitTurn({ ownerId: h.ownerId, conversationId: spent, requestId: request.requestId, token: turn.token, reply: "done",
+    checkpoint: { version: 1, engine: "pi", state: {} } });
+  await new UsageApi(h.store).setBudget(h.ownerId, h.member.memberId, { tokenLimit: 10 });
+  // A refusal at admission is audited in its own transaction, which never waits on a webhook table.
+  const refused = await h.conversation();
+  await whileWebhookTablesLocked(h, () => assert.rejects(h.store.recordAcceptance({ ownerId: h.ownerId, conversationId: refused,
+    requestId: randomUUID(), text: "over budget" }, ownerInitiator), { code: "usage_limit" }));
+  // A routine on the member, one failure from its switch-off: two firings are refused for the budget.
+  let now = new Date("2031-01-06T10:00:00.000Z");
+  const clock = () => new Date(now);
+  const members = {
+    open: (input: Parameters<MemberStore["openConversation"]>[0]) => h.store.openConversation(input),
+    async accept(input: TurnRequest) {
+      await h.store.checkAdmission(input);
+      await h.store.recordAcceptance(input, ownerInitiator);
+      return { requestId: input.requestId };
+    },
+    requestStatus: (input: Parameters<MemberStore["requestStatus"]>[0]) => h.store.requestStatus(input),
+    async cancelPending() {},
+  } as unknown as MemberClient;
+  const { routineId } = await new RoutineApi(h.store, clock).create(h.ownerId, { requestId: randomUUID(), memberId: h.member.memberId,
+    schedule: "*/15 * * * *", prompt: "scheduled PROMPT-MARKER", approvalPolicy: "wait" });
+  await h.db.query("UPDATE birbcrew_ts.routines SET consecutive_failures=8 WHERE routine_id=$1", [routineId]);
+  const routines = new RoutineDispatcher({ store: h.store, members, integration: new IntegrationApi(h.store, members), owners: [h.ownerId], clock });
+  t.after(() => routines.stop());
+  for (const minutes of [15, 30]) {
+    now = new Date(Date.parse("2031-01-06T10:00:00.000Z") + minutes * 60_000);
+    await routines.tick();
+  }
+  await pass(h.dispatcher());
+
+  const { rows: refusals } = await h.db.query("SELECT count(*)::integer AS n FROM birbcrew_ts.audit_events WHERE event_type='usage.request_refused'");
+  assert.equal(refusals[0].n, 3, "the direct request and both firings were refused and audited");
+  const bodies = r.received.map(item => JSON.parse(item.body));
+  assert.deepEqual(bodies.map(body => [body.kind, body.status, body.routineId ?? body.requestId]), [
+    ["request.finished", "completed", request.requestId],
+    ["routine.firing_settled", "failed", routineId],
+    ["routine.firing_settled", "failed", routineId],
+    ["routine.disabled", "consecutive_failures", routineId],
+  ]);
+  const { rows: settled } = await h.db.query(`SELECT payload->>'reason' AS reason FROM birbcrew_ts.audit_events
+    WHERE event_type='routine.firing_settled' ORDER BY event_id`);
+  assert.deepEqual(settled.map(row => row.reason), ["usage_limit", "usage_limit"]);
+  assert.deepEqual((await h.deliveries(endpoint.webhookId)).map(d => d.state), ["delivered", "delivered", "delivered", "delivered"]);
+  assertCarriesNoText(r.received, endpoint.secret);
+});
+
+test("every routine firing outcome the trail records is delivered with its status", async (t) => {
+  const h = await harness(t);
+  const r = await receiver(t);
+  await h.create(r.url("in"), ["routine.firing_settled"]);
+  // From the dispatcher's own lists, so a reason it gains is covered here too.
+  const outcomes = [["succeeded", undefined] as const, ...skipReasons.map(reason => ["skipped", reason] as const),
+    ...failReasons.map(reason => ["failed", reason] as const)];
+  assert.ok(failReasons.includes("usage_limit") && failReasons.includes("approval_expired"));
+  const routineId = randomUUID();
+  await h.store.transaction(async db => {
+    for (const [i, [status, reason]] of outcomes.entries()) {
+      await appendAudit(db, { type: "routine.firing_settled", ownerId: h.ownerId, memberId: h.member.memberId, payload: { routineId,
+        scheduledFor: new Date(Date.UTC(2031, 0, 6, 10, 15 * i)).toISOString(), status, ...(reason && { reason }) } });
+    }
+  });
+  await pass(h.dispatcher());
+  assert.deepEqual(r.received.map(item => JSON.parse(item.body).status), outcomes.map(([status]) => status));
 });
 
 test("a failed attempt is retried with exponential backoff; the tenth gives up; a success resets the count", async (t) => {
@@ -834,6 +1036,53 @@ test("the database keeps endpoints and deliveries as history and refuses a membe
   await refused(insert, [h.ownerId, "webhook.enabled", h.member.memberId, { webhookId: endpoint.webhookId, revision: 9, host: "x" }]);
   await refused(insert, [h.ownerId, "member.spawned", null, { spawnRequestId: randomUUID(), engine: "pi", profile: "fixture" }]);
   await refused(insert, [h.ownerId, "webhook.enabled", null, { revision: 9, host: "x" }]);
+});
+
+/** The top-level OR clauses of a CHECK as pg_get_constraintdef prints it. */
+function orClauses(definition: string) {
+  const body = /^CHECK \(\((.*)\)\)( NOT VALID)?$/s.exec(definition)?.[1];
+  assert.ok(body, definition);
+  const clauses: string[] = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === "(") depth++;
+    else if (body[i] === ")") depth--;
+    else if (depth === 0 && body.startsWith(" OR ", i)) { clauses.push(body.slice(start, i)); start = i + 4; }
+  }
+  return [...clauses, body.slice(start)];
+}
+
+test("the webhook migration keeps every constraint and trigger it finds, and its type CHECK every clause of the one it replaces", async (t) => {
+  const upgraded = await databaseAt(t, webhookVersion - 1);
+  const catalog = async () => {
+    const { rows: constraints } = await upgraded.query<{ name: string; definition: string }>(`SELECT conrelid::regclass::text || '/' || conname AS name,
+      pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE connamespace='birbcrew_ts'::regnamespace`);
+    const { rows: triggers } = await upgraded.query<{ name: string; definition: string }>(`SELECT tgrelid::regclass::text || '/' || tgname AS name,
+      pg_get_triggerdef(oid) AS definition FROM pg_trigger WHERE NOT tgisinternal
+        AND tgrelid IN (SELECT oid FROM pg_class WHERE relnamespace='birbcrew_ts'::regnamespace)`);
+    return Object.fromEntries([...constraints, ...triggers].map(row => [row.name, row.definition]));
+  };
+  const before = await catalog();
+  await upgraded.query(await readFile(new URL(webhookMigration, sql), "utf8"));
+  const after = await catalog();
+  const typeCheck = "birbcrew_ts.audit_events/audit_events_type_check";
+  for (const [name, definition] of Object.entries(before)) {
+    if (name !== typeCheck) assert.equal(after[name], definition, name);
+  }
+  assert.deepEqual(Object.keys(after).filter(name => !(name in before) && !name.startsWith("birbcrew_ts.webhook_")),
+    ["birbcrew_ts.audit_events/audit_events_member_check"], "the only new constraint or trigger on an existing table");
+  // Clause for clause as PostgreSQL stores them: everything the replaced CHECK held, unchanged and in order, then this feature's own.
+  const [kept, replaced] = [orClauses(before[typeCheck]), orClauses(after[typeCheck])];
+  const types = (clauses: string[]) => clauses.flatMap(clause => [...clause.matchAll(/'([a-z_]+\.[a-z_]+)'::text/g)].map(match => match[1]));
+  assert.deepEqual(replaced.slice(0, kept.length), kept, "every clause of the replaced CHECK");
+  assert.deepEqual(types(replaced.slice(kept.length)), ["approval.requested", "webhook.created", "webhook.enabled", "webhook.disabled", "webhook.deleted"]);
+  // The registry also holds the types later migrations add to the CHECK, read from their files.
+  const later = new Set<string>();
+  for (const file of migrations.filter(file => Number(file.split("-")[0]) > webhookVersion)) {
+    const check = /ADD CONSTRAINT audit_events_type_check CHECK \(([\s\S]*?)\) NOT VALID;/.exec(await readFile(new URL(file, sql), "utf8"));
+    for (const [, type] of check?.[1].matchAll(/'([a-z_]+\.[a-z_]+)'/g) ?? []) later.add(type);
+  }
+  assert.deepEqual([...new Set([...types(replaced), ...later])].sort(), [...auditEventTypes].sort());
 });
 
 test("the webhook migration takes only audit_events, without queueing, rewrites nothing and leaves its CHECKs unvalidated", async (t) => {
