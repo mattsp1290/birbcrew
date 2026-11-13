@@ -2,15 +2,16 @@
 
 The finance integration starts at birbcrew commit
 `88b219c18adeb352d2f291f099ede990a3190a58`. On Linux, run
-`scripts/finance-baseline` with the [upstream proof prerequisites](../verification.md).
+`scripts/finance-baseline` with the [upstream proof prerequisites](https://github.com/mattsp1290/crew/blob/88b219c18adeb352d2f291f099ede990a3190a58/docs/verification.md).
 The script checks out the pin in a private temporary directory, runs
 `scripts/setup`, then runs `scripts/verify --mode test`. It prints the
 evidence directory and removes its temporary source checkout on exit.
+The behavior below describes that pinned revision.
 
 ## Verified runtime
 
-The deterministic run passed seven boundary tests and all eleven test-model
-gates. It recovered from a worker interruption after a committed tool effect,
+The deterministic run on 2026-11-13 passed seven boundary tests and all eleven
+test-model gates. It recovered from a worker interruption after a committed tool effect,
 recovered a pending human request after restart, and replayed three Temporal
 histories offline. The live subscription gate is separate. This run used
 synthetic coding work items.
@@ -26,10 +27,10 @@ synthetic coding work items.
 
 ## Input and decision ownership
 
-[The HTTP gateway](../../src/birbcrew/api.py) checks the bearer identity against
+[The HTTP gateway](https://github.com/mattsp1290/crew/blob/88b219c18adeb352d2f291f099ede990a3190a58/src/birbcrew/api.py) checks the bearer identity against
 the owner of the conversation before sending a Temporal Update. Creating a
 conversation starts one workflow with ID `birbcrew-{conversation_id}`.
-[ConversationWorkflow](../../src/birbcrew/workflow.py) owns three durable Updates.
+[ConversationWorkflow](https://github.com/mattsp1290/crew/blob/88b219c18adeb352d2f291f099ede990a3190a58/src/birbcrew/workflow.py) owns three durable Updates.
 
 - `submit` accepts four distinct request IDs per conversation, with ordinals
   0 through 3. Replaying the same ID and SHA-256 of the UTF-8 text returns the
@@ -41,9 +42,9 @@ conversation starts one workflow with ID `birbcrew-{conversation_id}`.
 - `cancel` acknowledges an owner's cancellation and interrupts active work.
   Closing an observer connection leaves the workflow running.
 
-The [worker](../../src/birbcrew/worker.py) registers the workflow and its
+The [worker](https://github.com/mattsp1290/crew/blob/88b219c18adeb352d2f291f099ede990a3190a58/src/birbcrew/worker.py) registers the workflow and its
 `save_conversation` and `project_events` activities.
-[The agent and tools](../../src/birbcrew/runtime.py) currently perform a
+[The agent and tools](https://github.com/mattsp1290/crew/blob/88b219c18adeb352d2f291f099ede990a3190a58/src/birbcrew/runtime.py) currently perform a
 synthetic write and request a human choice. A finance integration needs a
 continuation that preserves accepted input IDs, ordinals and pending decisions
 to support a fifth exchange.
@@ -52,7 +53,7 @@ to support a fifth exchange.
 
 `GET /conversations/{cid}` returns the authoritative snapshot. Its integer
 `cursor` is the PostgreSQL `snapshot_cursor`.
-[The store](../../src/birbcrew/store.py) advances this value in the same
+[The store](https://github.com/mattsp1290/crew/blob/88b219c18adeb352d2f291f099ede990a3190a58/src/birbcrew/store.py) advances this value in the same
 transaction that saves the revision and appends finalized messages and state.
 Publishing provisional events increments the event cursor independently.
 
@@ -78,7 +79,7 @@ The workflow's coding tool also stores its input and result in `operations`.
 
 The private evidence directory contains `temporal.db`, exported
 `*-history.json`, the final snapshot in `report.json`, and projected messages
-in the client JSONL and message files. [The replayer](../../src/birbcrew/replay.py)
+in the client JSONL and message files. [The replayer](https://github.com/mattsp1290/crew/blob/88b219c18adeb352d2f291f099ede990a3190a58/src/birbcrew/replay.py)
 loads each exported history and runs the pinned workflow with the Pydantic AI
 plugin. The directory also holds disposable credentials in `clients.json`,
 `config.json` and `postgres.env`. Keep the whole directory outside Git. The
