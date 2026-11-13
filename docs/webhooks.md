@@ -31,9 +31,10 @@ microseconds) and `memberId`. For example:
  "occurredAt": "2026-11-12T08:15:30.123456Z", "conversationId": "UUID"}
 ```
 
-Key order is not significant. A body is at most 1 KiB. A `status` takes the values
-its audit event allows, and a value that event gains later is sent as it is, so
-accept a `status` you do not know and fetch the details.
+Key order is not significant. A body is at most 1 KiB. The `status` of a
+`request.finished` or `routine.firing_settled` body takes the values its audit
+event allows, and a value that event gains later is sent as it is, so accept a
+`status` you do not know and fetch the details.
 
 **A body carries identifiers, the kind, the time and a status only.** It never
 carries prompt text, reply text, a work-item note, tool arguments, member memory
@@ -274,9 +275,7 @@ request receipt's `expiredApproval` tells them apart. A routine firing's body
 carries its status, not its reason; `GET /v1/routines/{routineId}/firings` has the
 reason. No body names an initiator, so a handoff's first request looks like any
 other request of the target; its receipt and audit rows name the handoff. No body
-carries a handoff transcript, member instructions or memory text. A body's
-`status` takes the values its audit event's payload allows, so a status the trail
-gains is delivered rather than skipped.
+carries a handoff transcript, member instructions or memory text.
 
 The handoff transaction, the expiry that the conversation workflow's timer
 settles, request admission, including a budget refusal, and a routine firing's
@@ -408,12 +407,12 @@ the newest audit event, so no event from before the upgrade is ever sent.
 
 Recreate any development database that ran this feature's earlier
 `030-webhooks.sql`, before it was renumbered, or restore a backup taken before that
-build; no release shipped that file. One that ran only this feature records
-version 30 without 27 to 29, and `migrate()` refuses it with
-`Migration 27 would apply after migration 30`. One that had 27 to 29 from main
-records version 30, which `migrate()` takes for the audit filters, and migration 32
-then fails because `webhook_endpoints` already exists. Either way nothing is
-applied.
+build; no release shipped that file. One that ran this feature without all of 27
+to 29 from main records version 30 without them, and `migrate()` refuses it with
+`Migration N would apply after migration 30` for the lowest missing N. One that had
+27 to 29 from main records version 30, which `migrate()` takes for the audit
+filters, and migration 32 then fails because `webhook_endpoints` already exists.
+Either way nothing is applied.
 
 Two changes reach existing clients. `GET /v1/audit` gains five event types, and
 `memberId` is `null` on the `webhook.*` rows; a consumer that requires a member on

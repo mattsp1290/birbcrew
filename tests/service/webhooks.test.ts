@@ -1062,22 +1062,28 @@ function orClauses(definition: string) {
 
 test("the webhook migration keeps every constraint, trigger, function, index and column it finds, and its type CHECK every clause of the one it replaces", async (t) => {
   const upgraded = await databaseAt(t, webhookVersion - 1);
-  // Everything in the schema that a migration could replace or drop, as PostgreSQL prints it. NOT NULL
-  // is read from the column, not from pg_constraint, which holds it only from PostgreSQL 18.
+  // Everything in the schema that a migration could replace, disable or drop, as PostgreSQL prints it, keyed
+  // by the table it belongs to. NOT NULL is read from the column, not from pg_constraint, which holds it
+  // only from PostgreSQL 18.
   const catalog = async () => Object.fromEntries((await upgraded.query<{ name: string; definition: string }>(`
     SELECT conrelid::regclass::text || '/' || conname AS name, pg_get_constraintdef(oid) AS definition FROM pg_constraint
       WHERE connamespace='birbcrew_ts'::regnamespace AND contype <> 'n'
-    UNION ALL SELECT tgrelid::regclass::text || '/' || tgname, pg_get_triggerdef(oid) FROM pg_trigger
+    UNION ALL SELECT tgrelid::regclass::text || '/' || tgname, pg_get_triggerdef(oid) || ' ENABLED ' || tgenabled::text FROM pg_trigger
       WHERE NOT tgisinternal AND tgrelid IN (SELECT oid FROM pg_class WHERE relnamespace='birbcrew_ts'::regnamespace)
     UNION ALL SELECT 'function/' || oid::regprocedure::text, pg_get_functiondef(oid) FROM pg_proc
       WHERE pronamespace='birbcrew_ts'::regnamespace AND prokind='f'
-    UNION ALL SELECT 'index/' || indexrelid::regclass::text, pg_get_indexdef(indexrelid) FROM pg_index
+    UNION ALL SELECT 'index/' || indrelid::regclass::text || '/' || indexrelid::regclass::text, pg_get_indexdef(indexrelid) FROM pg_index
       WHERE indrelid IN (SELECT oid FROM pg_class WHERE relnamespace='birbcrew_ts'::regnamespace)
     UNION ALL SELECT 'column/' || a.attrelid::regclass::text || '.' || a.attname, format_type(a.atttypid, a.atttypmod)
         || CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END || coalesce(' DEFAULT ' || pg_get_expr(d.adbin, d.adrelid), '')
+        || CASE WHEN a.attidentity <> '' THEN ' IDENTITY ' || a.attidentity::text ELSE '' END
       FROM pg_attribute a LEFT JOIN pg_attrdef d ON (d.adrelid, d.adnum) = (a.attrelid, a.attnum)
       WHERE a.attnum > 0 AND NOT a.attisdropped
-        AND a.attrelid IN (SELECT oid FROM pg_class WHERE relnamespace='birbcrew_ts'::regnamespace AND relkind='r')`)).rows
+        AND a.attrelid IN (SELECT oid FROM pg_class WHERE relnamespace='birbcrew_ts'::regnamespace AND relkind='r')
+    UNION ALL SELECT 'sequence/' || seqrelid::regclass::text, concat_ws(' ', seqtypid::regtype, seqstart, seqincrement, seqmax, seqmin,
+        seqcache, seqcycle) FROM pg_sequence WHERE seqrelid IN (SELECT oid FROM pg_class WHERE relnamespace='birbcrew_ts'::regnamespace)
+    UNION ALL SELECT 'view/' || oid::regclass::text, pg_get_viewdef(oid) FROM pg_class
+      WHERE relnamespace='birbcrew_ts'::regnamespace AND relkind IN ('v', 'm')`)).rows
     .map(row => [row.name, row.definition]));
   const before = await catalog();
   await upgraded.query(await readFile(new URL(webhookMigration, sql), "utf8"));
@@ -1087,11 +1093,13 @@ test("the webhook migration keeps every constraint, trigger, function, index and
   for (const [name, definition] of Object.entries(before)) {
     if (name !== typeCheck && name !== member) assert.equal(after[name], definition, name);
   }
-  assert.deepEqual(Object.keys(after).filter(name => !(name in before) && !name.includes("birbcrew_ts.webhook_")).sort(), [
+  const own = /^(?:column\/|index\/)?birbcrew_ts\.webhook_(?:endpoints|deliveries|cursor)[./]/;
+  assert.deepEqual(Object.keys(after).filter(name => !(name in before) && !own.test(name)).sort(), [
     "birbcrew_ts.audit_events/audit_events_member_check", "function/birbcrew_ts.guard_webhook_cursor()",
     "function/birbcrew_ts.guard_webhook_delivery()", "function/birbcrew_ts.guard_webhook_endpoint()",
     "function/birbcrew_ts.limit_enabled_webhooks()", "function/birbcrew_ts.reject_webhook_truncate()",
-    "index/birbcrew_ts.audit_events_approval_request_fact", "index/birbcrew_ts.audit_events_webhook_fact",
+    "index/birbcrew_ts.audit_events/birbcrew_ts.audit_events_approval_request_fact",
+    "index/birbcrew_ts.audit_events/birbcrew_ts.audit_events_webhook_fact",
   ], "what it adds outside its own tables");
   // Clause for clause as PostgreSQL stores them: everything the replaced CHECK held, unchanged and in order, then this feature's own.
   const [kept, replaced] = [orClauses(before[typeCheck]), orClauses(after[typeCheck])];

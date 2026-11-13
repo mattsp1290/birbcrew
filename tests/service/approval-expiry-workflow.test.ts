@@ -155,8 +155,8 @@ test("a card nobody answers expires at its deadline in the workflow, and the his
     assert.deepEqual(await r.decide("approve"), { status: 409, body: { error: "conflict" } });
     const { rows } = await pool.query(`SELECT event_type AS type, actor_kind AS actor FROM birbcrew_ts.audit_events
       WHERE request_id=$1 ORDER BY event_id`, [r.requestId]);
-    assert.deepEqual(rows.map(row => row.type), ["request.accepted", "approval.expired", "request.finished"]);
-    assert.equal(rows[1].actor, "system");
+    assert.deepEqual(rows.map(row => row.type), ["request.accepted", "approval.requested", "approval.expired", "request.finished"]);
+    assert.equal(rows[2].actor, "system");
     // An expiry cancels the request, which closes the conversation as a cancel does.
     await temporal.workflow.getHandle(r.workflowId).result();
     assert.deepEqual(await history(r.workflowId), { markers: 1, timers: 2, cancelledTimers: 0, expiries: 2 });
