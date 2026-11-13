@@ -61,8 +61,10 @@ exists. This is how `conversationId` already behaved.
   reserved in the target. `initiatorId` does not match the routine's own rows
   (`routine.created`, `routine.enabled`, `routine.disabled`, `routine.deleted`,
   `routine.firing_settled`), the `conversation.opened` row of a firing or of a
-  handoff's target, or the `conversation.handed_off` row. Those rows name the
-  owner as initiator. The routine's rows and a firing's `conversation.opened`
+  handoff's target, the `usage.request_refused` row of a firing that its
+  member's [usage budget](usage-metering.md) refused, or the
+  `conversation.handed_off` row. Those rows name the owner as initiator. The
+  routine's rows, a firing's `conversation.opened` and `usage.request_refused`
   carry `routineId` in their payload, and `conversation.handed_off` carries
   `handoffId`, which no filter reads. For everything in a handoff's target, pass
   the `targetConversationId` of its `conversation.handed_off` row as

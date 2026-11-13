@@ -142,9 +142,12 @@ in the set has one; `costReportedSegments` says how many did.
 The summary is `{ apiVersion, from, to, total, routine }`. A member entry is
 `{ memberId, engine, total, routine, budget }`, and a conversation entry
 `{ conversationId, memberId, total, routine }`. `routine` counts only the segments of
-requests whose admission recorded a routine as initiator. A request with no admission
-row, from a workflow history older than durable admission, counts as the owner's, as
-it does in the audit trail. A member's `budget` is null or
+requests whose admission recorded a routine as initiator; a
+[handoff's](handoffs.md) reserved request counts in `total` only. A record's `initiator`
+is the one its request's admission recorded: `owner`, `routine` or `handoff`, the last
+two with their ID. A request with no admission row, from a workflow history older than
+durable admission, counts as the owner's, as it does in the audit trail. A member's
+`budget` is null or
 `{ tokenLimit, period, revision, changedAt, windowStart, usedTokens }`.
 
 A record is:
@@ -181,9 +184,14 @@ An owner can give each member one token budget. The window is the current UTC
 calendar day of the database clock, from midnight to midnight. A budget counts input
 plus output tokens of the member's `reported` rows recorded in the window. Input
 includes cache reads and writes, so a long Codex or Claude conversation that rereads
-its context counts that context every time. `unknown` rows count nothing. A budget
-applies to one member across all its conversations, the owner's requests and its
-routines alike. The limit is a whole number from 1 to 10^12.
+its context counts that context every time. That context includes the member's
+[instructions](member-instructions.md), project notes and memory, which every launch
+sends again; Crew counts them as input like the rest and enforces nothing about them
+apart from the budget. `unknown` rows count nothing. A budget applies to one member
+across all its conversations, the owner's requests and its routines alike, and a
+handoff to the member is checked against it once (see
+[Conversation handoff](#conversation-handoff)). The limit is a whole number from 1 to
+10^12.
 
 `PUT` with the limit the budget already has changes nothing and writes no audit row.
 Any other `PUT` sets the limit and raises the budget's revision by one. `DELETE`
@@ -206,17 +214,22 @@ When a member's used tokens are at or over its limit, a new request is refused w
 `409 usage_limit`. Nothing is admitted: the request has no receipt, and the same
 request can be sent again later. The check runs twice:
 
-1. `MemberClient`, before it sends the request to the workflow. This is the check that
-   answers in practice. The workflow never sees the request, and the conversation
-   stays open.
+1. `MemberClient`, before every attempt to send the request to the workflow, including
+   each retry while the workflow rolls over. This is the check that answers in
+   practice. The workflow never sees the request, and the conversation stays open. It
+   is the last of `MemberStore.checkAdmission`'s checks: a sealed source
+   (`409 handed_off`), a target whose handoff request is not yet admitted
+   (`409 handoff_pending`) and a prompt over 16 KiB are refused first, so such a
+   request is never refused, or audited, under the budget.
 2. `recordAcceptance`, the admission transaction, after it has locked the
-   conversation. This is the enforcing check. It catches usage recorded, or a budget
-   set or lowered, between the two checks. Its refusal fails the admission activity
-   without retries. Like any refused admission, that closes the conversation to new
-   turns, so `MemberClient` reports it as `409 usage_limit_closed`: send the request
-   again in a new conversation. That conversation stays closed even though later
-   requests to it, while the member is over budget, get the first check's plain
-   `usage_limit`. A routine firing fails `usage_limit` either way.
+   conversation and made the same checks. This is the enforcing check. It catches
+   usage recorded, or a budget set or lowered, between the two checks. Its refusal
+   fails the admission activity without retries, as a seal's does. Like any refused
+   admission, that closes the conversation to new turns, so `MemberClient` reports it
+   as `409 usage_limit_closed`: send the request again in a new conversation. That
+   conversation stays closed even though later requests to it, while the member is
+   over budget, get the first check's plain `usage_limit`. A routine firing fails
+   `usage_limit` either way.
 
 The first check reads nothing more for a member without a budget, and leaves a
 trusted-context conversation to admission, which refuses it as before.
@@ -232,6 +245,29 @@ firing fails with reason `usage_limit`. That counts as a failure, so the tenth
 consecutive one disables the routine as the
 [scheduled routines](scheduled-routines.md) switch-off does. The firing has already
 opened its conversation and started its idle workflow, as every firing does.
+
+### Conversation handoff
+
+A [handoff's](handoffs.md) reserved first request is a model call on the target member,
+with a transcript of up to 64 KiB. Its segments are recorded under the target and count
+toward the target's budget, and their records name the initiator
+`{ kind: "handoff", id }`. The target's budget is checked once, inside the handoff's
+transaction before it commits: a target at or over its budget refuses the POST with
+`409 usage_limit`, and, like the handoff's other refusals, that writes nothing, not even
+a `usage.request_refused` row. After the commit, no budget check refuses the reserved
+request, even if the target's budget ran out in between. A refusal then would leave the
+source sealed and the target waiting for a request it could never admit. So the
+reserved request can take the target past its limit by one turn, as any request
+admitted before the limit can. Every other request to the target meets the budget as
+usual.
+
+### Approval expiry
+
+An [approval deadline](approval-expiry.md) that expires a card cancels its request. The
+segment that proposed the card had already returned, so its row is in the ledger and
+keeps counting toward the member's window and the owner's totals. Nothing resumes the
+request, so it adds no further row. A routine firing whose card expires fails
+`approval_expired`, not `usage_limit`.
 
 ## Audit
 
@@ -250,6 +286,12 @@ row. A client that sends new request IDs in a loop adds one row per ID. The refu
 request has no admission, so the row names the owner as initiator, and `routineId`
 names the routine whose firing submitted it, as `conversation.opened` does.
 
+The [audit filters](audit-filters.md) take the three types like any other:
+`eventType=usage.request_refused` returns the refusals, and `memberId` and
+`conversationId` narrow them. Because a refusal names the owner as initiator,
+`initiatorKind=routine` and `initiatorId=<routineId>` do not return a routine's
+refusals; no filter reads `routineId` from the payload.
+
 ## Telemetry
 
 The `model.invoke` span gains `usage.state` and, when the segment reported counts,
@@ -258,19 +300,31 @@ The `model.invoke` span gains `usage.state` and, when the segment reported count
 ## Upgrade and recovery
 
 Migration 31 creates the two tables and replaces two CHECK constraints NOT VALID:
-`audit_events_type_check` (adding the three types) and the routine firings' reason
-CHECK, which 025 left unnamed as `routine_firings_check4` and which becomes
-`routine_firings_reason_check` (adding the failure reason `usage_limit`). Existing
-rows are neither rewritten nor checked. Each replacement repeats the whole predicate,
-so `migrate()` now refuses to apply a migration numbered 27 or above whose version is
-below one already applied: applied later, it would silently drop what the newer one
-allowed. Releases up to 26 shipped migration 22 after 26, so earlier gaps still apply. Until `migrate()` commits it holds `SHARE ROW EXCLUSIVE` on `members` and
-`native_launches` for the foreign keys, and `ACCESS EXCLUSIVE` on `audit_events` and
-`routine_firings`. As in migration 25, it takes all four with `NOWAIT` and retries, so
-it never waits in a lock queue. A running native turn's admission transaction holds
-only `ACCESS SHARE` and row share locks, which these modes allow, so a live upgrade
-never waits for a turn. After 60 s without the locks it fails with `55P03` and applies
-nothing. Turns that started before the upgrade are metered when their segments return.
+`audit_events_type_check`, last set by migration 29, adding the three types to its 22,
+and `routine_firings_reason_check`, last set by migration 28, adding the failure reason
+`usage_limit`. Existing rows are neither rewritten nor checked. Each replacement repeats
+the whole predicate it replaces, clause for clause, so `migrate()` refuses to apply a
+migration numbered 27 or above whose version is below one already applied: applied
+later, it would silently drop what the newer one allowed. Releases up to 26 shipped
+migration 22 after 26, so earlier gaps still apply. Until `migrate()` commits it holds
+`SHARE ROW EXCLUSIVE` on `members` and `native_launches` for the foreign keys, and
+`ACCESS EXCLUSIVE` on `audit_events` and `routine_firings`. As in migrations 25 to 30, it
+takes all four with `NOWAIT` and retries, so it never waits in a lock queue. Applied
+alone, from version 30, it holds nothing while it retries; applied with 27 to 30 in one
+transaction, it retries while holding their locks. A running native turn's admission
+transaction holds only `ACCESS SHARE` and row share locks, which these modes allow, so a
+live upgrade never waits for a turn. After 60 s without the locks it fails with `55P03`
+and applies nothing. Turns that started before the upgrade are metered when their
+segments return.
+
+Migrations 27 to 30 (handoff, approval expiry, member instructions and audit filters)
+come before 31. A development database that ran a build of this feature from before
+they were merged holds 31 without them. Every gateway, worker and CLI process then
+refuses to start with `Migration 27 would apply after migration 31` and applies
+nothing. Applying them there would be wrong: 27 to 29 would each replace 31's type
+CHECK with one that lacks the usage types, and 28 would fail to find the reason CHECK
+it replaces. Recreate such a database, or restore a backup taken before that build. Do
+not delete its `schema_versions` row.
 
 A coordinated restore rewinds the ledger and the budgets with the rest of the
 database, and Crew changes neither when the restored installation resumes:
@@ -337,13 +391,19 @@ time ranges and strict queries of every route, with another owner seeing nothing
 getting 404 for this owner's IDs; setting, repeating, changing and clearing a budget
 and their audit rows; refusal at both checks and through the gateway, one audit row
 per refused request, no refusal of an admitted or running request, the soft cap, the
-UTC day window, and the mapping of the admission activity's failure; a routine firing
-failing `usage_limit` until the routine is disabled; migration 31 on a version-26
-database, its locks, no rewrite, NOT VALID CHECKs, a reason CHECK a sibling migration
-already renamed, and no wait for a running turn; `migrate()` refusing to apply a
-migration below one already applied, while a database that lacks migration 22, as
-releases before 27 left some, still upgrades; every firing reason the dispatcher names
-being one the reason CHECK allows; and a held installation refusing usage writes.
+UTC day window, and the mapping of the admission activity's failure; a handoff to a
+target over its budget refused with nothing written, and a reserved request admitted
+and metered on the target under the handoff initiator although the target's budget ran
+out after the commit; a segment whose card then expired, still metered and counted;
+a routine firing failing `usage_limit` until the routine is disabled, with its
+refusals found by `eventType` and not by `initiatorId`; migration 31 on a version-30
+database, its locks, no rewrite, NOT VALID CHECKs, both CHECKs read back from
+PostgreSQL and compared clause for clause with 29's and 28's, and no wait for a running
+turn; `migrate()` refusing to apply a migration below one already applied, including on
+a database that ran this feature before 27 to 30, while a database that lacks migration
+22, as releases before 27 left some, still upgrades; every firing reason the dispatcher
+names being one the reason CHECK allows; and a held installation refusing usage writes.
+`audit.test.ts` runs every audit filter over two owners' usage rows in JSON and CSV.
 
 `recovery.test.ts` (it needs PostgreSQL 17 `pg_dump`, as the other recovery tests do)
 restores a real dump taken after a budget and a segment were recorded. It checks that
@@ -352,9 +412,11 @@ more usage and a tighter limit on the source the restored installation has the e
 limit and the earlier total, unchanged by resume, and admits the request the source
 refused.
 
-Not run: the service proofs with Temporal. So these are not exercised end to end: a
-refusal by the admission activity inside a real workflow (the mapping is tested with a
-constructed failure), the workflow closing that conversation, and a gateway's
-dispatcher firing a routine on Temporal. A Pi child's segment is recorded by the same
+No service proof checks usage. The service proofs with Temporal run the same supervisor
+host, which records a row for each segment, but none reads the ledger. So these are not
+exercised end to end: a refusal by the admission activity inside a real workflow (the
+mapping is tested with a constructed failure), the workflow closing that conversation,
+a handoff's reserved request metered through Temporal, and a gateway's dispatcher firing
+a routine on Temporal. A Pi child's segment is recorded by the same
 insert with its `childId`, but no test runs a delegation. Real providers were not
 called, so the field mappings rest on the SDK types and the fixtures.
