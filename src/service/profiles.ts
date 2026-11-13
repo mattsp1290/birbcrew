@@ -9,7 +9,7 @@ export interface MemberProfile {
   delegateTask?: true;
   humanTool?: "choose_next_step";
   protectedTool?: "record_work_item";
-  pi?: Parameters<typeof runPiTurn>[1];
+  pi?: Omit<Parameters<typeof runPiTurn>[1], "invocationGroup">;
   codex?: Omit<Parameters<typeof runCodexTurn>[1], "ownerId" | "memberId" | "stateDir">;
   claude?: Omit<Parameters<typeof runClaudeTurn>[1], "ownerId" | "memberId" | "stateDir" | "invocationGroup">;
 }

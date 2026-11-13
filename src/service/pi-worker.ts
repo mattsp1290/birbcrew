@@ -1,26 +1,21 @@
 import {
   createAssistantMessageEventStream, createProvider, InMemoryCredentialStore, InMemoryModelsStore,
-  type Api, type AssistantMessageEvent, type AssistantMessageEventStream, type Model, type ProviderStreams,
+  type Api, type AssistantMessageEventStream, type Model, type ProviderStreams,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Socket } from "node:net";
-import { readFrames, writeFrame } from "./pi-channel.ts";
-import { forwardedOptions } from "./pi-launch.ts";
-import { runSegment, type PiProfile } from "./pi.ts";
-import { runTrustedSession } from "./trusted-pi.ts";
-import type { DriverInput } from "./activities.ts";
-import type { TrustedNativeInput } from "./trusted-native-types.ts";
+import { forwardedOptions, readFrames, writeFrame, type HostFrame, type PiStart } from "./pi-channel.ts";
+import { runSegment } from "./pi-session.ts";
+import type { SessionProfile } from "./pi-state.ts";
+import { runTrustedSession } from "./trusted-pi-session.ts";
 
 // Started only by pi-launch.ts through the member launcher: no credentials, no sockets, only descriptor 3.
 // Pi sessions here must stay in memory: file-backed Pi storage locks with utimes, which the launcher refuses.
-type Command = { model: Model<Api>; instructions?: string; allowRecordWorkItem?: boolean } & (
-  | { kind: "member"; mode: Parameters<typeof runSegment>[2]; input: Omit<DriverInput, "signal"> }
-  | { kind: "trusted"; input: Pick<TrustedNativeInput, "text" | "context" | "checkpoint" | "tools"> });
 
 // The host stops a worker by killing it, so the SDK's own signal never fires.
 const signal = new AbortController().signal;
 const streams = new Map<number, { events: AssistantMessageEventStream; release: () => void }>();
-const calls = new Map<number, { resolve: (result: { text: string; isError: boolean }) => void; reject: (error: Error) => void }>();
+const calls = new Map<number, (result: { text: string; isError: boolean }) => void>();
 let sequence = 0;
 let started = false;
 // Wrapping the inherited descriptor needs no socket call, which the launcher denies.
@@ -54,16 +49,17 @@ async function hostModels(model: Model<Api>) {
 
 // The host runs the tool with the arguments the model sent through it.
 function dispatch(call: { nativeCallId: string; toolName: string }) {
-  return new Promise<{ text: string; isError: boolean }>((resolve, reject) => {
+  return new Promise<{ text: string; isError: boolean }>((resolve) => {
     const id = ++sequence;
-    calls.set(id, { resolve, reject });
+    calls.set(id, resolve);
     send({ dispatch: id, nativeCallId: call.nativeCallId, toolName: call.toolName });
   });
 }
 
-async function run(command: Command) {
-  const { model, instructions, allowRecordWorkItem } = command;
-  const profile: PiProfile = { model, modelRuntime: await hostModels(model), ...(instructions !== undefined && { instructions }), allowRecordWorkItem };
+async function run(command: PiStart) {
+  const { model, instructions } = command;
+  const profile: SessionProfile = { model, modelRuntime: await hostModels(model), ...(instructions !== undefined && { instructions }),
+    allowRecordWorkItem: command.kind === "member" ? command.allowRecordWorkItem : undefined };
   // Text and argument previews are published by the host from the events it relays.
   if (command.kind === "trusted") {
     return runTrustedSession({ ...command.input, signal, dispatch, onToolDelivered: (delivered) => send({ delivered }) }, profile);
@@ -74,25 +70,25 @@ async function run(command: Command) {
 function receive(message: unknown) {
   if (!started) {
     started = true;
-    run(message as Command).then((result) => ({ result }), (error: unknown) =>
+    run(message as PiStart).then((result) => ({ result }), (error: unknown) =>
       ({ error: (error instanceof Error ? error.message : "Pi worker failed").slice(0, 1024) }))
       .then((reply) => writeFrame(channel, reply, () => process.exit(0)));
     return;
   }
-  const value = message as { stream?: number; event?: AssistantMessageEvent; dispatch?: number; result?: { text: string; isError: boolean }; error?: string };
-  if (value.stream !== undefined && value.event) {
-    const entry = streams.get(value.stream);
+  // The host is trusted, so its frames are not parsed.
+  const frame = message as HostFrame;
+  if ("stream" in frame) {
+    const entry = streams.get(frame.stream);
     if (!entry) return;
-    if (value.event.type === "done" || value.event.type === "error") {
-      streams.delete(value.stream);
+    if (frame.event.type === "done" || frame.event.type === "error") {
+      streams.delete(frame.stream);
       entry.release();
     }
-    entry.events.push(value.event);
-  } else if (value.dispatch !== undefined) {
-    const call = calls.get(value.dispatch);
-    calls.delete(value.dispatch);
-    if (value.result) call?.resolve(value.result);
-    else call?.reject(new Error(value.error ?? "Trusted application tool failed"));
+    entry.events.push(frame.event);
+  } else {
+    const resolve = calls.get(frame.dispatch);
+    calls.delete(frame.dispatch);
+    resolve?.(frame.result);
   }
 }
 

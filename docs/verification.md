@@ -51,9 +51,10 @@ Every engine's native process starts through the member launcher,
 `.proof/bin/member-launch`, built from `native/member-launch.c`. It applies a
 Landlock filesystem ruleset and a seccomp filter, sets `no_new_privs` and a
 parent-death signal, and closes inherited descriptors from 3 up (from 4 up for
-Pi, which keeps its channel), before it runs the engine. Every engine may read a fixed list of runtime files: the dynamic
-loader cache, DNS and TLS configuration, `/dev/null`, `/dev/urandom` and a few
-`/proc` and `/sys` entries that runtimes read at startup. The seccomp filter
+Pi, which keeps its channel), before it runs the engine. Every engine may read
+a fixed list of runtime files: the dynamic loader cache, DNS and TLS
+configuration, `/dev/null`, `/dev/urandom` and a few `/proc` and `/sys` entries
+that runtimes read at startup. The seccomp filter
 refuses `setsid` and `setpgid`, so a native process cannot leave the process
 group that its host kills, and on x86-64 it refuses x32 system call numbers,
 which would otherwise bypass the filter.
@@ -104,51 +105,59 @@ worker can still learn whether a path exists and read its metadata. `chown` and
 the descriptor-based `fchmod`, `fchown` and `fsetxattr` stay allowed: they need
 ownership or a descriptor the worker can open, which outside its private
 directory it has only on files its user owns and Landlock lets it read. Run the
-service as a user that does not own the checkout, as the service image does. The policy
-assumes that the service runs as a user without capabilities, as the service
-image does; the launcher does not drop privileges itself.
+service, as the service image does, as a user that does not own the checkout
+and has no capabilities: the policy assumes both, and the launcher does not
+drop privileges itself.
 
 The worker's environment holds only `HOME` and `TMPDIR`: no database URL and no
-provider key. The host makes each model request for the worker with the
-operator's own model, provider, credentials, proxy relay and request identity,
-with provider retries off. Of the worker's request options it takes only the
-session ID, transport and bounded timeouts; it ignores any model, key, headers,
-identity or environment. A member segment may make one model request and a
-trusted application turn 17, one for each of at most 16 tool calls and one for
-the reply, never two at once. The host publishes the reply text and the
-argument previews itself, from the events it relays, and fails the turn past
-65,536 bytes of text; the worker reports neither. The host runs each trusted
-application tool only for a call that the model sent through it, in a reply
-that neither failed nor hit its token limit, as the agent requires, with the
-model's arguments coerced against the tool's schema as the agent does. A failed
-dispatch fails the turn, as it did in process. The worker still builds the
-model's context, so a call "the model sent" is one the worker led the model
-to send. The host reads the worker's frames with a limit of 16 Mi characters,
-fails the turn if the worker leaves 64 MiB unread, and stops acting on frames
-after the first failure.
+provider key. The host does not trust the worker:
 
-The host checks the worker's result before it returns it. A member segment's
-checkpoint must keep the thread, the session and every earlier turn, and add
-only this request's turn or pending call. That turn must hold this request's
-prompt, the reply or tool calls exactly as the model sent them through the
-host, and system entries that the SDK itself writes: the instructions, the
-project context, the worker's own working directory, and the declarations of
-the segment's tools. A resumed turn's tool results must be the ones the host
-builds from the owner's decision or the children's outcomes. The committed text
-must equal the model's reply and the published text. A proposal must name the
-segment's tool and its request. Delegated child profiles come from the
-`@birbcrew/pi-subagents` role table on the host, not from the worker. A trusted
-turn's reply must equal the text the model sent, and its checkpoint must extend
-the prior one by this request's prompt, the replies the model sent, the results
-the host delivered, and the SDK's own system entries. The host records a member
-segment's usage from the replies it relayed, not from the worker. A Pi profile's `prepare` runs on the host. Its extension may register
-only the `before_provider_headers`, `before_provider_request`,
-`after_provider_response` and `provider_stream_event` hooks; any other
-extension call fails the turn, and so does an error from a hook, which the Pi
-SDK would only report. In the member lane the worker stays in the supervised
-runner's process group, so the supervisor's stop and reaping cover it; in the
-trusted lane it gets its own group, which the host kills when the worker
-exits.
+- **Model requests.** The host makes each model request for the worker with the
+  operator's own model, provider, credentials, proxy relay and request
+  identity, with provider retries off. Of the worker's request options it takes
+  only the session ID, transport and bounded timeouts; it ignores any model,
+  key, headers, identity or environment. A member segment may make one model
+  request and a trusted application turn 17, one for each of at most 16 tool
+  calls and one for the reply, never two at once.
+- **Text and previews.** The host publishes the reply text and the argument
+  previews itself, from the events it relays, and fails the turn past 65,536
+  bytes of text; the worker reports neither.
+- **Trusted tools.** The host runs each trusted application tool only for a
+  call that the model sent through it, in a reply that neither failed nor hit
+  its token limit, as the agent requires, with the model's arguments coerced
+  against the tool's schema as the agent does. A failed dispatch fails the
+  turn, as it did in process. The worker still builds the model's context, so a
+  call "the model sent" is one the worker led the model to send.
+- **The channel.** The host reads the worker's frames with a limit of 16 Mi
+  characters, fails the turn if the worker leaves 64 MiB unread, and stops
+  acting on frames after the first failure.
+- **Member results.** The host checks the worker's result before it returns
+  it. A member segment's checkpoint must keep the thread, the session and every
+  earlier turn, and add only this request's turn or pending call. That turn
+  must hold this request's prompt, the reply or tool calls exactly as the model
+  sent them through the host, and system entries that the SDK itself writes:
+  the instructions, the project context, the worker's own working directory,
+  and the declarations of the segment's tools. A resumed turn's tool results
+  must be the ones the host builds from the owner's decision or the children's
+  outcomes. The committed text must equal the model's reply and the published
+  text. A proposal must name the segment's tool and its request. Delegated
+  child profiles come from the `@birbcrew/pi-subagents` role table on the
+  host, not from the worker.
+- **Trusted results.** A trusted turn's reply must equal the text the model
+  sent, and its checkpoint must extend the prior one by this request's prompt,
+  the replies the model sent, the results the host delivered, and the SDK's
+  own system entries.
+- **Usage.** The host records a member segment's usage from the replies it
+  relayed, not from the worker.
+- **Profile hooks.** A Pi profile's `prepare` runs on the host. Its extension
+  may register only the `before_provider_headers`, `before_provider_request`,
+  `after_provider_response` and `provider_stream_event` hooks; any other
+  extension call fails the turn, and so does an error from a hook, which the Pi
+  SDK would only report.
+- **Process groups.** In the member lane the worker stays in the supervised
+  runner's process group, so the supervisor's stop and reaping cover it; in the
+  trusted lane it gets its own group, which the host kills when the worker
+  exits.
 
 Claude and Pi need Landlock ABI 3 or newer, and Codex needs ABI 4. On a kernel
 without Landlock, with an older ABI, or where the container's seccomp profile

@@ -81,9 +81,9 @@ static void load(unsigned arg) {
 }
 // The blocks below load an argument, so each returns for its own system call. After execv the worker keeps
 // this process ID, and 0 also names the caller.
-static void only_self(uint32_t call, unsigned arg) {
+static void only_self(uint32_t call) {
     emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, call, 0, 5));
-    load(arg);
+    load(0);
     emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 2, 0));
     emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)getpid(), 1, 0));
     emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
@@ -108,14 +108,38 @@ static void refuse_commands(uint32_t call, uint32_t first, uint32_t second) {
     emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
     emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
 }
+// clone only for threads; glibc starts threads with clone once clone3 reports ENOSYS.
+static void threads_only(void) {
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone, 0, 4));
+    load(0);
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, CLONE_THREAD, 1, 0));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+}
+static void keep_death_signal(void) {
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 0, 4));
+    load(0);
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, PR_SET_PDEATHSIG, 0, 1));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+}
+// kill(0) would signal the whole supervised group, so kill and tgkill must name this process.
+static void signal_only_self(void) {
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_kill, 1, 0));
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_tgkill, 0, 4));
+    load(0);
+    emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)getpid(), 1, 0));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
+    emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+}
 
-// Descendants stay in the invocation process group supervised by the host. An offline member (Pi) also
+// Descendants stay in the invocation process group supervised by the host. Pi, an offline member, also
 // cannot open a socket, since its model traffic and tool calls cross descriptor 3 to the host; io_uring
 // could open one without the socket call. It cannot start a process, undo its death signal, or create
 // IPC objects that outlive it. It cannot signal, set limits on or reschedule any process but itself, nor
 // make the kernel signal one for it through a file owner. Landlock does not mediate file metadata, so it
 // also cannot change the mode, times or extended attributes of a file by path.
-static void keep_group(int offline) {
+static void install_filter(int pi) {
     emit((struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)));
 #if defined(__aarch64__)
     emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0));
@@ -133,7 +157,7 @@ static void keep_group(int offline) {
 #endif
     deny(SYS_setsid, EPERM);
     deny(SYS_setpgid, EPERM);
-    if (offline) {
+    if (pi) {
         deny(SYS_socket, EPERM);
         deny(SYS_socketpair, EPERM);
         deny(SYS_io_uring_setup, EPERM);
@@ -169,28 +193,14 @@ static void keep_group(int offline) {
         deny(SYS_setxattrat, EPERM);
         deny(SYS_removexattrat, EPERM);
         deny(SYS_file_setattr, EPERM);
-        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone, 0, 4));
-        load(0);
-        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, CLONE_THREAD, 1, 0));
-        emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
-        emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
-        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 0, 4));
-        load(0);
-        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, PR_SET_PDEATHSIG, 0, 1));
-        emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
-        emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
-        // kill(0) would signal the whole supervised group, so kill and tgkill must name this process.
-        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_kill, 1, 0));
-        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_tgkill, 0, 4));
-        load(0);
-        emit((struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)getpid(), 1, 0));
-        emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM));
-        emit((struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
-        only_self(SYS_prlimit64, 0);
-        only_self(SYS_sched_setaffinity, 0);
-        only_self(SYS_sched_setattr, 0);
-        only_self(SYS_sched_setparam, 0);
-        only_self(SYS_sched_setscheduler, 0);
+        threads_only();
+        keep_death_signal();
+        signal_only_self();
+        only_self(SYS_prlimit64);
+        only_self(SYS_sched_setaffinity);
+        only_self(SYS_sched_setattr);
+        only_self(SYS_sched_setparam);
+        only_self(SYS_sched_setscheduler);
         only_self_process(SYS_setpriority, PRIO_PROCESS);
         only_self_process(SYS_ioprio_set, 1 /* IOPRIO_WHO_PROCESS */);
         refuse_commands(SYS_fcntl, F_SETOWN, F_SETOWN_EX);
@@ -205,6 +215,7 @@ int main(int argc, char **argv) {
     const char *codex = getenv("BIRBCREW_NATIVE_BINARY");
     // Pi runs its SDK in a Node worker that loads Crew's code from this checkout and talks only to its host.
     const char *source = codex ? NULL : getenv("BIRBCREW_NATIVE_SOURCE");
+    const int pi = source != NULL;
     if (!codex && argc < 3) return 126;
     pid_t parent = number(codex ? getenv("BIRBCREW_NATIVE_PARENT") : argv[1], INT_MAX);
     checked(prctl(PR_SET_PDEATHSIG, SIGKILL));
@@ -257,10 +268,10 @@ int main(int argc, char **argv) {
         argv += 2;
     }
     checked(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
-    keep_group(source != NULL);
+    install_filter(pi);
     checked(syscall(SYS_landlock_restrict_self, rules, 0));
     umask(0077);
-    checked(syscall(SYS_close_range, source ? 4 : 3, UINT_MAX, 0));
+    checked(syscall(SYS_close_range, pi ? 4 : 3, UINT_MAX, 0));
     execv(executable, argv);
     fail();
 }
