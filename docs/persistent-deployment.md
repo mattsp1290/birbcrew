@@ -46,7 +46,7 @@ migrations at startup (see [Database role](#database-role)).
 | Process | Command | Notes |
 | --- | --- | --- |
 | Gateway | `node src/service/gateway.ts /etc/crew/gateway.json` | JSON `{ "port": 8080, "tokenHashes": { "<sha256 hex>": "<owner id>" } }` as in the [gateway guide](member-gateway.md). Listens on `127.0.0.1:<port>` and prints `{"url": ...}`. Also runs the [scheduled-routine](scheduled-routines.md) and [outbound webhook](webhooks.md) dispatchers. |
-| Worker | `node src/service/cli.ts worker src/service/providers.ts` | Registers the profiles enabled by the attestation variables below. |
+| Worker | `node src/service/cli.ts worker src/service/providers.ts` | Registers the profiles named by `BIRBCREW_LIVE_PROFILES`. Stops at startup without it. |
 
 Every gateway fires scheduled routines from a PostgreSQL leased queue, beside its
 cancellation outbox; there is no separate scheduler process and no Temporal
@@ -101,8 +101,9 @@ In Kubernetes pass the command as `args:`; setting `command:` replaces `tini`.
 | `HOME` | both | `/tmp` | Writable home for SDK caches. |
 | `BIRBCREW_WORKER_HEARTBEAT_FILE` | worker | unset | Absolute path the worker touches every 5 seconds from the start of its Temporal workers until shutdown begins. See [Health](#health). |
 | `BIRBCREW_WEBHOOK_ALLOW_INSECURE_TARGETS` | gateway | unset | `1` lets webhooks use plain `http` and loopback or private addresses, for local testing only. Any other value leaves it off. See [outbound webhooks](webhooks.md#network-safety). |
-| `BIRBCREW_PI_ATTESTATION`, `OPENCODE_GO_API_KEY` | worker | unset | Pi on OpenCode Go. See [Provider accounts](#provider-accounts). |
-| `BIRBCREW_CODEX_ATTESTATION`, `BIRBCREW_CODEX_AUTH_HOME` | worker | unset | Codex with a ChatGPT subscription. |
+| `BIRBCREW_LIVE_PROFILES` | worker | unset, required | JSON naming the live account of each engine this worker serves. See [Provider accounts](#provider-accounts). |
+| `OPENCODE_GO_API_KEY` | worker | unset | Required when `BIRBCREW_LIVE_PROFILES` has a `pi` entry. |
+| `BIRBCREW_CODEX_AUTH_HOME` | worker | unset | Codex sign-in directory for a `chatgpt-subscription` entry. |
 
 Temporal TLS is all or nothing: set all four TLS variables, or none for the
 previous plaintext connection. A partial set, a relative path or an unreadable
@@ -138,7 +139,6 @@ the gateway, worker and CLI, and a plaintext connection was refused.
 | `/var/lib/birbcrew/native` | Persistent volume, worker only | Writable by uid 10001. The worker creates `.birbcrew-volume` identity files, at the root for Claude and under `codex/` for Codex. Those profiles are registered to that identity, so a replacement worker must mount the same volume. Pi context lives in PostgreSQL. |
 | `/tmp` | tmpfs | Writable, exec allowed, mode `1777`. |
 | `/etc/crew/...` | Read-only secrets | Gateway configuration and Temporal TLS files, readable by uid 10001. |
-| Attestation directory | Private writable volume | See below. Must not be under `/app`. |
 
 Keep the state directory at the same absolute path for the life of the
 installation. Codex records absolute session paths and the worker validates
@@ -251,25 +251,39 @@ is enough on its own only when one Deployment runs every Crew process
 Claude is not covered here. The worker loads profiles from
 `src/service/providers.ts` as described in [member profiles](member-profiles.md).
 
-Attestation files are checked on every turn. Each must be a regular file of at
-most 16 KiB, owned by the worker's uid (10001), with no group or other
-permission bits, outside `/app`, and with `checked_at` from the past 12 hours.
-Kubernetes Secret volumes present files owned by root, so copy the attestation
-into a private volume owned by 10001 and renew it before it expires
-(**unverified** on a cluster).
+Set `BIRBCREW_LIVE_PROFILES` to one JSON object with an entry for each engine
+this worker serves. The worker stops at startup when the variable is unset or
+invalid, or when a configured engine's API key is missing. The Codex sign-in is
+read on every turn instead, and a turn fails without a current sign-in for the
+configured account. The setting itself needs no file or volume and does not
+expire. The value names accounts, so supply it from a Secret.
 
-- **Pi (OpenCode Go):** set `BIRBCREW_PI_ATTESTATION` to the attestation path
-  and `OPENCODE_GO_API_KEY` to the eligible key. Profiles:
-  `pi-go-glm-5.3-flash.v1`, `.approval.v1`, `.next-step.v1` and `.crew.v1`.
-- **Codex (ChatGPT subscription):** set `BIRBCREW_CODEX_ATTESTATION` with
-  provider `chatgpt-subscription` and `BIRBCREW_CODEX_AUTH_HOME` to an absolute
+```json
+{"pi": {"provider": "opencode-go", "account": "ACCOUNT LABEL"},
+ "codex": {"provider": "chatgpt-subscription", "account_id": "CHATGPT_ACCOUNT_ID", "model": "gpt-5.4"}}
+```
+
+- **Pi (OpenCode Go):** add the `pi` entry and set `OPENCODE_GO_API_KEY` to the
+  key. Profiles: `pi-go-glm-5.3-flash.v1`, `.approval.v1`, `.next-step.v1` and
+  `.crew.v1`.
+- **Codex (ChatGPT subscription):** add the `codex` entry with provider
+  `chatgpt-subscription` and set `BIRBCREW_CODEX_AUTH_HOME` to an absolute
   directory holding a Codex CLI ChatGPT login. Each turn starts the bundled
   `codex app-server` with that directory as `CODEX_HOME` and reads the current
-  access token without refreshing it. Without `BIRBCREW_CODEX_AUTH_HOME` the
+  access token without refreshing it. The turn stops unless the token is current
+  and belongs to `account_id`. Without `BIRBCREW_CODEX_AUTH_HOME` the
   worker falls back to `CODEX_HOME`, then `$HOME/.codex`, which is the tmpfs
   `/tmp/.codex` in this image, so set it explicitly. Keep the login current with the Codex
   CLI against the same directory. How that refresh runs in the cluster is
   **unverified**.
+
+Releases before this setting read dated attestation files through
+`BIRBCREW_PI_ATTESTATION` and `BIRBCREW_CODEX_ATTESTATION`. Those variables are
+no longer read. To upgrade, set `account` to the file's `account_path`, copy
+`account_id` and `model`, and remove the variables, the files and their volume.
+A different `account` or `account_id` stops the worker with `Profile registered
+for another account`. [Member profiles](member-profiles.md#what-replaced-provider-attestations)
+lists what each field became.
 
 ## Kernel
 
