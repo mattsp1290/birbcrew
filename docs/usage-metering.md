@@ -131,7 +131,7 @@ come before `to`. A `memberId` or `conversationId` the owner does not have fails
 
 | Route | Purpose |
 | --- | --- |
-| `GET /v1/usage?from=&to=` | The owner's totals, and the part routines started |
+| `GET /v1/usage?from=&to=` | The owner's totals, the part routines started and the trusted-context lane's part |
 | `GET /v1/usage/members?from=&to=&after=&limit=` | Every member of the owner, ordered by `memberId`, with totals and its budget |
 | `GET /v1/usage/conversations?from=&to=&memberId=&after=&limit=` | Conversations with at least one row in range, ordered by `conversationId` |
 | `GET /v1/usage/records?from=&to=&memberId=&conversationId=&before=&limit=` | Ledger rows, newest first |
@@ -198,11 +198,14 @@ held, so the operator reads its newest ID before `resume`
 mirror records; each drops the rows it holds above that ID and reads again.
 
 `GET /v1/capabilities` describes the feature under `usage`: the states, the token and
-cost rules, the estimate's source, setting and unit (`estimate`), the lanes, what each
-engine reports, the budget period, the refusal codes (`refusal` and
+cost rules, the estimate's field, source, setting and unit (`estimate`), the lanes, what
+each engine reports, the budget period, which lanes the budget counts and which it
+refuses (`lanesCounted`, `lanesRefused`), the refusal codes (`refusal` and
 `refusalClosingConversation`), and that a restore rewinds the ledger and reissues record
-IDs. Its `cost` value changed from `provider-billed-only; never-estimated` to
-`provider-billed-or-operator-estimate; reported-apart; never-both-on-one-segment`.
+IDs. `cost` and each engine's `cost` still describe `costUsd`, which is still a billed
+cost only, so their values are unchanged; each engine gains `estimate`, and Pi
+`modelSource`. One existing value changed, because it stopped being true: Codex's
+`model`, from `not-reported` to `from-rollout-turn-context`.
 
 ## Estimated cost
 
@@ -223,7 +226,8 @@ JSON file:
 ```
 
 - **Keys** are models exactly as the ledger records them; read `model` from
-  `/v1/usage/records` to see the names. Up to 512 models.
+  `/v1/usage/records` to see the names. From 1 to 512 models: an empty table is refused,
+  so to estimate nothing, unset the setting.
 - **Rates** are USD per million tokens, written as decimal strings with at most six
   decimal places, from `0` to `999999.999999`. A number, an exponent or a seventh
   decimal place is refused, so no binary fraction enters the table. `input` and `output`
@@ -234,7 +238,8 @@ JSON file:
 - **Startup.** The worker and its supervisor host read the file once, when the worker
   starts; restart the worker to change prices. A malformed file stops the worker with an
   error that names the setting and the failing entry's position, never the file's
-  contents. Without the setting nothing is estimated, as before.
+  contents. Without the setting nothing is estimated, as before. A table built in code
+  (see [the trusted lane](#the-trusted-context-lane)) is checked by the same rules.
 
 When the supervisor host writes a segment's row, it prices the segment if it is
 `reported`, names a model the table prices, and has no billed cost:
@@ -266,8 +271,11 @@ Which model is priced matters, so each engine's model was checked:
 - **Pi.** pi-ai sets `responseModel` when the provider names a model other than the one
   requested, as a router or a fallback does. Crew records the model that answered, and
   none when the segment's calls disagree, so a routed call is priced as the model that
-  ran it, or not at all. The built-in OpenCode Go profile already refuses a response
-  from another model.
+  ran it, or not at all. pi-ai sets it whenever the provider's model string differs, and
+  many OpenAI-compatible providers answer with a dated snapshot name (a request for
+  `gpt-4o` answered as `gpt-4o-2024-08-06`); such a member's rows record the snapshot
+  name from this release on, so price that name. The built-in OpenCode Go profile already
+  refuses a response from another model.
 
 A segment without a model, or with one the table does not price, has no estimate.
 
@@ -298,23 +306,35 @@ turn, since the app-server reports no per-turn usage, and the turn's model from 
 rollout. `runTrustedRequest` writes one row per trusted request with the same writer,
 after the native turn returns and before the reply commits, priced from the operator's
 table like any other row. It reads `BIRBCREW_USAGE_PRICES_PATH` in the embedding
-process, once; pass a table as its fifth argument to use another.
+process, once; pass a table as its fifth argument to use another. Either way a malformed
+table throws before the request is claimed, never after its tools have run; read it when
+the backend starts (`operatorPrices()` in `usage-prices.ts`) to fail then.
 
 The row is bound to the trusted request's generation and the token its start claimed,
 not to a launch: its `token` and `child_id` are null and `trusted_request_id` names the
 request. A trusted request runs at most once, under one token, so its ID identifies the
 model work as a launch generation does, and a unique index keeps one row per request.
-As in the member lane, a request whose turn fails, is cancelled, or loses its lease to a
-rotation records nothing; one whose commit then finds the generation stale keeps its
-row, because the tokens were spent.
+The unit is coarser than the member lane's: there each segment of a request has its own
+row, while a trusted request is one row, written only when its whole native turn
+returns. A trusted request that fails, is cancelled or loses its lease to a rotation
+records nothing, including the model calls it had already finished (a Claude tool round
+trip, a Pi or Codex tool call), so the lane undercounts more on failure. One whose
+commit then finds the generation stale keeps its row, because the tokens were spent.
 
 The lane's guarantees do not change. The row holds counts and a model name, never the
 context, prompt, reply or tool data; nothing enters Temporal. `erase()` leaves the row,
 as it leaves the audit trail's `trusted_effect.completed` rows, and for the same reason:
 it is metadata, not content. A trusted request has no admission row, so its record
 names the owner as initiator, as the audit trail does for the lane's effects, with
-`lane: "trusted"`. The owner sees the lane's token counts through `/v1/usage` without the
-trusted application's `authorize` callback being asked, as with those audit rows.
+`lane: "trusted"`; use `lane`, not `initiator`, to tell the lane's spending apart. The
+owner sees the lane's token counts through `/v1/usage` without the trusted application's
+`authorize` callback being asked, as with those audit rows. Counts are metadata, but not
+nothing: `outputTokens` approximates a reply's length and `inputTokens` the size of the
+context, prompt and tool results, including for a request whose reply `authorize` later
+withheld, one from an earlier generation and one in an erased conversation. An
+application for which those sizes are sensitive should not give that owner an
+integration API token. A record's `estimatePrice` also shows the operator's rates to the
+owner.
 
 ## Budgets
 
@@ -512,13 +532,19 @@ Migration 36 adds `estimated_cost_usd`, `estimate_price` and `trusted_request_id
 the ledger, all nullable without a default, so no row is rewritten; drops `NOT NULL`
 from `token`; and adds three CHECKs and a foreign key to `trusted_requests`, all
 `NOT VALID`, so no row is scanned. Rows written before it keep no estimate: the price
-table never reaches back. It builds one partial unique index, which reads the ledger
-once and holds no row. Until `migrate()` commits it holds `ACCESS EXCLUSIVE` on
-`usage_ledger` and `SHARE ROW EXCLUSIVE` on `trusted_requests`, taken with `NOWAIT` and
-retried as 25 to 32 do. Only short statements hold either table, and a running trusted
-turn's lease reads `trusted_requests` under `ACCESS SHARE`, which the migration's mode
-allows. It is numbered 36 because three branches not yet merged hold 33 to 35; it may be
-renumbered when they merge, and `migrate()` refuses to apply one of those after 36.
+table never reaches back. It builds one partial unique index, which holds no row but
+reads the whole ledger once under the lock below, so that pause grows with the ledger's
+size. Until `migrate()` commits it holds `ACCESS EXCLUSIVE` on `usage_ledger` and
+`SHARE ROW EXCLUSIVE` on `trusted_requests`, taken with `NOWAIT` and retried as 25 to 32
+do. Only short statements hold either table, and a running trusted turn's lease reads
+`trusted_requests` under `ACCESS SHARE`, which the migration's mode allows. `migrate()`
+refuses to apply a lower-numbered migration after it.
+
+From this release a member's budget also counts its trusted-context requests, which
+were not recorded before, so a member that serves both lanes reaches its limit sooner.
+Its member-lane requests, its routines' firings (ten consecutive `usage_limit` failures
+disable a routine) and handoffs to it are then refused, while its trusted requests are
+not. Review such members' limits after upgrading.
 
 A coordinated restore rewinds the ledger and the budgets with the rest of the
 database, and Crew changes neither when the restored installation resumes:
@@ -619,13 +645,16 @@ database that ran this feature before 27 to 30, while a database that lacks migr
 22, as releases before 27 left some, still upgrades; every firing reason the dispatcher
 names being one the reason CHECK allows; and a held installation refusing usage writes.
 For cost it checks an estimate written with the rates it used and kept when the price
-rises, a retried write adding nothing under another price, a billed segment never
+rises, a table that skipped validation costing a segment its estimate but never its
+counts, a retried write adding nothing under another price, a billed segment never
 estimated, unpriced, unnamed and unknown segments left without one, billed and
 estimated totals kept apart in every route, another owner's estimate in neither
 owner's totals or records, and the CHECKs that keep the two apart. For the trusted lane
 it checks one row per trusted request, none for a stale claim or another owner, the
 `trusted` lane and owner initiator in records and its part of every total, its tokens in
-the member's budget, the row surviving `erase()`, and the lane CHECKs and keys. Migration
+the member's budget, the row surviving `erase()`, the lane CHECKs and keys, and a table
+built in code that the file rules refuse stopping `runTrustedRequest` before it claims a
+request. The capabilities' usage values are pinned. Migration
 36 is applied to a version-32 database: no rewrite, its locks, NOT VALID constraints, a
 retry instead of a queue while a ledger write holds the table, no wait for a running
 trusted turn's lease, and earlier rows left unestimated.

@@ -500,7 +500,8 @@ While the member's input and output tokens for the UTC day are at or over it, a 
 request fails `409 usage_limit` (or `409 usage_limit_closed` when the refusal also closed
 the conversation), and a routine's firing fails with reason `usage_limit`; a request already
 admitted is never refused or interrupted, so the cap can be passed by what running
-requests use. See [usage metering](usage-metering.md).
+requests use. The budget counts the member's trusted-context tokens too, but refuses only
+member-lane requests, routine firings and handoffs. See [usage metering](usage-metering.md).
 
 ## Outbound webhooks
 

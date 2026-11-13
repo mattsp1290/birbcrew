@@ -75,7 +75,14 @@ the reply commits, priced from the table named by `BIRBCREW_USAGE_PRICES_PATH` i
 backend's process unless a table is passed as `runTrustedRequest`'s fifth argument. The
 row holds no context, prompt, reply or tool data. The owner reads it through `/v1/usage`
 as `lane: "trusted"`, and its tokens count toward the member's daily budget, which does
-not refuse trusted requests.
+not refuse trusted requests. A malformed table makes `runTrustedRequest` throw before it
+claims a request; to fail at startup instead, read the table once and pass it:
+
+```ts
+import { operatorPrices } from "./src/service/usage-prices.ts";
+const prices = operatorPrices(); // throws, naming the setting, on a malformed table
+await runTrustedRequest(trusted, key, nativeProfile, abortSignal, prices);
+```
 
 Each registered tool supplies:
 
