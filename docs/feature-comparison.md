@@ -148,7 +148,7 @@ How much to trust each column:
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 36 | Sign-in, SSO, and roles | Part | Yes | Yes | Part | Part | Part | Part | Part | Yes |
 | 37 | Self-hosted deployment | Part | Yes | No | No | Yes | No | Yes | No | Yes |
-| 38 | Telemetry and usage or cost metering | Part | Part | Part | Part | Part | Part | Part | Part | Part |
+| 38 | Telemetry and usage or cost metering | Yes | Part | Part | Part | Part | Part | Part | Part | Part |
 | 39 | Backup and restore | Yes | Part | Part | Part | Part | ? | Part | ? | No |
 | 40 | Open-source license | Yes | Yes | No | No | Yes | No | Yes | No | Yes |
 
@@ -223,7 +223,7 @@ that names a later pull request describes Crew after that pull request instead.
 | --- | --- | --- |
 | 36 | Part | The gateway maps static bearer-token digests to owner IDs. Crew has no sign-in provider, no session, no role, and no user management. |
 | 37 | Part | The repository builds a service image, an executor image for the documentation pilot, and the pilot's Python API image, and supports Temporal mTLS. The gateway binds only to 127.0.0.1. The repository has no Kubernetes manifest and no Helm chart, and a rolling update is documented as unsafe. See [persistent deployment](persistent-deployment.md) and [the in-cluster executor](in-cluster-executor.md). |
-| 38 | Part | Crew exports four trace span names over OTLP. It records the token counts each engine reports for every native segment that returns a result, totals them per member and conversation through `/v1/usage`, and lets an owner give a member a daily token budget that admission enforces as a soft cap (pull request #53). It keeps a cost only when a Pi provider reports a billed one, so Claude and Codex usage has no cost, and Crew never estimates one. See [usage metering](usage-metering.md). |
+| 38 | Yes | Crew exports four trace span names over OTLP. It records the token counts each engine reports for every native segment that returns a result, in the member lane and the trusted-context lane, totals them per member and conversation through `/v1/usage`, and lets an owner give a member a daily token budget that admission enforces as a soft cap (pull requests #53 and #59). It keeps a cost the provider billed when a Pi provider reports one, and otherwise estimates one from a price table the operator supplies, computed when the segment is recorded and reported apart from billed cost (pull request #59). Crew ships no prices, so without that table a segment has no cost. It does not meter segments that fail or are cancelled, export usage as metrics, or budget money. See [usage metering](usage-metering.md). |
 | 39 | Yes | An operator can take a quiesced backup of the whole installation and restore it behind a fence. The procedure stops the whole installation. See [coordinated recovery](coordinated-recovery.md). |
 | 40 | Yes | MIT. |
 
