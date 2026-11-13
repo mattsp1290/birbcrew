@@ -125,9 +125,11 @@ of one minute to seven days. A Claude or Pi card still undecided at its deadline
 settled without a person: Crew cancels the request and records `approval.expired`.
 
 [Usage metering](docs/usage-metering.md) records the token counts each engine reports
-for every native segment, never an estimated cost. An owner reads totals per member and
-conversation through `/v1/usage` and can give a member a daily token budget; a member at
-its budget is refused new requests with `409 usage_limit`, as a soft cap.
+for every native segment, in the member and trusted-context lanes, with a provider-billed
+cost or, from a price table the operator supplies, an estimated one, kept apart; Crew
+ships no prices. An owner reads totals per member and conversation through `/v1/usage`
+and can give a member a daily token budget; a member at its budget is refused new
+requests with `409 usage_limit`, as a soft cap.
 
 An owner can save [member memory](docs/memories.md) through `/v1/memories`: up to 32
 short facts per member. Each conversation of the member gets the facts that were

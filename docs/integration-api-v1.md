@@ -20,10 +20,11 @@ member memory route, limits, injection and deletion semantics per engine), `hand
 (the conversation handoff routes, delivery and transcript and prompt limits),
 `approvalExpiry` (the deadline field, its bounds and the fields that report an
 expiry), `memberInstructions` (the spawn field, the read route, limits, order and
-restore), `usage` (the ledger states, what each engine reports, the budget period and
-refusal codes), `webhooks` (the webhook route, kinds, signature, retry and restore
-semantics, and `insecureTargets`, which says an operator setting for testing exists,
-not whether it is on), health dependencies and listing limits. Additive
+restore), `usage` (the ledger states, what each engine reports, the cost rules and the
+operator's price table setting, the lanes, the budget period and refusal codes),
+`webhooks` (the webhook route, kinds, signature, retry and restore semantics, and
+`insecureTargets`, which says an operator setting for testing exists, not whether it is
+on), health dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
@@ -486,9 +487,14 @@ them is carried like any other reply. A restore keeps instructions as they were.
 ## Usage metering
 
 Crew records one ledger row for each native segment with the token counts the engine's
-SDK reported, or `unknown` when it reported none. It keeps a cost only when the
-provider billed it; it never estimates one. The `/v1/usage` routes total an owner's
-rows, per member and per conversation, and mark the part that routines started. An
+SDK reported, or `unknown` when it reported none, in the member lane and in the
+trusted-context lane alike. A row carries a billed cost when the provider billed one, or
+else an estimated cost when the operator's price table (`BIRBCREW_USAGE_PRICES_PATH`)
+prices its model; Crew ships no prices. The `/v1/usage` routes total an owner's rows,
+per member and per conversation, and mark the parts that routines started and that the
+trusted lane used. Totals report `costUsd` (billed) and `estimatedCostUsd` apart, each
+with its segment count, and never add them; records gain `lane`, `estimatedCostUsd` and
+`estimatePrice`. These are additive fields, and `costUsd` keeps its meaning. An
 owner can set one daily token budget per member (`PUT /v1/usage/budgets/{memberId}`).
 While the member's input and output tokens for the UTC day are at or over it, a new
 request fails `409 usage_limit` (or `409 usage_limit_closed` when the refusal also closed

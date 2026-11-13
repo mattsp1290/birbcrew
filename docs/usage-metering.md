@@ -7,9 +7,16 @@ engine's SDK reported. An owner reads totals for themselves, for each member and
 each conversation, and can give a member a daily token budget. When a member has used
 its budget, admission refuses its new requests.
 
-Crew never estimates cost. It keeps a cost only when the provider billed it and the
-SDK passed that figure on. Today that can happen only on Pi, with a provider such as
-OpenRouter. Claude and Codex segments never have a cost.
+A segment can carry one of two costs, never both, and Crew reports them apart. A
+billed cost is one the provider billed and the SDK passed on; today that happens only on
+Pi, with a provider such as OpenRouter. An estimated cost comes from a price table the
+operator supplies, computed when the segment's row is written and never again (see
+[Estimated cost](#estimated-cost)). Crew ships no prices, so without that table Claude
+and Codex segments have no cost, as before.
+
+Both lanes are metered: the member lane, whose requests come through Crew's workflows,
+and the [trusted-context lane](#the-trusted-context-lane), which a trusted backend
+drives directly.
 
 ## What each engine reports
 
@@ -26,8 +33,9 @@ fixture providers (`tests/service/usage-capture.test.ts`).
 | Cache writes | `cacheWrite` | `cache_creation_input_tokens` | `cache_write_input_tokens` |
 | Output tokens | `output` | `output_tokens` | `output_tokens` |
 | Reasoning tokens | `reasoning` when the provider reports it | not reported | `reasoning_output_tokens` |
-| Model | as the message reports it | as the CLI's `init` message reports it | not reported (null) |
-| Cost | `cost.total` only when `cost.totalFromProvider` is true; otherwise pi-ai computed it from its model catalog, and Crew drops it | never: `total_cost_usd` is the SDK's estimate from a price lookup | never: nothing reported |
+| Model | the one that answered: `responseModel` when the provider named a model other than the one requested, else `model`; null when the segment's calls name different models | as the CLI's `init` message reports it | the `turn_context` entries the CLI writes to the turn's rollout; null when they name none or more than one |
+| Billed cost | `cost.total` only when `cost.totalFromProvider` is true; otherwise pi-ai computed it from its model catalog, and Crew drops it | never: `total_cost_usd` is the SDK's estimate from a price lookup | never: nothing reported |
+| Estimated cost | from the operator's table when the segment has no billed cost | from the operator's table | from the operator's table |
 | Granularity | one model call per assistant message, summed over the segment | the one `query()` call that runs the segment | the native thread's running total |
 | A worker replaced mid-segment | the call in flight is lost | the query in flight is lost | the turn in flight is lost |
 
@@ -62,10 +70,11 @@ produced it is lost too.
 
 ## The ledger
 
-`usage_ledger` has one row for each native launch, keyed by the launch's
-`(conversation_id, request_id, token)`. That is the primary key of `native_launches`,
-and a foreign key binds the two. The supervisor reserves a launch's generation once,
-in a committed transaction, before it starts the SDK process. So:
+`usage_ledger` has one row for each native launch of the member lane, keyed by the
+launch's `(conversation_id, request_id, token)`, and one for each trusted-context
+request (see [below](#the-trusted-context-lane)). The launch key is the primary key of
+`native_launches`, and a foreign key binds the two. The supervisor reserves a launch's
+generation once, in a committed transaction, before it starts the SDK process. So:
 
 - A Temporal replay runs no activity, and so starts no launch.
 - An activity retry of a turn either replays the committed reply or turns the turn
@@ -95,18 +104,21 @@ request to end first. Per-segment rows are written once, as each segment returns
 | --- | --- |
 | `usage_id` | Identity, newest highest |
 | `owner_id`, `member_id`, `conversation_id`, `request_id` | Whose segment it was |
-| `token`, `child_id` | The launch generation, and the Pi child it ran for, if any |
+| `token`, `child_id` | The launch generation, and the Pi child it ran for, if any; both null on a trusted-context row |
+| `trusted_request_id` | On a trusted-context row only, the trusted request, equal to `request_id` |
 | `engine` | `pi`, `claude` or `codex` |
 | `state` | `reported`, or `unknown` when the SDK reported nothing usable |
-| `model` | As the engine reported it, at most 256 bytes; null for Codex |
+| `model` | As the engine reported it (see the table above), at most 256 bytes, or null |
 | `input_tokens`, `output_tokens` | Integers; both set exactly when `state` is `reported` |
 | `cached_input_tokens`, `cache_write_tokens`, `reasoning_tokens` | Integers when the SDK reports them, else null |
 | `cost_usd` | A provider-billed cost, else null |
+| `estimated_cost_usd`, `estimate_price` | An estimate from the operator's price table and the rates it used, else both null |
 | `recorded_at` | The database clock when the row was written |
 
-CHECKs keep `unknown` rows free of counts and cost. A statement trigger refuses every
-`UPDATE`, `DELETE` and `TRUNCATE`. Like every table, both new tables carry the
-recovery write barrier.
+CHECKs keep `unknown` rows free of counts and cost, keep a billed cost and an estimate
+off the same row, and give every row exactly one of a launch token and a trusted
+request. A statement trigger refuses every `UPDATE`, `DELETE` and `TRUNCATE`. Like
+every table, both new tables carry the recovery write barrier.
 
 ## Routes
 
@@ -128,26 +140,32 @@ come before `to`. A `memberId` or `conversationId` the owner does not have fails
 | `DELETE /v1/usage/budgets/{memberId}` | Clear the budget |
 
 Every total has this shape. `totalTokens` is input plus output, the number the budget
-counts. `costUsd` is a decimal string summing the reported costs, or null when no row
-in the set has one; `costReportedSegments` says how many did.
+counts. `costUsd` is a decimal string summing the billed costs, or null when no row in
+the set has one; `costReportedSegments` says how many did. `estimatedCostUsd` and
+`costEstimatedSegments` do the same for estimates. A segment has at most one of the
+two, so the two counts never overlap, and Crew never adds the two sums: an estimate is
+not a bill. A consumer that wants one figure adds them itself and should say that part
+of it is estimated.
 
 ```json
 {
   "segments": 4, "unknownSegments": 1, "inputTokens": 1350, "outputTokens": 135,
   "totalTokens": 1485, "cachedInputTokens": 400, "cacheWriteTokens": 0,
-  "reasoningTokens": 10, "costUsd": "0.25", "costReportedSegments": 1
+  "reasoningTokens": 10, "costUsd": "0.25", "costReportedSegments": 1,
+  "estimatedCostUsd": "0.0009", "costEstimatedSegments": 1
 }
 ```
 
-The summary is `{ apiVersion, from, to, total, routine }`. A member entry is
-`{ memberId, engine, total, routine, budget }`, and a conversation entry
-`{ conversationId, memberId, total, routine }`. `routine` counts only the segments of
-requests whose admission recorded a routine as initiator; a
-[handoff's](handoffs.md) reserved request counts in `total` only. A record's `initiator`
-is the one its request's admission recorded: `owner`, `routine` or `handoff`, the last
-two with their ID. A request with no admission row, from a workflow history older than
-durable admission, counts as the owner's, as it does in the audit trail. A member's
-`budget` is null or
+The summary is `{ apiVersion, from, to, total, routine, trusted }`. A member entry is
+`{ memberId, engine, total, routine, trusted, budget }`, and a conversation entry
+`{ conversationId, memberId, total, routine, trusted }`. `routine` counts only the
+segments of requests whose admission recorded a routine as initiator, and `trusted` only
+the trusted-context lane's; a [handoff's](handoffs.md) reserved request counts in
+`total` only. A record's `lane` is `member` or `trusted`. Its `initiator` is the one its
+request's admission recorded: `owner`, `routine` or `handoff`, the last two with their
+ID. A request with no admission row counts as the owner's, as it does in the audit
+trail: one from a workflow history older than durable admission, and every
+trusted-context request. A member's `budget` is null or
 `{ tokenLimit, period, revision, changedAt, windowStart, usedTokens }`.
 
 A record is:
@@ -155,12 +173,18 @@ A record is:
 ```json
 {
   "usageId": "42", "recordedAt": "2026-11-12T08:03:12.421Z", "memberId": "UUID",
-  "conversationId": "UUID", "requestId": "UUID", "childId": null, "engine": "claude",
-  "state": "reported", "model": "claude-sonnet-4-6", "inputTokens": 10, "outputTokens": 10,
-  "cachedInputTokens": 0, "cacheWriteTokens": 0, "reasoningTokens": null, "costUsd": null,
+  "conversationId": "UUID", "requestId": "UUID", "childId": null, "lane": "member",
+  "engine": "claude", "state": "reported", "model": "claude-sonnet-4-6",
+  "inputTokens": 10, "outputTokens": 10, "cachedInputTokens": 0, "cacheWriteTokens": 0,
+  "reasoningTokens": null, "costUsd": null, "estimatedCostUsd": "0.00018",
+  "estimatePrice": { "input": "3", "cachedInput": "0.3", "cacheWrite": "3.75", "output": "15" },
   "initiator": { "kind": "owner" }
 }
 ```
+
+`estimatePrice` is null unless the row has an estimate; its rates are USD per million
+tokens. These fields are additive: a consumer that ignores them reads the ledger as
+before, and `costUsd` still means a billed cost only.
 
 `limit` defaults to 100. It is at most 100 for members and conversations and 1000 for
 records. Pass `nextAfter` as the next `after`, or `nextBefore` as the next `before`;
@@ -174,15 +198,132 @@ held, so the operator reads its newest ID before `resume`
 mirror records; each drops the rows it holds above that ID and reads again.
 
 `GET /v1/capabilities` describes the feature under `usage`: the states, the token and
-cost rules, what each engine reports, the budget period, the refusal codes
-(`refusal` and `refusalClosingConversation`), and that a
-restore rewinds the ledger and reissues record IDs.
+cost rules, the estimate's source, setting and unit (`estimate`), the lanes, what each
+engine reports, the budget period, the refusal codes (`refusal` and
+`refusalClosingConversation`), and that a restore rewinds the ledger and reissues record
+IDs. Its `cost` value changed from `provider-billed-only; never-estimated` to
+`provider-billed-or-operator-estimate; reported-apart; never-both-on-one-segment`.
+
+## Estimated cost
+
+Crew ships no prices and never will: prices change, providers discount, and a wrong
+built-in price is worse than none. The operator, who knows what each account pays,
+supplies them. Set `BIRBCREW_USAGE_PRICES_PATH` on the worker to the absolute path of a
+JSON file:
+
+```json
+{
+  "version": 1,
+  "unit": "usd-per-million-tokens",
+  "models": {
+    "claude-sonnet-4-6": { "input": "3", "output": "15", "cachedInput": "0.3", "cacheWrite": "3.75" },
+    "gpt-5.4": { "input": "1.25", "output": "10", "cachedInput": "0.125" }
+  }
+}
+```
+
+- **Keys** are models exactly as the ledger records them; read `model` from
+  `/v1/usage/records` to see the names. Up to 512 models.
+- **Rates** are USD per million tokens, written as decimal strings with at most six
+  decimal places, from `0` to `999999.999999`. A number, an exponent or a seventh
+  decimal place is refused, so no binary fraction enters the table. `input` and `output`
+  are required. `cachedInput` (cache reads) and `cacheWrite` default to `input`: OpenAI
+  charges nothing extra for a cache write, Anthropic charges more, so set `cacheWrite`
+  for Claude models. There is no reasoning rate: output already includes reasoning
+  tokens, and both providers bill them as output.
+- **Startup.** The worker and its supervisor host read the file once, when the worker
+  starts; restart the worker to change prices. A malformed file stops the worker with an
+  error that names the setting and the failing entry's position, never the file's
+  contents. Without the setting nothing is estimated, as before.
+
+When the supervisor host writes a segment's row, it prices the segment if it is
+`reported`, names a model the table prices, and has no billed cost:
+
+```
+estimate = (input − cachedInput − cacheWrite) × input rate
+         + cachedInput × cachedInput rate + cacheWrite × cacheWrite rate
+         + output × output rate                       (all ÷ 1,000,000)
+```
+
+A part the engine did not report (null) is not guessed: it counts as ordinary input. A
+segment whose parts add up to more than its input gets no estimate. The arithmetic is
+exact: a rate with six decimal places per million tokens is a whole number of
+picodollars per token, so Crew multiplies integers (BigInt) and stores the result in
+`numeric(22, 12)`, the largest possible segment included. The row keeps the four rates
+it used in `estimate_price`. The ledger is append-only, so a later price never rewrites
+an earlier row, and a retried write for a launch already recorded adds nothing under
+any table. Totals sum `numeric` in PostgreSQL, so they never drift either.
+
+Which model is priced matters, so each engine's model was checked:
+
+- **Claude.** The CLI's `system:init` message names the model the main loop runs, which
+  is the profile's model. Usage covers that loop only, so the two match.
+- **Codex.** `turn.completed` names no model. The rollout that Crew already reads and pins
+  by SHA-256 after each turn has a `turn_context` entry after each `task_started`
+  naming the model the CLI requested; Crew takes the turn's, and none when the turn's
+  entries disagree. The CLI keeps no record of the model name the API answered with, so
+  the requested name is the one the operator prices.
+- **Pi.** pi-ai sets `responseModel` when the provider names a model other than the one
+  requested, as a router or a fallback does. Crew records the model that answered, and
+  none when the segment's calls disagree, so a routed call is priced as the model that
+  ran it, or not at all. The built-in OpenCode Go profile already refuses a response
+  from another model.
+
+A segment without a model, or with one the table does not price, has no estimate.
+
+An estimate is what the segment would cost at the rates in the table. It is not what
+the provider charged: Crew cannot see discounts, batch or long-context tiers, cache
+writes priced by how long they are kept, or that a subscription account (Codex on a
+ChatGPT plan, Pi on OpenCode Go) is not billed per token at all. Leave a model out of the table when an
+estimate for it would mislead. The provider's own bill stays the source of truth.
+
+## The trusted-context lane
+
+The [trusted-context lane](trusted-application-context.md) recorded no usage before this
+change, for three reasons:
+
+- Its drivers returned only text and a checkpoint (`trusted-native.ts`, `trusted-pi.ts`,
+  `trusted-claude.ts`, `trusted-codex.ts`).
+- Its runner, `runTrustedRequest`, runs in the embedding backend's process, not the
+  supervisor host, which was the one place rows were written.
+- A ledger row needed a `native_launches` row (migration 31's foreign key), which
+  belongs to a member-lane turn. A trusted conversation has no turns: `open()` refuses a
+  conversation that has any, and member-lane admission refuses a trusted conversation.
+
+Each trusted driver now returns what its SDK reported, through the same capture
+functions as the member lane: Pi the assistant messages the request added; Claude the
+sum of the request's queries, one per tool round trip, and `unknown` if any query
+reported nothing usable; Codex the running total in the rollout before and after the
+turn, since the app-server reports no per-turn usage, and the turn's model from the same
+rollout. `runTrustedRequest` writes one row per trusted request with the same writer,
+after the native turn returns and before the reply commits, priced from the operator's
+table like any other row. It reads `BIRBCREW_USAGE_PRICES_PATH` in the embedding
+process, once; pass a table as its fifth argument to use another.
+
+The row is bound to the trusted request's generation and the token its start claimed,
+not to a launch: its `token` and `child_id` are null and `trusted_request_id` names the
+request. A trusted request runs at most once, under one token, so its ID identifies the
+model work as a launch generation does, and a unique index keeps one row per request.
+As in the member lane, a request whose turn fails, is cancelled, or loses its lease to a
+rotation records nothing; one whose commit then finds the generation stale keeps its
+row, because the tokens were spent.
+
+The lane's guarantees do not change. The row holds counts and a model name, never the
+context, prompt, reply or tool data; nothing enters Temporal. `erase()` leaves the row,
+as it leaves the audit trail's `trusted_effect.completed` rows, and for the same reason:
+it is metadata, not content. A trusted request has no admission row, so its record
+names the owner as initiator, as the audit trail does for the lane's effects, with
+`lane: "trusted"`. The owner sees the lane's token counts through `/v1/usage` without the
+trusted application's `authorize` callback being asked, as with those audit rows.
 
 ## Budgets
 
 An owner can give each member one token budget. The window is the current UTC
 calendar day of the database clock, from midnight to midnight. A budget counts input
-plus output tokens of the member's `reported` rows recorded in the window. Input
+plus output tokens of the member's `reported` rows recorded in the window, in both
+lanes: a trusted-context conversation's tokens are the member's too. Only the member
+lane is refused, though; the trusted lane has no admission that consults the budget,
+so its requests run whatever the budget says. Budgets count tokens, not money. Input
 includes cache reads and writes, so a long Codex or Claude conversation that rereads
 its context counts that context every time. That context includes the member's
 [instructions](member-instructions.md), project notes and memory, which every launch
@@ -306,10 +447,20 @@ A refused request sends no [outbound webhook](webhooks.md#handoffs-approval-expi
 because it never finishes; a routine's refused firing is sent as
 `routine.firing_settled` with status `failed`.
 
+Pricing adds no audit type. The price table is the operator's deployment configuration,
+like a profile, not an owner's action through the API, and Crew audits neither. Each
+estimate keeps the rates it used on its own append-only row, which is the record an
+owner needs to see why two like segments cost differently. A trusted-context request's
+row is not audited either, as no member-lane row is.
+
 ## Telemetry
 
 The `model.invoke` span gains `usage.state` and, when the segment reported counts,
 `usage.input_tokens` and `usage.output_tokens`. It carries no model name and no cost.
+The turn runner that ends the span exits before the supervisor host prices the segment,
+so an estimate on the span would need a second pricing path outside the writer; the
+ledger and `/v1/usage` are where cost is read. The trusted-context lane emits no spans,
+as before.
 
 ## Upgrade and recovery
 
@@ -357,6 +508,18 @@ Recreate it, restore a backup taken before that build, or run this release's two
 `ALTER TABLE` statements from `031-usage.sql` (the reason CHECK and the type CHECK) on
 it by hand.
 
+Migration 36 adds `estimated_cost_usd`, `estimate_price` and `trusted_request_id` to
+the ledger, all nullable without a default, so no row is rewritten; drops `NOT NULL`
+from `token`; and adds three CHECKs and a foreign key to `trusted_requests`, all
+`NOT VALID`, so no row is scanned. Rows written before it keep no estimate: the price
+table never reaches back. It builds one partial unique index, which reads the ledger
+once and holds no row. Until `migrate()` commits it holds `ACCESS EXCLUSIVE` on
+`usage_ledger` and `SHARE ROW EXCLUSIVE` on `trusted_requests`, taken with `NOWAIT` and
+retried as 25 to 32 do. Only short statements hold either table, and a running trusted
+turn's lease reads `trusted_requests` under `ACCESS SHARE`, which the migration's mode
+allows. It is numbered 36 because three branches not yet merged hold 33 to 35; it may be
+renumbered when they merge, and `migrate()` refuses to apply one of those after 36.
+
 A coordinated restore rewinds the ledger and the budgets with the rest of the
 database, and Crew changes neither when the restored installation resumes:
 
@@ -373,17 +536,23 @@ database, and Crew changes neither when the restored installation resumes:
   inventing one could stop work the owner allowed. So it leaves budgets as restored.
   After a restore, check each member's budget with `GET /v1/usage/budgets/{memberId}`
   and set it again.
+- **Estimates.** An estimate lives on its row, so it is rewound with the row and never
+  recomputed. The price table is a file outside the database, so a restore leaves it as
+  the operator last set it, and rows written after resume use it.
 
 ## Not covered
 
-- Cost for Claude and Codex, and for Pi providers that do not report a billed cost.
-  Crew has no price table and never will estimate one.
-- The trusted-context lane: its requests are neither metered nor checked against a
-  budget.
+- Built-in prices. Without the operator's table, or for a model it does not price, a
+  segment has no cost unless the provider billed one.
+- What a provider actually charged, beyond what Pi passes on: an estimate is the
+  table's rates times the counts (see [Estimated cost](#estimated-cost)).
+- A budget refusal in the trusted-context lane. Its tokens count toward the member's
+  budget, but nothing refuses its requests.
 - Tokens of segments that fail, are cancelled or lose their worker. The budget
   undercounts them.
 - Calls the Claude CLI makes outside the main agent loop, if any.
 - Budgets per owner, money budgets, other windows, and a warning before the limit.
+  Budgets count tokens; an estimate never refuses anything.
 - A Pi child's own admission: children run under their parent's admitted request, so
   the budget is checked once, for the parent. Their segments are metered.
 - Retention or deletion of ledger rows.
@@ -399,6 +568,7 @@ npm run build
 export BIRBCREW_TEST_DATABASE_URL='postgresql://birbcrew:fixture-only@127.0.0.1:55432/integration_test'
 npm run test:usage
 npm run test:usage:capture
+npm run test:trusted
 npm run test:recovery
 ```
 
@@ -413,7 +583,15 @@ call through pi-ai's Chat Completions adapter, including a proposal and its resu
 answer, and `unknown` for the faux fixture. It starts the real supervisor host and
 runners, with no Temporal, and checks one ledger row per launch for all three engines,
 no second row for a repeated start, and the `model.invoke` attributes. It also checks
-the mapping rules: cost kept only when billed, counts that go down or cannot be read.
+the mapping rules: a billed cost kept only when billed, counts that go down or cannot be
+read. It checks the model each engine names: Codex's from its rollout, the last turn's
+only and none when that turn's entries disagree, and Pi's answering model. It prices
+segments with every part of the input, exactly at the largest counts and rates the
+ledger and table accept, and refuses an estimate with no table, no price, no model, a
+billed cost, nothing reported or parts larger than the input; it refuses every kind of
+malformed price table, names no contents in the error, and stops a worker and a
+supervisor host started with one. The real supervisor host, reading the table from its
+environment, writes the Claude segment's estimate and rates.
 
 `usage.test.ts` runs against PostgreSQL. It checks one row per launch, bound to the
 launch's execution, the CHECKs on `reported` and `unknown` rows, a refused row kept as
@@ -440,6 +618,17 @@ and compared clause for clause with 29's and 28's, and no wait for a running tur
 database that ran this feature before 27 to 30, while a database that lacks migration
 22, as releases before 27 left some, still upgrades; every firing reason the dispatcher
 names being one the reason CHECK allows; and a held installation refusing usage writes.
+For cost it checks an estimate written with the rates it used and kept when the price
+rises, a retried write adding nothing under another price, a billed segment never
+estimated, unpriced, unnamed and unknown segments left without one, billed and
+estimated totals kept apart in every route, another owner's estimate in neither
+owner's totals or records, and the CHECKs that keep the two apart. For the trusted lane
+it checks one row per trusted request, none for a stale claim or another owner, the
+`trusted` lane and owner initiator in records and its part of every total, its tokens in
+the member's budget, the row surviving `erase()`, and the lane CHECKs and keys. Migration
+36 is applied to a version-32 database: no rewrite, its locks, NOT VALID constraints, a
+retry instead of a queue while a ledger write holds the table, no wait for a running
+trusted turn's lease, and earlier rows left unestimated.
 `audit.test.ts` runs every audit filter over two owners' usage rows in JSON and CSV.
 
 `recovery.test.ts` (it needs PostgreSQL 17 `pg_dump`, as the other recovery tests do)
@@ -449,11 +638,20 @@ more usage and a tighter limit on the source the restored installation has the e
 limit and the earlier total, unchanged by resume, and admits the request the source
 refused.
 
-No service proof checks usage. The service proofs with Temporal run the same supervisor
-host, which records a row for each segment, but none reads the ledger. So these are not
-exercised end to end: a refusal by the admission activity inside a real workflow (the
-mapping is tested with a constructed failure), the workflow closing that conversation,
+`trusted-runner.test.ts` (`npm run test:trusted`) runs `runTrustedRequest` with the real
+Pi, Claude and Codex SDKs against fixtures that report usage, through a tool round trip
+and a context rotation, and checks one priced row per trusted request with the counts
+of every model call it made.
+
+`npm run test:api:service` (the integration API workflow's `actual-service` job, with
+Temporal) gives its worker a price table and reads `/v1/usage` back over HTTP: each of
+six Claude and six Codex turns carries its estimate, the Codex model comes from its
+rollout, Pi's fixture reports nothing, and the owner's billed and estimated totals stay
+apart. The other service proofs run the same supervisor host but do not read the ledger.
+So these are not exercised end to end: a refusal by the admission activity inside a real
+workflow (the mapping is tested with a constructed failure), the workflow closing that conversation,
 a handoff's reserved request metered through Temporal, and a gateway's dispatcher firing
 a routine on Temporal. A Pi child's segment is recorded by the same
 insert with its `childId`, but no test runs a delegation. Real providers were not
-called, so the field mappings rest on the SDK types and the fixtures.
+called, so the field mappings and model names rest on the SDK types and the fixtures,
+and no estimate has been compared with a provider's bill.

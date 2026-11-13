@@ -69,6 +69,14 @@ The runner does not forward speculative text to observers: it buffers output,
 rechecks authorization and generation at commit, then returns only a request ID.
 `result()` checks current output authorization again before returning a reply.
 
+The runner meters each request in the [usage ledger](usage-metering.md#the-trusted-context-lane):
+one row of token counts and the model, written after the native turn returns and before
+the reply commits, priced from the table named by `BIRBCREW_USAGE_PRICES_PATH` in the
+backend's process unless a table is passed as `runTrustedRequest`'s fifth argument. The
+row holds no context, prompt, reply or tool data. The owner reads it through `/v1/usage`
+as `lane: "trusted"`, and its tokens count toward the member's daily budget, which does
+not refuse trusted requests.
+
 Each registered tool supplies:
 
 - `name`, `description`, `inputSchema`, `kind: "read" | "effect"`;
@@ -173,7 +181,8 @@ To erase: invalidate first, stop the worker/native processes, and use
 thread IDs. `erase(key)` requires the drain lease and clears database snapshot,
 checkpoint, prompt, reply, tool-result and legacy note contents. It leaves a
 non-reusable deleted session and minimal request/receipt digests as replay
-fences. A late callback cannot resurrect erased results. Separately remove the
+fences. It leaves the requests' usage ledger rows, which hold counts and a model
+name. A late callback cannot resurrect erased results. Separately remove the
 listed native directories from the configured private volume after confirming
 process termination. Erasure of backups, WAL, logs and provider-held data follows
 the deployment's retention policy; a SQL update is not physical media erasure.
