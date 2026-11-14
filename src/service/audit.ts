@@ -114,8 +114,10 @@ export const auditEvents = {
   "approval.requested": { actor: "system", key: "((payload->>'approvalId')) WHERE event_type = 'approval.requested'",
     payload: z.strictObject({ approvalId: uuid, invocationId: uuid, toolName: toolNameSchema, argumentDigest: sha256 }) },
   // Webhook endpoints are the owner's, not a member's. The host only: a URL can carry a credential.
+  // format: webhookFormats in webhooks.ts. Rows written before 034-notification-formats.sql have none; those endpoints are `crew`.
   "webhook.created": { actor: "owner", member: false, key: webhookFact, payload: z.strictObject({
     webhookId: uuid, revision: z.literal(1), host: webhookHost, kinds: z.array(z.string().regex(/^[a-z]+\.[a-z_]+$/)).min(1).max(4),
+    format: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/),
   }) },
   "webhook.enabled": { actor: "owner", member: false, key: webhookFact, payload: z.strictObject(webhookChange) },
   // The owner disables an endpoint; Crew does after its tenth failed delivery in a row, and when a restore resumes.
