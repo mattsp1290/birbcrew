@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import test from "node:test";
 import { CrewClient, CrewHttpError, CrewProtocolError, CrewTransportError, CrewUnknownOutcomeError } from "@birbcrew/client";
-import { requestInitiator, requestReceiptSchema, requestReceiptResponseSchema } from "@birbcrew/client/contract";
+import { requestInitiator, serverRequestReceiptSchema, requestReceiptResponseSchema } from "@birbcrew/client/contract";
 
 const conversationId = randomUUID(), requestId = randomUUID(), memberId = randomUUID();
 const key = { conversationId, requestId };
@@ -135,7 +135,7 @@ test("receipt validation preserves independent cancellation facts and historical
   for (const status of ["accepted", "uncertain", "completed", "cancelled"] as const) {
     const value = { ...receipt, status, result: { text: "historical result" }, initiator: { kind: "handoff", id: randomUUID() },
       cancellation: { receiptId: randomUUID(), delivery: "pending", nativeTermination: "confirmed", effects: "not_assessed" } };
-    assert.deepEqual(requestReceiptSchema.parse(value), value);
+    assert.deepEqual(serverRequestReceiptSchema.parse(value), value);
   }
 });
 
@@ -167,7 +167,7 @@ test("response initiators accept future kinds without widening accepted authorin
     assert.deepEqual((await s.client.requestStatus(key)).initiator, future);
     assert.deepEqual((await s.client.cancel(key)).initiator, future);
     assert.equal(requestInitiator.safeParse(future).success, false);
-    assert.equal(requestReceiptSchema.safeParse({ ...receipt, initiator: future }).success, false);
+    assert.equal(serverRequestReceiptSchema.safeParse({ ...receipt, initiator: future }).success, false);
     for (const kind of ["routine", "handoff"]) {
       assert.equal(requestReceiptResponseSchema.safeParse({ ...receipt, initiator: { kind, id: "invalid" } }).success, false);
       assert.equal(requestReceiptResponseSchema.safeParse({ ...receipt, initiator: { kind } }).success, false);

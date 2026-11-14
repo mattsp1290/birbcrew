@@ -26,7 +26,7 @@ Every method makes one HTTP attempt. There is no polling, retry, provisioning or
 
 `CrewHttpError` exposes HTTP status and a bounded public error code. `CrewProtocolError` reports malformed successful reads. Responses are limited to 8 MiB, error bodies to 16 KiB. Unknown safe error identifiers are retained; malformed identifiers are not reflected into error messages. `health()` returns the readiness report for both HTTP 200 and the documented HTTP 503 dependency failure.
 
-`RequestReceipt` at the root import is the observed response type, also exported as `ObservedRequestReceipt`. `ObservedRequestInitiator` accepts additive fields and future kinds advertised by capabilities. Known routine and handoff ids remain UUIDs. The `/contract` entry keeps `requestInitiator`, `requestReceiptSchema` and `RequestReceipt` strict for server validation and command authoring. Observed initiators do not authorize work.
+`RequestReceipt` has the same observed response type at the root and `/contract` entry points. `ServerRequestReceipt` and `serverRequestReceiptSchema` enforce the server's accepted initiator kinds. Observed initiators accept additive fields and future kinds advertised by capabilities; known routine and handoff ids remain UUIDs. Observed initiators do not authorize work.
 
 Receipt status, cancellation delivery, native termination and effects are independent facts. Only `completed` requires `result.text`. Historical noncompleted receipts may carry a result. `uncertain` is a server receipt state, distinct from an unknown HTTP command outcome.
 

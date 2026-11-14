@@ -41,6 +41,10 @@ for (const [label, runtime] of [["node22", node22], ["node24", node24]]) {
     await copyFile(join(root, "packages/client/openapi.json"), join(consumer, "openapi.json"));
     await writeFile(join(evidence, "openapi-validation.log"), run(runtime, ["--input-type=module", "-e", "import SwaggerParser from '@apidevtools/swagger-parser'; await SwaggerParser.validate('openapi.json'); console.log('OpenAPI 3.1 validates');"], consumer));
     await writeFile(join(consumer, "browser.ts"), `import {CrewClient, type RequestReceipt} from '@birbcrew/client';
+import type {RequestReceipt as ContractReceipt, ServerRequestReceipt} from '@birbcrew/client/contract';
+export const fromContract = (receipt: ContractReceipt): RequestReceipt => receipt;
+export const toContract = (receipt: RequestReceipt): ContractReceipt => receipt;
+export const fromServer = (receipt: ServerRequestReceipt): RequestReceipt => receipt;
 const client = new CrewClient({baseUrl:'https://crew.example', token:'token'});
 export const read = () => client.listMembers();
 export function result(receipt: RequestReceipt): string | undefined { if (receipt.status === 'completed') return receipt.result.text; }
