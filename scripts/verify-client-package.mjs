@@ -28,13 +28,13 @@ for (const [label, runtime] of [["node22", node22], ["node24", node24]]) {
   const consumer = await mkdtemp(join(tmpdir(), `crew-client-${label}-`));
   await writeFile(join(consumer, "package.json"), JSON.stringify({ private: true, type: "module", dependencies: { "@birbcrew/client": tarball } }));
   run(npm, ["install", "--ignore-scripts", "--omit=optional", "--no-audit", "--no-fund"], consumer);
-  assert.equal(await readFile(join(consumer, "node_modules/@birbcrew/client/LICENSE"), "utf8"), await readFile(join(root, "LICENSE"), "utf8"));
+  assert.equal(await readFile(join(consumer, "node_modules/@birbcrew/client/LICENSE"), "utf8"), await readFile(join(root, "packages/client/LICENSE"), "utf8"));
   const installed = JSON.parse(await readFile(join(consumer, "package-lock.json"), "utf8"));
   assert.deepEqual(Object.keys(installed.packages).filter(path => path.startsWith("node_modules/")).sort(), ["node_modules/@birbcrew/client", "node_modules/zod"]);
   await copyFile(join(root, "tests/client/client.test.mts"), join(consumer, "client.test.mts"));
   const output = run(runtime, ["--test", "client.test.mts"], consumer);
   await writeFile(join(evidence, `${label}-transport.log`), output);
-  run(runtime, ["--input-type=module", "-e", `import assert from 'node:assert/strict'; import {CrewClient} from '@birbcrew/client'; assert.equal(typeof CrewClient,'function'); for(const p of ['@ag-ui/client','@ag-ui/core','pg','@temporalio/client','@openai/codex-sdk','@anthropic-ai/claude-agent-sdk','@mattsp1290/switchboard']) assert.throws(()=>import.meta.resolve(p)); assert.throws(()=>import.meta.resolve('@birbcrew/client/dist/index.js'), {code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});`], consumer);
+  run(runtime, ["--input-type=module", "-e", `import assert from 'node:assert/strict'; import {CrewClient} from '@birbcrew/client'; assert.equal(typeof CrewClient,'function'); assert.ok(import.meta.resolve('@birbcrew/client/openapi.json').endsWith('/openapi.json')); for(const p of ['@ag-ui/client','@ag-ui/core','pg','@temporalio/client','@openai/codex-sdk','@anthropic-ai/claude-agent-sdk','@mattsp1290/switchboard']) assert.throws(()=>import.meta.resolve(p)); assert.throws(()=>import.meta.resolve('@birbcrew/client/dist/index.js'), {code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});`], consumer);
   await writeFile(join(evidence, `${label}-tree.json`), run(npm, ["ls", "--all", "--json"], consumer));
   if (label === "node22") {
     run(npm, ["install", "--save-dev", "--ignore-scripts", "--no-audit", "--no-fund", "typescript@5.9.3", "esbuild@0.25.12", "@apidevtools/swagger-parser@13.1.0"], consumer);

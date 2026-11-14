@@ -22,7 +22,7 @@ import { PackApi, packListParameterNames } from "./instruction-packs.ts";
 import { MemberStoreError, turnKey } from "./domain.ts";
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
 import { MemberStore } from "./store.ts";
-import { IntegrationApi, integrationCapabilities } from "./integration-api.ts";
+import { IntegrationApi, integrationCapabilities, ReceiptContractError } from "./integration-api.ts";
 import { firingParameterNames, RoutineApi, RoutineDispatcher, routineListParameterNames, type Clock } from "./routines.ts";
 import { TemporalSettingsError, temporalConnectionOptions, temporalSettings } from "./temporal-config.ts";
 import { UsageApi, usageParameterNames } from "./usage.ts";
@@ -418,6 +418,7 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
     void route(request, response).catch((error: unknown) => {
       if (response.destroyed || response.headersSent) return response.end();
       if (error instanceof HttpError) return json(response, error.status, { error: error.message });
+      if (error instanceof ReceiptContractError) return json(response, 500, { error: "retry_same_request" });
       if (error instanceof z.ZodError) return json(response, 400, { error: "invalid_input" });
       if (error instanceof MemberStoreError) return json(response, error.code === "not_found" ? 404 : 409, { error: error.code });
       if (error instanceof WorkflowUpdateFailedError) return json(response, 409, { error: "update_rejected" });

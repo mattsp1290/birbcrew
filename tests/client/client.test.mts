@@ -3,8 +3,8 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import test from "node:test";
-import { CrewClient, CrewHttpError, CrewProtocolError, CrewUnknownOutcomeError } from "@birbcrew/client";
-import { requestReceiptSchema } from "@birbcrew/client/contract";
+import { CrewClient, CrewHttpError, CrewProtocolError, CrewTransportError, CrewUnknownOutcomeError } from "@birbcrew/client";
+import { requestInitiator, requestReceiptSchema, requestReceiptResponseSchema } from "@birbcrew/client/contract";
 
 const conversationId = randomUUID(), requestId = randomUUID(), memberId = randomUUID();
 const key = { conversationId, requestId };
@@ -58,9 +58,9 @@ test("all domain methods send one authenticated request with exact text", async 
 test("invalid UUID, text, byte bounds and pre-aborted calls dispatch nothing", async () => {
   const s = await serve((_, response) => json(response, receipt));
   try {
-    for (const text of ["", "\0", "\ud800", "é".repeat(8193)]) assert.throws(() => s.client.submit({ ...key, text }));
-    assert.throws(() => s.client.submit({ ...key, conversationId: "../evil", text: "x" }));
-    assert.throws(() => s.client.createMember({ requestId, engine: "pi", profile: "p", instructions: "\r" }));
+    for (const text of ["", "\0", "\ud800", "é".repeat(8193)]) await assert.rejects(s.client.submit({ ...key, text }));
+    await assert.rejects(s.client.submit({ ...key, conversationId: "../evil", text: "x" }));
+    await assert.rejects(s.client.createMember({ requestId, engine: "pi", profile: "p", instructions: "\r" }));
     await assert.rejects(s.client.submit({ ...key, text: "x" }, { signal: AbortSignal.abort("stopped") }), error => error === "stopped");
     assert.equal(s.seen.length, 0);
   } finally { await s.close(); }
@@ -149,8 +149,66 @@ test("instruction packs preserve server ordering and reject duplicate normalized
     assert.deepEqual(JSON.parse(s.seen[0].body).instructionPacks, instructionPacks);
     assert.deepEqual((await s.client.listMembers()).members[0].instructionPacks, instructionPacks);
     for (const invalid of [[], [instructionPacks[0], instructionPacks[0].toUpperCase()], Array.from({ length: 9 }, () => randomUUID())]) {
-      assert.throws(() => s.client.createMember({ requestId, engine: "claude", profile: "test", instructionPacks: invalid }));
+      await assert.rejects(s.client.createMember({ requestId, engine: "claude", profile: "test", instructionPacks: invalid }));
     }
     assert.equal(s.seen.length, 2);
   } finally { await s.close(); }
+});
+
+
+test("response initiators accept future kinds without widening accepted authoring", async () => {
+  const future = { kind: "future", id: "future-id", version: 2 };
+  const s = await serve((request, response) => request.url === "/v1/capabilities"
+    ? json(response, { apiVersion: "1", requestContract: "sql-admission-temporal-queue-v1", observation: { protocol: "AG-UI", mode: "snapshot-and-bounded-tail" }, initiatorKinds: ["owner", "future"] })
+    : json(response, { ...receipt, initiator: future }, request.method === "POST" ? 202 : 200));
+  try {
+    assert.deepEqual((await s.client.capabilities()).initiatorKinds, ["owner", "future"]);
+    assert.deepEqual((await s.client.submit({ ...key, text: "exact" })).initiator, future);
+    assert.deepEqual((await s.client.requestStatus(key)).initiator, future);
+    assert.deepEqual((await s.client.cancel(key)).initiator, future);
+    assert.equal(requestInitiator.safeParse(future).success, false);
+    assert.equal(requestReceiptSchema.safeParse({ ...receipt, initiator: future }).success, false);
+    for (const kind of ["routine", "handoff"]) {
+      assert.equal(requestReceiptResponseSchema.safeParse({ ...receipt, initiator: { kind, id: "invalid" } }).success, false);
+      assert.equal(requestReceiptResponseSchema.safeParse({ ...receipt, initiator: { kind } }).success, false);
+    }
+    assert.equal(requestReceiptResponseSchema.safeParse({ ...receipt, initiator: { kind: "owner", futureField: true } }).success, true);
+  } finally { await s.close(); }
+});
+
+test("reads preserve status on malformed errors and classify health faults", async () => {
+  for (const body of ["not JSON", "x".repeat(16_385)]) {
+    const s = await serve((_, response) => { response.statusCode = 502; response.end(body); });
+    try { await assert.rejects(s.client.requestStatus(key), error => error instanceof CrewHttpError && error.status === 502 && error.code === "invalid_error_response"); }
+    finally { await s.close(); }
+  }
+  const s = await serve((_, response) => json(response, { error: "retry_same_request" }, 503));
+  try { await assert.rejects(s.client.health(), error => error instanceof CrewHttpError && error.status === 503 && error.code === "retry_same_request"); }
+  finally { await s.close(); }
+});
+
+test("read aborts preserve the reason during fetch and body consumption", async () => {
+  for (const duringBody of [false, true]) {
+    const abort = new AbortController(), reason = new Error("navigation");
+    const s = await serve((_, response) => {
+      if (duringBody) { response.writeHead(200); response.write('{"apiVersion":'); }
+      setTimeout(() => abort.abort(reason), 10);
+    });
+    try { await assert.rejects(s.client.requestStatus(key, { signal: abort.signal }), error => error === reason); }
+    finally { await s.close(); }
+  }
+  const s = await serve(request => request.socket.destroy());
+  try { await assert.rejects(s.client.requestStatus(key), CrewTransportError); }
+  finally { await s.close(); }
+});
+
+test("bodyless reads omit JSON content type and unexpected successes release the body", async () => {
+  let cancelled = false, contentType: string | null = "unseen";
+  const client = new CrewClient({ baseUrl: "https://crew.example", token: "fixture", fetch: async (_, init) => {
+    contentType = new Headers(init?.headers).get("Content-Type");
+    return new Response(new ReadableStream({ cancel() { cancelled = true; } }), { status: 201 });
+  } });
+  await assert.rejects(client.requestStatus(key), CrewProtocolError);
+  assert.equal(contentType, null);
+  assert.equal(cancelled, true);
 });

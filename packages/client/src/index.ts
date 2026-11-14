@@ -2,7 +2,7 @@ import { z } from "zod";
 import { connection, type ConnectionOptions } from "./config.js";
 import { conversationIdentitySchema, createMemberSchema, decideSchema, errorSchema, listMembersSchema, openConversationSchema,
   requestIdentitySchema, routes, submitRequestSchema, type CreateMember, type Decide, type OpenConversation, type RequestIdentity, type SubmitRequest } from "./contract.js";
-export type { Engine, CreateMember, OpenConversation, SubmitRequest, RequestIdentity, RequestInitiator, RequestReceipt, Member, MemberPage, Decide, ConversationSnapshot, Capabilities, Health } from "./contract.js";
+export type { Engine, CreateMember, OpenConversation, SubmitRequest, RequestIdentity, RequestInitiator, ObservedRequestInitiator, ObservedRequestReceipt, ObservedRequestReceipt as RequestReceipt, Member, MemberPage, Decide, ConversationSnapshot, Capabilities, Health } from "./contract.js";
 export interface CrewClientOptions extends ConnectionOptions { readonly fetch?: typeof globalThis.fetch }
 export interface CallOptions { readonly signal?: AbortSignal }
 export type CommandIdentity =
@@ -14,6 +14,9 @@ export class CrewHttpError extends Error {
   readonly status: number;
   readonly code: string;
   constructor(status: number, code: string) { super(`Crew HTTP ${status}: ${code}`); this.name = "CrewHttpError"; this.status = status; this.code = code; }
+}
+export class CrewTransportError extends Error {
+  constructor() { super("Crew transport failed"); this.name = "CrewTransportError"; }
 }
 export class CrewProtocolError extends Error {
   constructor() { super("Crew returned an invalid or oversized response"); this.name = "CrewProtocolError"; }
@@ -54,40 +57,55 @@ export class CrewClient {
     let response: Response;
     try {
       response = await this.#fetch(this.#config.baseUrl + path + (input.query ? `?${input.query}` : ""), {
-        method: route.method, headers: { ...this.#config.headers, "Content-Type": "application/json", Accept: "application/json" },
+        method: route.method, headers: { ...this.#config.headers, ...(input.body === undefined ? {} : { "Content-Type": "application/json" }), Accept: "application/json" },
         ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }), signal: input.signal, redirect: "error",
       });
     } catch {
-      const failure = new Error("Crew transport failed");
+      const failure = new CrewTransportError();
       if (input.command) throw new CrewUnknownOutcomeError(input.command, failure);
+      input.signal?.throwIfAborted();
       throw failure;
     }
     try {
       if (!response.ok && !(route.path === routes.health.path && response.status === 503)) {
-        const parsed = errorSchema.safeParse(await boundedJson(response, 16_384));
+        const parsed = errorSchema.safeParse(await boundedJson(response, 16_384).catch(() => undefined));
         const code = parsed.success ? parsed.data.error : "invalid_error_response";
         const failure = new CrewHttpError(response.status, code);
         if (input.command && (code === "retry_same_request" || response.status >= 500 || !parsed.success)) throw new CrewUnknownOutcomeError(input.command, failure);
         throw failure;
       }
-      if (response.status !== route.status && !(route.path === routes.health.path && response.status === 503)) throw new CrewProtocolError();
-      const parsed = route.response.safeParse(await boundedJson(response, 8 * 1024 * 1024));
-      if (!parsed.success) throw new CrewProtocolError();
+      if (response.status !== route.status && !(route.path === routes.health.path && response.status === 503)) {
+        await response.body?.cancel().catch(() => {});
+        throw new CrewProtocolError();
+      }
+      const value = await boundedJson(response, 8 * 1024 * 1024).catch(error => {
+        if (route.path === routes.health.path && response.status === 503) throw new CrewHttpError(503, "invalid_error_response");
+        throw error;
+      });
+      const parsed = route.response.safeParse(value);
+      if (!parsed.success) {
+        if (route.path === routes.health.path && response.status === 503) {
+          const failure = errorSchema.safeParse(value);
+          throw new CrewHttpError(503, failure.success ? failure.data.error : "invalid_error_response");
+        }
+        throw new CrewProtocolError();
+      }
       return parsed.data;
     } catch (error) {
+      if (!input.command) input.signal?.throwIfAborted();
       if (input.command && !(error instanceof CrewHttpError) && !(error instanceof CrewUnknownOutcomeError)) throw new CrewUnknownOutcomeError(input.command, new CrewProtocolError());
       throw error;
     }
   }
-  capabilities(options: CallOptions = {}) { return this.#call(routes.capabilities, options); }
-  health(options: CallOptions = {}) { return this.#call(routes.health, options); }
-  listMembers(input: z.input<typeof listMembersSchema> = {}, options: CallOptions = {}) {
+  async capabilities(options: CallOptions = {}) { return this.#call(routes.capabilities, options); }
+  async health(options: CallOptions = {}) { return this.#call(routes.health, options); }
+  async listMembers(input: z.input<typeof listMembersSchema> = {}, options: CallOptions = {}) {
     const value = listMembersSchema.parse(input), query = new URLSearchParams();
     if (value.limit !== undefined) query.set("limit", String(value.limit));
     if (value.after !== undefined) query.set("after", value.after);
     return this.#call(routes.listMembers, { ...options, query: query.toString() });
   }
-  createMember(input: CreateMember, options: CallOptions = {}) {
+  async createMember(input: CreateMember, options: CallOptions = {}) {
     const body = createMemberSchema.parse(input);
     return this.#call(routes.createMember, { ...options, body, command: { kind: "member", requestId: body.requestId } });
   }
@@ -112,12 +130,12 @@ export class CrewClient {
     }
     return value;
   }
-  submit(input: SubmitRequest, options: CallOptions = {}) {
+  async submit(input: SubmitRequest, options: CallOptions = {}) {
     const { conversationId, ...body } = submitRequestSchema.parse(input);
     return this.#receipt(routes.submit, { conversationId, requestId: body.requestId }, options, body);
   }
-  requestStatus(input: RequestIdentity, options: CallOptions = {}) { return this.#receipt(routes.requestStatus, requestIdentitySchema.parse({ conversationId: input.conversationId, requestId: input.requestId }), options); }
-  cancel(input: RequestIdentity, options: CallOptions = {}) { return this.#receipt(routes.cancel, requestIdentitySchema.parse({ conversationId: input.conversationId, requestId: input.requestId }), options, {}); }
+  async requestStatus(input: RequestIdentity, options: CallOptions = {}) { return this.#receipt(routes.requestStatus, requestIdentitySchema.parse({ conversationId: input.conversationId, requestId: input.requestId }), options); }
+  async cancel(input: RequestIdentity, options: CallOptions = {}) { return this.#receipt(routes.cancel, requestIdentitySchema.parse({ conversationId: input.conversationId, requestId: input.requestId }), options, {}); }
   async decide(input: Decide, options: CallOptions = {}) {
     const { conversationId, ...body } = decideSchema.parse(input);
     const command = { kind: "decision", conversationId, requestId: body.requestId, approvalId: body.approvalId } as const;

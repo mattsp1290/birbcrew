@@ -12,7 +12,7 @@
   ],
   "components": {
     "schemas": {
-      "Schema15___schema0": {
+      "Schema16___schema0": {
         "anyOf": [
           {
             "type": "string"
@@ -29,7 +29,7 @@
           {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Schema15___schema0"
+              "$ref": "#/components/schemas/Schema16___schema0"
             }
           },
           {
@@ -38,12 +38,12 @@
               "type": "string"
             },
             "additionalProperties": {
-              "$ref": "#/components/schemas/Schema15___schema0"
+              "$ref": "#/components/schemas/Schema16___schema0"
             }
           }
         ]
       },
-      "Schema15___schema1": {
+      "Schema16___schema1": {
         "anyOf": [
           {
             "type": "string"
@@ -60,7 +60,7 @@
           {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Schema15___schema1"
+              "$ref": "#/components/schemas/Schema16___schema1"
             }
           },
           {
@@ -69,12 +69,12 @@
               "type": "string"
             },
             "additionalProperties": {
-              "$ref": "#/components/schemas/Schema15___schema1"
+              "$ref": "#/components/schemas/Schema16___schema1"
             }
           }
         ]
       },
-      "Schema15___schema2": {
+      "Schema16___schema2": {
         "anyOf": [
           {
             "type": "string"
@@ -91,7 +91,7 @@
           {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Schema15___schema2"
+              "$ref": "#/components/schemas/Schema16___schema2"
             }
           },
           {
@@ -100,12 +100,12 @@
               "type": "string"
             },
             "additionalProperties": {
-              "$ref": "#/components/schemas/Schema15___schema2"
+              "$ref": "#/components/schemas/Schema16___schema2"
             }
           }
         ]
       },
-      "Schema15___schema3": {
+      "Schema16___schema3": {
         "anyOf": [
           {
             "type": "string"
@@ -122,7 +122,7 @@
           {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Schema15___schema3"
+              "$ref": "#/components/schemas/Schema16___schema3"
             }
           },
           {
@@ -131,12 +131,12 @@
               "type": "string"
             },
             "additionalProperties": {
-              "$ref": "#/components/schemas/Schema15___schema3"
+              "$ref": "#/components/schemas/Schema16___schema3"
             }
           }
         ]
       },
-      "Schema17___schema0": {
+      "Schema18___schema0": {
         "anyOf": [
           {
             "type": "string"
@@ -153,7 +153,7 @@
           {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Schema17___schema0"
+              "$ref": "#/components/schemas/Schema18___schema0"
             }
           },
           {
@@ -162,12 +162,12 @@
               "type": "string"
             },
             "additionalProperties": {
-              "$ref": "#/components/schemas/Schema17___schema0"
+              "$ref": "#/components/schemas/Schema18___schema0"
             }
           }
         ]
       },
-      "Schema17___schema1": {
+      "Schema18___schema1": {
         "anyOf": [
           {
             "type": "string"
@@ -184,7 +184,7 @@
           {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Schema17___schema1"
+              "$ref": "#/components/schemas/Schema18___schema1"
             }
           },
           {
@@ -193,12 +193,12 @@
               "type": "string"
             },
             "additionalProperties": {
-              "$ref": "#/components/schemas/Schema17___schema1"
+              "$ref": "#/components/schemas/Schema18___schema1"
             }
           }
         ]
       },
-      "Schema17___schema2": {
+      "Schema18___schema2": {
         "anyOf": [
           {
             "type": "string"
@@ -215,7 +215,7 @@
           {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Schema17___schema2"
+              "$ref": "#/components/schemas/Schema18___schema2"
             }
           },
           {
@@ -224,12 +224,12 @@
               "type": "string"
             },
             "additionalProperties": {
-              "$ref": "#/components/schemas/Schema17___schema2"
+              "$ref": "#/components/schemas/Schema18___schema2"
             }
           }
         ]
       },
-      "Schema17___schema3": {
+      "Schema18___schema3": {
         "anyOf": [
           {
             "type": "string"
@@ -246,7 +246,7 @@
           {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Schema17___schema3"
+              "$ref": "#/components/schemas/Schema18___schema3"
             }
           },
           {
@@ -255,7 +255,7 @@
               "type": "string"
             },
             "additionalProperties": {
-              "$ref": "#/components/schemas/Schema17___schema3"
+              "$ref": "#/components/schemas/Schema18___schema3"
             }
           }
         ]
@@ -311,11 +311,7 @@
                       "type": "array",
                       "items": {
                         "type": "string",
-                        "enum": [
-                          "owner",
-                          "routine",
-                          "handoff"
-                        ]
+                        "minLength": 1
                       }
                     }
                   },
@@ -346,7 +342,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -367,7 +364,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -388,7 +386,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -409,7 +408,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -430,7 +430,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -451,7 +452,30 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unavailable. retry_same_request means the command outcome is unknown. Reconcile the original identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_]+$"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -472,7 +496,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -532,7 +557,8 @@
                           "required": [
                             "status",
                             "schemaVersion"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "temporal": {
                           "type": "object",
@@ -547,20 +573,23 @@
                           },
                           "required": [
                             "status"
-                          ]
+                          ],
+                          "additionalProperties": false
                         }
                       },
                       "required": [
                         "database",
                         "temporal"
-                      ]
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
                     "apiVersion",
                     "status",
                     "dependencies"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -581,7 +610,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -602,7 +632,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -623,7 +654,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -644,7 +676,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -665,7 +698,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -686,7 +720,30 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unavailable. retry_same_request means the command outcome is unknown. Reconcile the original identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_]+$"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -738,7 +795,8 @@
                           "required": [
                             "status",
                             "schemaVersion"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "temporal": {
                           "type": "object",
@@ -753,20 +811,23 @@
                           },
                           "required": [
                             "status"
-                          ]
+                          ],
+                          "additionalProperties": false
                         }
                       },
                       "required": [
                         "database",
                         "temporal"
-                      ]
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
                     "apiVersion",
                     "status",
                     "dependencies"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -845,7 +906,8 @@
                             "required": [
                               "bytes",
                               "digest"
-                            ]
+                            ],
+                            "additionalProperties": false
                           },
                           "instructionPacks": {
                             "minItems": 1,
@@ -864,7 +926,8 @@
                           "memberId",
                           "engine",
                           "profile"
-                        ]
+                        ],
+                        "additionalProperties": false
                       }
                     },
                     "next": {
@@ -882,7 +945,8 @@
                     "apiVersion",
                     "members",
                     "next"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -903,7 +967,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -924,7 +989,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -945,7 +1011,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -966,7 +1033,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -987,7 +1055,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1008,7 +1077,30 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unavailable. retry_same_request means the command outcome is unknown. Reconcile the original identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_]+$"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1029,7 +1121,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1079,7 +1172,8 @@
                       "required": [
                         "bytes",
                         "digest"
-                      ]
+                      ],
+                      "additionalProperties": false
                     },
                     "instructionPacks": {
                       "minItems": 1,
@@ -1098,7 +1192,8 @@
                     "memberId",
                     "engine",
                     "profile"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1119,7 +1214,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1140,7 +1236,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1161,7 +1258,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1182,7 +1280,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1203,7 +1302,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1224,7 +1324,30 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unavailable. retry_same_request means the command outcome is unknown. Reconcile the original identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_]+$"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1245,7 +1368,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1274,7 +1398,8 @@
                   "profile": {
                     "type": "string",
                     "minLength": 1,
-                    "x-maxUtf8Bytes": 128
+                    "x-maxUtf8Bytes": 128,
+                    "x-forbidden": "NUL; unpaired surrogates"
                   },
                   "instructions": {
                     "type": "string",
@@ -1366,12 +1491,13 @@
                         "engine",
                         "profile",
                         "phase"
-                      ]
+                      ],
+                      "additionalProperties": false
                     },
                     "messages": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/Schema15___schema0"
+                        "$ref": "#/components/schemas/Schema16___schema0"
                       }
                     },
                     "openTools": {
@@ -1380,11 +1506,11 @@
                         "type": "string"
                       },
                       "additionalProperties": {
-                        "$ref": "#/components/schemas/Schema15___schema1"
+                        "$ref": "#/components/schemas/Schema16___schema1"
                       }
                     },
                     "openText": {
-                      "$ref": "#/components/schemas/Schema15___schema2"
+                      "$ref": "#/components/schemas/Schema16___schema2"
                     },
                     "childText": {
                       "type": "object",
@@ -1392,7 +1518,7 @@
                         "type": "string"
                       },
                       "additionalProperties": {
-                        "$ref": "#/components/schemas/Schema15___schema3"
+                        "$ref": "#/components/schemas/Schema16___schema3"
                       }
                     }
                   },
@@ -1403,7 +1529,8 @@
                     "openTools",
                     "openText",
                     "childText"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1424,7 +1551,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1445,7 +1573,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1466,7 +1595,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1487,7 +1617,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1508,7 +1639,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1529,7 +1661,30 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unavailable. retry_same_request means the command outcome is unknown. Reconcile the original identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_]+$"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1550,7 +1705,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1654,12 +1810,13 @@
                         "engine",
                         "profile",
                         "phase"
-                      ]
+                      ],
+                      "additionalProperties": false
                     },
                     "messages": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/Schema17___schema0"
+                        "$ref": "#/components/schemas/Schema18___schema0"
                       }
                     },
                     "openTools": {
@@ -1668,11 +1825,11 @@
                         "type": "string"
                       },
                       "additionalProperties": {
-                        "$ref": "#/components/schemas/Schema17___schema1"
+                        "$ref": "#/components/schemas/Schema18___schema1"
                       }
                     },
                     "openText": {
-                      "$ref": "#/components/schemas/Schema17___schema2"
+                      "$ref": "#/components/schemas/Schema18___schema2"
                     },
                     "childText": {
                       "type": "object",
@@ -1680,7 +1837,7 @@
                         "type": "string"
                       },
                       "additionalProperties": {
-                        "$ref": "#/components/schemas/Schema17___schema3"
+                        "$ref": "#/components/schemas/Schema18___schema3"
                       }
                     }
                   },
@@ -1691,7 +1848,8 @@
                     "openTools",
                     "openText",
                     "childText"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1712,7 +1870,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1733,7 +1892,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1754,7 +1914,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1775,7 +1936,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1796,7 +1958,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1817,7 +1980,30 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unavailable. retry_same_request means the command outcome is unknown. Reconcile the original identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_]+$"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1838,7 +2024,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1894,10 +2081,11 @@
                           },
                           "required": [
                             "boundary"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "initiator": {
-                          "oneOf": [
+                          "anyOf": [
                             {
                               "type": "object",
                               "properties": {
@@ -1909,7 +2097,7 @@
                               "required": [
                                 "kind"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
                             },
                             {
                               "type": "object",
@@ -1928,7 +2116,7 @@
                                 "kind",
                                 "id"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
                             },
                             {
                               "type": "object",
@@ -1947,7 +2135,30 @@
                                 "kind",
                                 "id"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "not": {
+                                    "enum": [
+                                      "owner",
+                                      "routine",
+                                      "handoff"
+                                    ]
+                                  }
+                                },
+                                "id": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": {}
                             }
                           ]
                         },
@@ -1960,7 +2171,8 @@
                           },
                           "required": [
                             "text"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "reason": {
                           "type": "string"
@@ -1997,7 +2209,8 @@
                             "delivery",
                             "nativeTermination",
                             "effects"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "approvalDeadlineSeconds": {
                           "type": "integer",
@@ -2027,7 +2240,8 @@
                             "approvalId",
                             "expiresAt",
                             "expiredAt"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "status": {
                           "type": "string",
@@ -2041,7 +2255,8 @@
                         "acceptance",
                         "result",
                         "status"
-                      ]
+                      ],
+                      "additionalProperties": false
                     },
                     {
                       "type": "object",
@@ -2070,10 +2285,11 @@
                           },
                           "required": [
                             "boundary"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "initiator": {
-                          "oneOf": [
+                          "anyOf": [
                             {
                               "type": "object",
                               "properties": {
@@ -2085,7 +2301,7 @@
                               "required": [
                                 "kind"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
                             },
                             {
                               "type": "object",
@@ -2104,7 +2320,7 @@
                                 "kind",
                                 "id"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
                             },
                             {
                               "type": "object",
@@ -2123,7 +2339,30 @@
                                 "kind",
                                 "id"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "not": {
+                                    "enum": [
+                                      "owner",
+                                      "routine",
+                                      "handoff"
+                                    ]
+                                  }
+                                },
+                                "id": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": {}
                             }
                           ]
                         },
@@ -2136,7 +2375,8 @@
                           },
                           "required": [
                             "text"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "reason": {
                           "type": "string"
@@ -2173,7 +2413,8 @@
                             "delivery",
                             "nativeTermination",
                             "effects"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "approvalDeadlineSeconds": {
                           "type": "integer",
@@ -2203,7 +2444,8 @@
                             "approvalId",
                             "expiresAt",
                             "expiredAt"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "status": {
                           "type": "string",
@@ -2224,7 +2466,8 @@
                         "requestId",
                         "acceptance",
                         "status"
-                      ]
+                      ],
+                      "additionalProperties": false
                     }
                   ]
                 }
@@ -2247,7 +2490,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -2268,7 +2512,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -2289,7 +2534,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -2310,7 +2556,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -2331,7 +2578,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -2352,7 +2600,30 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unavailable. retry_same_request means the command outcome is unknown. Reconcile the original identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_]+$"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -2373,7 +2644,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -2394,7 +2666,8 @@
                   "text": {
                     "type": "string",
                     "minLength": 1,
-                    "x-maxUtf8Bytes": 16384
+                    "x-maxUtf8Bytes": 16384,
+                    "x-forbidden": "NUL; unpaired surrogates"
                   },
                   "approvalDeadlineSeconds": {
                     "type": "integer",
@@ -2471,10 +2744,11 @@
                           },
                           "required": [
                             "boundary"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "initiator": {
-                          "oneOf": [
+                          "anyOf": [
                             {
                               "type": "object",
                               "properties": {
@@ -2486,7 +2760,7 @@
                               "required": [
                                 "kind"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
                             },
                             {
                               "type": "object",
@@ -2505,7 +2779,7 @@
                                 "kind",
                                 "id"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
                             },
                             {
                               "type": "object",
@@ -2524,7 +2798,30 @@
                                 "kind",
                                 "id"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "not": {
+                                    "enum": [
+                                      "owner",
+                                      "routine",
+                                      "handoff"
+                                    ]
+                                  }
+                                },
+                                "id": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": {}
                             }
                           ]
                         },
@@ -2537,7 +2834,8 @@
                           },
                           "required": [
                             "text"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "reason": {
                           "type": "string"
@@ -2574,7 +2872,8 @@
                             "delivery",
                             "nativeTermination",
                             "effects"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "approvalDeadlineSeconds": {
                           "type": "integer",
@@ -2604,7 +2903,8 @@
                             "approvalId",
                             "expiresAt",
                             "expiredAt"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "status": {
                           "type": "string",
@@ -2618,7 +2918,8 @@
                         "acceptance",
                         "result",
                         "status"
-                      ]
+                      ],
+                      "additionalProperties": false
                     },
                     {
                       "type": "object",
@@ -2647,10 +2948,11 @@
                           },
                           "required": [
                             "boundary"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "initiator": {
-                          "oneOf": [
+                          "anyOf": [
                             {
                               "type": "object",
                               "properties": {
@@ -2662,7 +2964,7 @@
                               "required": [
                                 "kind"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
                             },
                             {
                               "type": "object",
@@ -2681,7 +2983,7 @@
                                 "kind",
                                 "id"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
                             },
                             {
                               "type": "object",
@@ -2700,7 +3002,30 @@
                                 "kind",
                                 "id"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "not": {
+                                    "enum": [
+                                      "owner",
+                                      "routine",
+                                      "handoff"
+                                    ]
+                                  }
+                                },
+                                "id": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": {}
                             }
                           ]
                         },
@@ -2713,7 +3038,8 @@
                           },
                           "required": [
                             "text"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "reason": {
                           "type": "string"
@@ -2750,7 +3076,8 @@
                             "delivery",
                             "nativeTermination",
                             "effects"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "approvalDeadlineSeconds": {
                           "type": "integer",
@@ -2780,7 +3107,8 @@
                             "approvalId",
                             "expiresAt",
                             "expiredAt"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "status": {
                           "type": "string",
@@ -2801,7 +3129,8 @@
                         "requestId",
                         "acceptance",
                         "status"
-                      ]
+                      ],
+                      "additionalProperties": false
                     }
                   ]
                 }
@@ -2824,7 +3153,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -2845,7 +3175,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -2866,7 +3197,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -2887,7 +3219,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -2908,7 +3241,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -2929,7 +3263,30 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unavailable. retry_same_request means the command outcome is unknown. Reconcile the original identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_]+$"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -2950,7 +3307,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3015,10 +3373,11 @@
                           },
                           "required": [
                             "boundary"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "initiator": {
-                          "oneOf": [
+                          "anyOf": [
                             {
                               "type": "object",
                               "properties": {
@@ -3030,7 +3389,7 @@
                               "required": [
                                 "kind"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
                             },
                             {
                               "type": "object",
@@ -3049,7 +3408,7 @@
                                 "kind",
                                 "id"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
                             },
                             {
                               "type": "object",
@@ -3068,7 +3427,30 @@
                                 "kind",
                                 "id"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "not": {
+                                    "enum": [
+                                      "owner",
+                                      "routine",
+                                      "handoff"
+                                    ]
+                                  }
+                                },
+                                "id": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": {}
                             }
                           ]
                         },
@@ -3081,7 +3463,8 @@
                           },
                           "required": [
                             "text"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "reason": {
                           "type": "string"
@@ -3118,7 +3501,8 @@
                             "delivery",
                             "nativeTermination",
                             "effects"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "approvalDeadlineSeconds": {
                           "type": "integer",
@@ -3148,7 +3532,8 @@
                             "approvalId",
                             "expiresAt",
                             "expiredAt"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "status": {
                           "type": "string",
@@ -3162,7 +3547,8 @@
                         "acceptance",
                         "result",
                         "status"
-                      ]
+                      ],
+                      "additionalProperties": false
                     },
                     {
                       "type": "object",
@@ -3191,10 +3577,11 @@
                           },
                           "required": [
                             "boundary"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "initiator": {
-                          "oneOf": [
+                          "anyOf": [
                             {
                               "type": "object",
                               "properties": {
@@ -3206,7 +3593,7 @@
                               "required": [
                                 "kind"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
                             },
                             {
                               "type": "object",
@@ -3225,7 +3612,7 @@
                                 "kind",
                                 "id"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
                             },
                             {
                               "type": "object",
@@ -3244,7 +3631,30 @@
                                 "kind",
                                 "id"
                               ],
-                              "additionalProperties": false
+                              "additionalProperties": {}
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "not": {
+                                    "enum": [
+                                      "owner",
+                                      "routine",
+                                      "handoff"
+                                    ]
+                                  }
+                                },
+                                "id": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind"
+                              ],
+                              "additionalProperties": {}
                             }
                           ]
                         },
@@ -3257,7 +3667,8 @@
                           },
                           "required": [
                             "text"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "reason": {
                           "type": "string"
@@ -3294,7 +3705,8 @@
                             "delivery",
                             "nativeTermination",
                             "effects"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "approvalDeadlineSeconds": {
                           "type": "integer",
@@ -3324,7 +3736,8 @@
                             "approvalId",
                             "expiresAt",
                             "expiredAt"
-                          ]
+                          ],
+                          "additionalProperties": false
                         },
                         "status": {
                           "type": "string",
@@ -3345,7 +3758,8 @@
                         "requestId",
                         "acceptance",
                         "status"
-                      ]
+                      ],
+                      "additionalProperties": false
                     }
                   ]
                 }
@@ -3368,7 +3782,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3389,7 +3804,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3410,7 +3826,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3431,7 +3848,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3452,7 +3870,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3473,7 +3892,30 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unavailable. retry_same_request means the command outcome is unknown. Reconcile the original identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_]+$"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3494,7 +3936,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3557,7 +4000,8 @@
                   "required": [
                     "approvalId",
                     "decision"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3578,7 +4022,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3599,7 +4044,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3620,7 +4066,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3641,7 +4088,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3662,7 +4110,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3683,7 +4132,30 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unavailable. retry_same_request means the command outcome is unknown. Reconcile the original identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_]+$"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3704,7 +4176,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3891,7 +4364,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3912,7 +4386,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3933,7 +4408,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3954,7 +4430,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3975,7 +4452,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -3996,7 +4474,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -4017,7 +4496,30 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unavailable. retry_same_request means the command outcome is unknown. Reconcile the original identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_]+$"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -4038,7 +4540,8 @@
                   },
                   "required": [
                     "error"
-                  ]
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
