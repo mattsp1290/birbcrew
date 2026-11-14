@@ -70,9 +70,13 @@ an egress policy (a Kubernetes `NetworkPolicy` or a firewall) is the place to na
 it further, for example to an allow-list of receivers. Webhook requests ignore
 `HTTP_PROXY`, `HTTPS_PROXY` and `NODE_USE_ENV_PROXY`, so an installation whose only
 way out is a proxy cannot deliver them. Add a private certificate authority with
-`NODE_EXTRA_CA_CERTS`. Workers never send webhooks. Each endpoint's signing secret
-is stored as plain text in the application database, so protect database access and
-backups as [outbound webhooks](webhooks.md#the-secret-and-where-it-is-kept) explains.
+`NODE_EXTRA_CA_CERTS`. Workers never send webhooks. An endpoint in the `slack` or
+`ntfy` [format](webhooks.md#formats) posts to that service's host, such as
+`hooks.slack.com` or an ntfy server, so an allow-list has to include it. Each
+endpoint's signing secret, and its URL, which for those formats is itself a
+credential, are stored as plain text in the application database, so protect
+database access and backups as
+[outbound webhooks](webhooks.md#the-secret-and-where-it-is-kept) explains.
 
 Run one container per process with the hardening below. `tini` is the image
 entrypoint and reaps orphaned SDK descendants, so do not add Docker's `--init`.

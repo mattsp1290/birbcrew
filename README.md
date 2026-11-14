@@ -112,7 +112,10 @@ schedule and a fixed prompt; the gateway submits each run in a new conversation,
 with nobody present, and records the routine as the request's initiator.
 [Outbound webhooks](docs/webhooks.md) tell an owner's HTTPS endpoint, through
 `/v1/webhooks`, when a card or question becomes pending, a request finishes or a
-routine firing settles. Each call is signed and carries only IDs and a status.
+routine firing settles. Each call to a `crew` endpoint is signed and carries only
+IDs and a status. A `slack` or `ntfy` endpoint instead gets an unsigned, short
+readable message of the same IDs, status and tool name, which a chat or push
+service shows to a person.
 
 An owner can answer a work-item approval with a [standing grant](docs/standing-grants.md)
 for the rest of the conversation or for every conversation of the member. Later calls

@@ -449,7 +449,7 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
         windowStart: "2031-01-01T00:00:00.000Z", budgetRevision: 1 } },
       "approval.requested": { conversationId, requestId, payload: { approvalId: randomUUID(), invocationId: requestId,
         toolName: "choose_next_step", argumentDigest: digest } },
-      "webhook.created": { payload: { webhookId, revision: 1, host: "hooks.example.com", kinds: ["request.finished"] } },
+      "webhook.created": { payload: { webhookId, revision: 1, host: "hooks.example.com", kinds: ["request.finished"], format: "crew" } },
       "webhook.enabled": { payload: { webhookId, revision: 3, host: "hooks.example.com" } },
       "webhook.disabled": { payload: { webhookId, revision: 2, host: "hooks.example.com", reason: "consecutive_failures" } },
       "webhook.deleted": { payload: { webhookId, revision: 4, host: "hooks.example.com" } },

@@ -24,7 +24,8 @@ import { failReasons, RoutineApi, RoutineDispatcher, skipReasons } from "../../s
 import { MemberStore } from "../../src/service/store.ts";
 import { recordSegmentUsage, UsageApi } from "../../src/service/usage.ts";
 import type { ResolvedAddress, TargetPolicy } from "../../src/service/webhook-target.ts";
-import { retryDelayMs, WebhookApi, WebhookDispatcher, webhookKindNames, webhookKinds, webhookLimits, type Clock } from "../../src/service/webhooks.ts";
+import { retryDelayMs, WebhookApi, WebhookDispatcher, webhookFormatNames, webhookKindNames, webhookKinds, webhookLimits, webhookMessage,
+  type Clock, type WebhookFormat } from "../../src/service/webhooks.ts";
 
 const url = process.env.BIRBCREW_TEST_DATABASE_URL;
 if (!url) throw new Error("Set BIRBCREW_TEST_DATABASE_URL to a disposable PostgreSQL database.");
@@ -61,18 +62,21 @@ async function databaseAt(t: TestContext, version = Infinity) {
 }
 
 type Received = { path: string; headers: IncomingHttpHeaders; body: string; at: number };
-type Reply = number | "hang";
-/** A local receiver. `reply` decides each answer by path; "hang" never answers. */
+type Reply = number | "hang" | { status: number; text: string };
+/** A local receiver. `reply` decides each answer by path, or by the whole request; a status alone
+ * answers "ok", and "hang" never answers. */
 async function receiver(t: TestContext) {
   const received: Received[] = [];
   const sockets = new Set<Socket>();
-  const state = { reply: (_path: string): Reply => 200 };
+  const state = { reply: (_path: string, _request: { method: string; headers: IncomingHttpHeaders; body: string }): Reply => 200 };
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(chunk as Buffer);
-    received.push({ path: request.url!, headers: request.headers, body: Buffer.concat(chunks).toString(), at: Date.now() });
-    const answer = state.reply(request.url!);
-    if (answer !== "hang") response.writeHead(answer).end("ok");
+    const body = Buffer.concat(chunks).toString();
+    received.push({ path: request.url!, headers: request.headers, body, at: Date.now() });
+    const answer = state.reply(request.url!, { method: request.method!, headers: request.headers, body });
+    if (typeof answer === "number") response.writeHead(answer).end("ok");
+    else if (answer !== "hang") response.writeHead(answer.status, { "Content-Type": "text/plain" }).end(answer.text);
   });
   server.on("connection", socket => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
   server.listen(0, "127.0.0.1");
@@ -106,8 +110,8 @@ async function harness(t: TestContext, options: { policy?: TargetPolicy } = {}) 
     advance(ms: number) { now = new Date(now.getTime() + ms); },
     dispatcher: (extra: Partial<ConstructorParameters<typeof WebhookDispatcher>[0]> = {}) =>
       new WebhookDispatcher({ store, owners: [ownerId], clock, policy, ...extra }),
-    create: async (url: string, kinds: readonly string[] = webhookKindNames, owner = ownerId) =>
-      (await api.create(owner, { requestId: randomUUID(), url, kinds })) as Awaited<ReturnType<WebhookApi["create"]>> & { secret: string },
+    create: async (url: string, kinds: readonly string[] = webhookKindNames, owner = ownerId, format: WebhookFormat = "crew") =>
+      (await api.create(owner, { requestId: randomUUID(), url, kinds, format })) as Awaited<ReturnType<WebhookApi["create"]>> & { secret: string },
     /** A request.finished row, as commitTurn or a rejection appends it. */
     async finished(conversationId: string, status = "completed", owner = ownerId, memberId = member.memberId) {
       const requestId = randomUUID();
@@ -125,6 +129,43 @@ type Harness = Awaited<ReturnType<typeof harness>>;
 async function pass(...dispatchers: WebhookDispatcher[]) {
   await Promise.all(dispatchers.map(d => d.tick()));
   await Promise.all(dispatchers.map(d => d.idle()));
+}
+
+/** Each kind once, through its real path where one exists: a card through the proposal path, a
+ * finished request through the commit path, and the routine dispatcher's two rows as it appends
+ * them. The prompt, note and reply carry marker text that no delivery may hold. */
+async function everyKind(h: Harness, memberId = h.member.memberId) {
+  const carded = await h.conversation(h.ownerId, memberId);
+  const request: TurnRequest = { ownerId: h.ownerId, conversationId: carded, requestId: randomUUID(), text: "private PROMPT-MARKER" };
+  await h.store.recordAcceptance(request, ownerInitiator);
+  const turn = await h.store.beginTurn(request);
+  if (turn.kind !== "start") throw new Error("the card's turn did not start");
+  const approval = await new ApprovalStore(h.db).propose({ ownerId: h.ownerId, memberId, conversationId: carded,
+    requestId: request.requestId, token: turn.token, invocationId: request.requestId, nativeCallId: "card",
+    toolName: "record_work_item", arguments: { operation_id: request.requestId, note: "private NOTE-MARKER" } });
+  const committed = await h.conversation(h.ownerId, memberId);
+  const done = { ownerId: h.ownerId, conversationId: committed, requestId: randomUUID(), text: "another PROMPT-MARKER" };
+  await h.store.recordAcceptance(done, ownerInitiator);
+  const started = await h.store.beginTurn(done);
+  if (started.kind !== "start") throw new Error("the finished request's turn did not start");
+  await h.store.commitTurn({ ownerId: h.ownerId, conversationId: committed, requestId: done.requestId, token: started.token,
+    reply: "private REPLY-MARKER", checkpoint: { version: 1, engine: "pi", state: {} } });
+  const routineId = randomUUID();
+  await h.store.transaction(async db => {
+    await appendAudit(db, { type: "routine.firing_settled", ownerId: h.ownerId, memberId,
+      payload: { routineId, scheduledFor: "2031-01-06T10:15:00.000Z", status: "failed", reason: "turn_failed" } });
+    await appendAudit(db, { type: "routine.disabled", ownerId: h.ownerId, memberId, payload: { routineId, revision: 2, reason: "consecutive_failures" } });
+  });
+  return { carded, request, approval, committed, done, routineId };
+}
+
+/** The audit rows of every delivered kind, oldest first (or only `requestId`'s), with the eventId and
+ * occurredAt a body states. */
+async function deliveredEvents(db: Pool, requestId?: string) {
+  return (await db.query<{ eventId: string; occurredAt: string }>(`SELECT event_id::text AS "eventId",
+    to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt" FROM birbcrew_ts.audit_events
+    WHERE event_type IN ('approval.requested','request.finished','routine.firing_settled','routine.disabled')
+      AND ($1::uuid IS NULL OR request_id=$1::uuid) ORDER BY event_id`, [requestId ?? null])).rows;
 }
 
 async function gateway(t: TestContext, store: MemberStore, clock: Clock, webhookTargets: TargetPolicy) {
@@ -167,12 +208,15 @@ test("the webhook routes are strict, idempotent, owner-scoped and bounded, and r
   assert.match(secret, /^[A-Za-z0-9_-]{43}$/);
   assert.equal(created.text.includes(secret), true);
   const view = { apiVersion: "1", webhookId, url: body.url, host: "hooks.example.com", kinds: ["approval.pending", "request.finished"],
-    state: "enabled", disabledReason: null, consecutiveFailures: 0, createdAt };
+    format: "crew", state: "enabled", disabledReason: null, consecutiveFailures: 0, createdAt };
   assert.deepEqual({ ...created.body, secret: undefined }, { ...view, secret: undefined });
   // A replay is the same endpoint without its secret, which no route returns again.
   assert.deepEqual(await g.api("/v1/webhooks", { ...body, kinds: [...body.kinds].reverse() }), { status: 201, body: view, text: JSON.stringify(view) });
   assert.deepEqual((await g.api("/v1/webhooks", { ...body, url: "https://hooks.example.com/other" })).body, { error: "conflict" });
   assert.deepEqual((await g.api("/v1/webhooks", { ...body, kinds: ["request.finished"] })).body, { error: "conflict" });
+  // The format is part of the definition: an endpoint created without one is `crew`, and another format is another endpoint.
+  assert.deepEqual((await g.api("/v1/webhooks", { ...body, format: "crew" })).body, view);
+  assert.deepEqual((await g.api("/v1/webhooks", { ...body, format: "slack" })).body, { error: "conflict" });
   const path = `/v1/webhooks/${webhookId}`;
   assert.deepEqual((await g.api(path)).body, view);
   assert.deepEqual((await g.api(`/v1/webhooks/${webhookId.toUpperCase()}`)).body, view);
@@ -182,6 +226,7 @@ test("the webhook routes are strict, idempotent, owner-scoped and bounded, and r
   const fresh = (fields: Record<string, unknown>) => ({ requestId: randomUUID(), url: "https://hooks.example.com/x", kinds: ["request.finished"], ...fields });
   for (const invalid of [fresh({ ownerId: g.ownerId }), fresh({ secret: "chosen" }), fresh({ kinds: [] }), fresh({ kinds: ["request.finished", "request.finished"] }),
     fresh({ kinds: ["member.spawned"] }), fresh({ kinds: "request.finished" }), fresh({ url: 7 }), fresh({ url: "" }), fresh({ requestId: "nope" }),
+    fresh({ format: "email" }), fresh({ format: "Slack" }), fresh({ format: null }), fresh({ format: ["slack"] }),
     { url: "https://hooks.example.com/x", kinds: ["request.finished"] }]) {
     assert.deepEqual(await g.api("/v1/webhooks", invalid), { status: 400, body: { error: "invalid_input" }, text: '{"error":"invalid_input"}' },
       JSON.stringify(invalid));
@@ -245,7 +290,7 @@ test("the webhook routes are strict, idempotent, owner-scoped and bounded, and r
   const rows = audit.body.events.filter((event: { payload: { webhookId?: string } }) => event.payload.webhookId === webhookId);
   assert.deepEqual(rows.map((event: Record<string, unknown>) => [event.type, event.actor, event.memberId, event.conversationId, event.payload]), [
     ["webhook.created", { kind: "owner", id: g.ownerId }, null, null,
-      { webhookId, revision: 1, host: "hooks.example.com", kinds: ["approval.pending", "request.finished"] }],
+      { webhookId, revision: 1, host: "hooks.example.com", kinds: ["approval.pending", "request.finished"], format: "crew" }],
     ["webhook.disabled", { kind: "owner", id: g.ownerId }, null, null, { webhookId, revision: 2, host: "hooks.example.com", reason: "owner" }],
     ["webhook.enabled", { kind: "owner", id: g.ownerId }, null, null, { webhookId, revision: 3, host: "hooks.example.com" }],
     ["webhook.deleted", { kind: "owner", id: g.ownerId }, null, null, { webhookId, revision: 4, host: "hooks.example.com" }],
@@ -258,6 +303,8 @@ test("the webhook routes are strict, idempotent, owner-scoped and bounded, and r
   const capabilities = (await g.api("/v1/capabilities")).body;
   assert.deepEqual([capabilities.webhooks.route, capabilities.webhooks.kinds, capabilities.webhooks.maximumEnabledPerOwner, capabilities.webhooks.schemes],
     ["/v1/webhooks", ["approval.pending", "request.finished", "routine.firing_settled", "routine.disabled"], 10, ["https"]]);
+  assert.deepEqual([capabilities.webhooks.formats, capabilities.webhooks.defaultFormat, capabilities.webhooks.signature.formats],
+    [["crew", "slack", "ntfy"], "crew", ["crew"]]);
   for (const type of ["approval.requested", "webhook.created", "webhook.enabled", "webhook.disabled", "webhook.deleted"]) {
     assert.ok(capabilities.audit.eventTypes.includes(type), type);
   }
@@ -316,41 +363,15 @@ test("each kind is delivered once to each endpoint that selected it, signed, wit
   const all = await h.create(r.url("all"));
   const finishedOnly = await h.create(r.url("finished"), ["request.finished"]);
 
-  // A card that becomes pending, through the real proposal path.
-  const carded = await h.conversation();
-  const request: TurnRequest = { ownerId: h.ownerId, conversationId: carded, requestId: randomUUID(), text: "private prompt PROMPT-MARKER" };
-  await h.store.recordAcceptance(request, ownerInitiator);
-  const turn = await h.store.beginTurn(request);
-  assert.equal(turn.kind, "start"); if (turn.kind !== "start") return;
-  const approval = await new ApprovalStore(h.db).propose({ ownerId: h.ownerId, memberId: h.member.memberId, conversationId: carded,
-    requestId: request.requestId, token: turn.token, invocationId: request.requestId, nativeCallId: "card",
-    toolName: "record_work_item", arguments: { operation_id: request.requestId, note: "private NOTE-MARKER" } });
-  // A finished request, through the real commit path.
-  const committed = await h.conversation();
-  const done = { ownerId: h.ownerId, conversationId: committed, requestId: randomUUID(), text: "another PROMPT-MARKER" };
-  await h.store.recordAcceptance(done, ownerInitiator);
-  const started = await h.store.beginTurn(done);
-  assert.equal(started.kind, "start"); if (started.kind !== "start") return;
-  await h.store.commitTurn({ ownerId: h.ownerId, conversationId: committed, requestId: done.requestId, token: started.token,
-    reply: "private REPLY-MARKER", checkpoint: { version: 1, engine: "pi", state: {} } });
-  // The routine dispatcher's own facts; an owner's own disable is not delivered.
-  const routineId = randomUUID(), quiet = randomUUID();
-  await h.store.transaction(async db => {
-    await appendAudit(db, { type: "routine.firing_settled", ownerId: h.ownerId, memberId: h.member.memberId,
-      payload: { routineId, scheduledFor: "2031-01-06T10:15:00.000Z", status: "failed", reason: "turn_failed" } });
-    await appendAudit(db, { type: "routine.disabled", ownerId: h.ownerId, memberId: h.member.memberId,
-      payload: { routineId, revision: 2, reason: "consecutive_failures" } });
-    await appendAudit(db, { type: "routine.disabled", ownerId: h.ownerId, memberId: h.member.memberId,
-      payload: { routineId: quiet, revision: 2, reason: "owner" } });
-  });
+  const { carded, request, approval, committed, done, routineId } = await everyKind(h);
+  // An owner's own disable is not delivered.
+  await h.store.transaction(db => appendAudit(db, { type: "routine.disabled", ownerId: h.ownerId, memberId: h.member.memberId,
+    payload: { routineId: randomUUID(), revision: 2, reason: "owner" } }));
 
   const dispatcher = h.dispatcher();
   // One pass sends every due delivery: an endpoint's deliveries go one after another.
   await pass(dispatcher);
-  const { rows: events } = await h.db.query(`SELECT event_id::text AS "eventId", event_type AS type,
-    to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "occurredAt" FROM birbcrew_ts.audit_events
-    WHERE event_type IN ('approval.requested','request.finished','routine.firing_settled','routine.disabled') ORDER BY event_id`);
-  const [, card, finished, settled, exhausted] = events;
+  const [, card, finished, settled, exhausted] = await deliveredEvents(h.db);
   const envelope = (event: { eventId: string; occurredAt: string }, kind: string, webhookId: string) =>
     ({ webhookId, eventId: event.eventId, kind, occurredAt: event.occurredAt, memberId: h.member.memberId });
   const expected = (webhookId: string) => [
@@ -381,7 +402,7 @@ test("each kind is delivered once to each endpoint that selected it, signed, wit
 
   const listed = await h.api.deliveries(h.ownerId, all.webhookId, {});
   assert.deepEqual(listed.deliveries.map(d => [d.eventId, d.kind, d.state, d.attempts, d.lastOutcome, d.lastStatusCode, d.reason]),
-    [[exhausted, "routine.disabled"], [settled, "routine.firing_settled"], [finished, "request.finished"], [card, "approval.pending"]]
+    ([[exhausted, "routine.disabled"], [settled, "routine.firing_settled"], [finished, "request.finished"], [card, "approval.pending"]] as const)
       .map(([event, kind]) => [event.eventId, kind, "delivered", 1, "delivered", 200, null]));
   const older = await h.api.deliveries(h.ownerId, all.webhookId, { limit: "2", before: exhausted.eventId });
   assert.deepEqual([older.deliveries.map(d => d.eventId), older.nextBefore, older.hasMore], [[settled.eventId, finished.eventId], finished.eventId, true]);
@@ -595,10 +616,10 @@ test("every routine firing outcome the trail records is delivered with its statu
     [["completed", "failed", "cancelled", "uncertain"], ["succeeded", "failed", "skipped"]]);
 });
 
-test("a failed attempt is retried with exponential backoff; the tenth gives up; a success resets the count", async (t) => {
+for (const format of webhookFormatNames) test(`a failed attempt is retried with exponential backoff; the tenth gives up; a success resets the count (${format})`, async (t) => {
   const h = await harness(t);
   const r = await receiver(t);
-  const endpoint = await h.create(r.url("in"), ["request.finished"]);
+  const endpoint = await h.create(r.url("in"), ["request.finished"], h.ownerId, format);
   const conversationId = await h.conversation();
   r.state.reply = () => 503;
   await h.finished(conversationId);
@@ -621,6 +642,7 @@ test("a failed attempt is retried with exponential backoff; the tenth gives up; 
   assert.deepEqual(waits, [2, 3, 4, 5, 6, 7, 8, 9].map(retryDelayMs));
   assert.deepEqual([delivery.state, delivery.reason, delivery.attempts, delivery.outcome], ["failed", "attempts_exhausted", 10, "http_status"]);
   assert.equal(r.received.length, 10);
+  assert.equal(new Set(r.received.map(item => item.body)).size, 1, "every attempt sends the same bytes");
   assert.equal((await h.endpoint(endpoint.webhookId)).consecutive_failures, 1);
   h.advance(24 * 3_600_000);
   await pass(dispatcher);
@@ -1029,6 +1051,10 @@ test("the database keeps endpoints and deliveries as history and refuses a membe
   await refused("DELETE FROM birbcrew_ts.webhook_endpoints");
   await refused("TRUNCATE birbcrew_ts.webhook_endpoints CASCADE");
   await refused("UPDATE birbcrew_ts.webhook_endpoints SET kinds='{approval.pending}'");
+  await refused("UPDATE birbcrew_ts.webhook_endpoints SET format='slack'");
+  await assert.rejects(h.db.query(`INSERT INTO birbcrew_ts.webhook_endpoints (owner_id,create_request_id,url,host,kinds,format,secret,state,
+      disabled_reason) VALUES ($1, gen_random_uuid(), 'https://x.example.com/', 'x.example.com', '{request.finished}', 'Slack', repeat('a', 43),
+      'disabled', 'owner')`, [h.ownerId]), { code: "23514", constraint: "webhook_endpoints_format_check" });
   await refused("UPDATE birbcrew_ts.webhook_endpoints SET url='https://elsewhere.example.com/'");
   await refused("UPDATE birbcrew_ts.webhook_endpoints SET secret=repeat('a', 43)");
   await refused("UPDATE birbcrew_ts.webhook_endpoints SET url=NULL");
@@ -1060,12 +1086,11 @@ function orClauses(definition: string) {
   return [...clauses, body.slice(start)];
 }
 
-test("the webhook migration keeps every constraint, trigger, function, index and column it finds, and its type CHECK every clause of the one it replaces", async (t) => {
-  const upgraded = await databaseAt(t, webhookVersion - 1);
-  // Everything in the schema that a migration could replace, disable or drop, as PostgreSQL prints it, keyed
-  // by the table it belongs to. NOT NULL is read from the column, not from pg_constraint, which holds it
-  // only from PostgreSQL 18.
-  const catalog = async () => Object.fromEntries((await upgraded.query<{ name: string; definition: string }>(`
+/** Everything in the schema that a migration could replace, disable or drop, as PostgreSQL prints it, keyed
+ * by the table it belongs to. NOT NULL is read from the column, not from pg_constraint, which holds it
+ * only from PostgreSQL 18. */
+async function schemaCatalog(db: Pool) {
+  return Object.fromEntries((await db.query<{ name: string; definition: string }>(`
     SELECT conrelid::regclass::text || '/' || conname AS name, pg_get_constraintdef(oid) AS definition FROM pg_constraint
       WHERE connamespace='birbcrew_ts'::regnamespace AND contype <> 'n'
     UNION ALL SELECT tgrelid::regclass::text || '/' || tgname, pg_get_triggerdef(oid) || ' ENABLED ' || tgenabled::text FROM pg_trigger
@@ -1085,6 +1110,11 @@ test("the webhook migration keeps every constraint, trigger, function, index and
     UNION ALL SELECT 'view/' || oid::regclass::text, pg_get_viewdef(oid) FROM pg_class
       WHERE relnamespace='birbcrew_ts'::regnamespace AND relkind IN ('v', 'm')`)).rows
     .map(row => [row.name, row.definition]));
+}
+
+test("the webhook migration keeps every constraint, trigger, function, index and column it finds, and its type CHECK every clause of the one it replaces", async (t) => {
+  const upgraded = await databaseAt(t, webhookVersion - 1);
+  const catalog = () => schemaCatalog(upgraded);
   const before = await catalog();
   await upgraded.query(await readFile(new URL(webhookMigration, sql), "utf8"));
   const after = await catalog();
@@ -1192,4 +1222,238 @@ test("the webhook migration completes while a native turn holds its admission", 
   await current.commitTurn({ ownerId, conversationId, requestId, token: start.token, reply: "still running", checkpoint: { version: 1, engine: "pi", state: {} } });
   const { rows } = await upgraded.query("SELECT event_type FROM birbcrew_ts.audit_events WHERE owner_id=$1 ORDER BY event_id", [ownerId]);
   assert.deepEqual(rows.map(row => row.event_type), ["request.finished"]);
+});
+
+test("every format writes each kind as its fixed template from the body's identifiers alone, and only crew is signed", async (t) => {
+  const h = await harness(t);
+  const r = await receiver(t);
+  const endpoints = {} as Record<WebhookFormat, Awaited<ReturnType<Harness["create"]>>>;
+  for (const format of webhookFormatNames) endpoints[format] = await h.create(r.url(format), webhookKindNames, h.ownerId, format);
+  // Each kind through its real path, around text no message may carry: the fixture's, and this member's instructions and memory.
+  const { memberId } = await h.store.spawn({ ownerId: h.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture",
+    instructions: "INSTRUCTIONS-MARKER" });
+  await new MemoryApi(h.store).create(h.ownerId, { requestId: randomUUID(), memberId, text: "MEMORY-MARKER" });
+  const { carded, request, approval, committed, done, routineId } = await everyKind(h, memberId);
+  await pass(h.dispatcher());
+
+  const [card, finished, settled, exhausted] = await deliveredEvents(h.db);
+  const at = (format: WebhookFormat) => r.received.filter(item => item.path === "/" + format);
+  for (const format of webhookFormatNames) assert.equal(at(format).length, 4, format);
+
+  // crew: the stored body, byte for byte, in PostgreSQL's jsonb key order, as before formats existed.
+  const crew = endpoints.crew;
+  assert.equal(at("crew")[1].body, `{"kind": "request.finished", "status": "completed", "eventId": "${finished.eventId}", "memberId": "${memberId}", `
+    + `"requestId": "${done.requestId}", "webhookId": "${crew.webhookId}", "occurredAt": "${finished.occurredAt}", "conversationId": "${committed}"}`);
+  const stored = async (webhookId: string) => (await h.db.query<{ body: string }>(
+    "SELECT body FROM birbcrew_ts.webhook_deliveries WHERE webhook_id=$1 ORDER BY event_id", [webhookId])).rows.map(row => row.body);
+  assert.deepEqual(at("crew").map(item => item.body), await stored(crew.webhookId));
+  // The outbox is the same for every format: each endpoint's rows hold the crew body with its own webhookId.
+  for (const format of ["slack", "ntfy"] as const) {
+    assert.deepEqual((await stored(endpoints[format].webhookId)).map(body => JSON.parse(body)),
+      (await stored(crew.webhookId)).map(body => ({ ...JSON.parse(body), webhookId: endpoints[format].webhookId })), format);
+  }
+  const timestamp = String(Math.floor(h.clock().getTime() / 1000));
+  for (const item of at("crew")) {
+    assert.equal(item.headers["content-type"], "application/json");
+    assert.equal(item.headers["crew-webhook-id"], crew.webhookId);
+    assert.equal(item.headers["crew-webhook-event"], JSON.parse(item.body).eventId);
+    assert.equal(item.headers["crew-webhook-signature"], signature(crew.secret, timestamp, item.body));
+  }
+
+  // slack and ntfy: one fixed template per kind, filled with the body's identifiers, status, tool and time only.
+  const tail = (event: { eventId: string; occurredAt: string }) => [["Member", memberId], ["Event", event.eventId], ["Occurred at", event.occurredAt]];
+  const messages = [
+    ["Crew: approval pending", [["Tool", "record_work_item"], ["Conversation", carded], ["Request", request.requestId], ["Approval", approval.approvalId],
+      ...tail(card)]],
+    ["Crew: request completed", [["Conversation", committed], ["Request", done.requestId], ...tail(finished)]],
+    ["Crew: routine firing failed", [["Routine", routineId], ["Scheduled for", "2031-01-06T10:15:00.000Z"], ...tail(settled)]],
+    ["Crew: routine disabled", [["Routine", routineId], ["Reason", "consecutive_failures"], ...tail(exhausted)]],
+  ] as const;
+  assert.deepEqual(at("slack").map(item => item.body), messages.map(([title, details]) =>
+    JSON.stringify({ text: [title, ...details.map(([label, value]) => `${label}: \`${value}\``)].join("\n") })));
+  assert.equal(at("slack")[1].body, `{"text":"Crew: request completed\\nConversation: \`${committed}\`\\nRequest: \`${done.requestId}\`\\n`
+    + `Member: \`${memberId}\`\\nEvent: \`${finished.eventId}\`\\nOccurred at: \`${finished.occurredAt}\`"}`);
+  assert.deepEqual(at("ntfy").map(item => [item.headers.title, item.body]), messages.map(([title, details]) =>
+    [title, details.map(([label, value]) => `${label}: ${value}`).join("\n")]));
+  assert.equal(at("ntfy")[1].body, `Conversation: ${committed}\nRequest: ${done.requestId}\nMember: ${memberId}\nEvent: ${finished.eventId}\n`
+    + `Occurred at: ${finished.occurredAt}`);
+  for (const [format, contentType] of [["slack", "application/json"], ["ntfy", "text/plain; charset=utf-8"]] as const) {
+    for (const item of at(format)) {
+      assert.equal(item.headers["content-type"], contentType, format);
+      assert.deepEqual(Object.keys(item.headers).filter(name => name.startsWith("crew-")), [], "no signature where nobody checks one");
+    }
+  }
+  for (const item of r.received) {
+    assert.equal(item.headers["user-agent"], "Crew-Webhooks/1");
+    assert.equal(item.headers.authorization ?? item.headers.cookie, undefined);
+    assert.ok(Buffer.byteLength(item.body) <= 1024);
+  }
+  assertCarriesNoText(r.received, ...webhookFormatNames.map(format => endpoints[format].secret));
+  for (const format of webhookFormatNames) {
+    assert.deepEqual((await h.deliveries(endpoints[format].webhookId)).map(d => [d.state, d.attempts, d.outcome]),
+      Array(4).fill(["delivered", 1, "delivered"]), format);
+  }
+});
+
+test("a readable message is built only from a body its kind's strict schema accepts, and any other body is never sent", async (t) => {
+  const body = { webhookId: randomUUID(), eventId: "42", kind: "request.finished", occurredAt: "2031-01-06T10:15:00.123456Z", memberId: randomUUID(),
+    conversationId: randomUUID(), requestId: randomUUID(), status: "failed" };
+  assert.deepEqual(webhookMessage("request.finished", JSON.stringify(body)), { title: "Crew: request failed", details: [
+    ["Conversation", body.conversationId], ["Request", body.requestId], ["Member", body.memberId], ["Event", "42"], ["Occurred at", body.occurredAt]] });
+  for (const stored of [{ ...body, note: "NOTE-MARKER" }, { ...body, status: "NOTE-MARKER" }, { ...body, requestId: "NOTE-MARKER" },
+    { ...body, webhookId: undefined }, { ...body, kind: "approval.pending" }]) {
+    assert.throws(() => webhookMessage("request.finished", JSON.stringify(stored)), JSON.stringify(stored));
+  }
+  assert.throws(() => webhookMessage("approval.pending", JSON.stringify(body)));
+  // Only direct SQL could store such a body; a readable endpoint's attempt then fails before any connection,
+  // while a well-formed delivery to the same endpoint goes out.
+  const h = await harness(t);
+  const r = await receiver(t);
+  const endpoint = await h.create(r.url("in"), ["request.finished"], h.ownerId, "slack");
+  await h.db.query(`INSERT INTO birbcrew_ts.webhook_deliveries (webhook_id,event_id,kind,body,state,next_attempt_at,created_at)
+    VALUES ($1, 1, 'request.finished', $2, 'pending', $3, $3)`, [endpoint.webhookId, JSON.stringify({ ...body, webhookId: endpoint.webhookId,
+    note: "NOTE-MARKER" }), h.clock()]);
+  const good = await h.finished(await h.conversation());
+  await pass(h.dispatcher());
+  assert.deepEqual(r.received.map(item => [item.path, (JSON.parse(item.body) as { text: string }).text.includes(good)]), [["/in", true]]);
+  assertCarriesNoText(r.received);
+  assert.deepEqual((await h.deliveries(endpoint.webhookId)).map(d => [d.eventId === "1", d.state, d.attempts, d.outcome]),
+    [[true, "pending", 1, "network"], [false, "delivered", 1, "delivered"]]);
+});
+
+test("an endpoint whose format this release does not know keeps its deliveries pending and unattempted", async (t) => {
+  const h = await harness(t);
+  const r = await receiver(t);
+  const known = await h.create(r.url("known"), ["request.finished"]);
+  // As a later release with another format could write it.
+  const { rows: [{ webhook_id: later }] } = await h.db.query<{ webhook_id: string }>(`INSERT INTO birbcrew_ts.webhook_endpoints
+      (owner_id,create_request_id,url,host,kinds,format,secret,state,enabled_at)
+    VALUES ($1, gen_random_uuid(), $2, $3, '{request.finished}', 'teams', repeat('a', 43), 'enabled', clock_timestamp()) RETURNING webhook_id`,
+    [h.ownerId, r.url("later"), `127.0.0.1:${r.port}`]);
+  await h.finished(await h.conversation());
+  await pass(h.dispatcher());
+  assert.deepEqual(r.received.map(item => item.path), ["/known"]);
+  assert.deepEqual((await h.deliveries(known.webhookId)).map(d => [d.state, d.attempts]), [["delivered", 1]]);
+  assert.deepEqual((await h.deliveries(later)).map(d => [d.state, d.attempts, d.outcome]), [["pending", 0, null]]);
+  assert.deepEqual([(await h.endpoint(later)).state, (await h.endpoint(later)).consecutive_failures], ["enabled", 0]);
+});
+
+/** A Slack-compatible incoming webhook, as Slack documents it: a JSON body whose `text` is a
+ * non-empty string is answered `200 ok`; malformed JSON `400 invalid_payload`; no text `400 no_text`;
+ * a path that names no hook `404 no_service`. The path is the hook's credential. */
+async function slackReceiver(t: TestContext, hook: string) {
+  const r = await receiver(t);
+  const accepted: { text: string; raw: string; headers: IncomingHttpHeaders }[] = [];
+  const answers: string[] = [];
+  const answer = (status: number, text: string) => { answers.push(text); return { status, text }; };
+  r.state.reply = (path, { method, headers, body }) => {
+    if (method !== "POST" || path !== hook) return answer(404, "no_service");
+    if (!headers["content-type"]?.startsWith("application/json")) return answer(400, "invalid_payload");
+    let payload: unknown;
+    try { payload = JSON.parse(body); } catch { return answer(400, "invalid_payload"); }
+    const text = (payload as { text?: unknown } | null)?.text;
+    if (typeof text !== "string" || !text) return answer(400, "no_text");
+    accepted.push({ text, raw: body, headers });
+    return answer(200, "ok");
+  };
+  return { accepted, answers, port: r.port, url: (path = hook) => `http://127.0.0.1:${r.port}${path}` };
+}
+
+test("a slack endpoint made through the routes posts a message a Slack-compatible receiver accepts, and its URL reaches no one but the owner", async (t) => {
+  const db = await databaseAt(t);
+  const store = new MemberStore(db);
+  const hook = "/services/T0CREW/B0CREW/HOOK-SECRET-TOKEN";
+  const slack = await slackReceiver(t, hook);
+  const g = await gateway(t, store, () => new Date(), insecure);
+  const body = { requestId: randomUUID(), url: slack.url(), kinds: ["request.finished"], format: "slack" };
+  const created = await g.api("/v1/webhooks", body);
+  assert.equal(created.status, 201, created.text);
+  const { secret, ...view } = created.body;
+  assert.deepEqual([view.format, view.url, typeof secret], ["slack", slack.url(), "string"]);
+  assert.deepEqual((await g.api(`/v1/webhooks/${view.webhookId}`)).body, view);
+  assert.deepEqual((await g.api("/v1/webhooks")).body.webhooks, [view]);
+  assert.deepEqual((await g.api("/v1/webhooks", body)).body, view);
+  assert.deepEqual((await g.api("/v1/webhooks", { ...body, format: "ntfy" })).body, { error: "conflict" });
+  const { format: _format, ...crewReplay } = body;
+  assert.deepEqual((await g.api("/v1/webhooks", crewReplay)).body, { error: "conflict" }, "a create without a format is crew");
+  // A hook the service no longer knows, and bodies it cannot read: each an ordinary failed attempt.
+  const revoked = (await g.api("/v1/webhooks", { requestId: randomUUID(), url: slack.url("/services/T0CREW/B0CREW/REVOKED-TOKEN"),
+    kinds: ["request.finished"], format: "slack" })).body;
+  const crewAtHook = (await g.api("/v1/webhooks", { requestId: randomUUID(), url: slack.url(), kinds: ["request.finished"] })).body;
+  const ntfyAtHook = (await g.api("/v1/webhooks", { requestId: randomUUID(), url: slack.url(), kinds: ["request.finished"], format: "ntfy" })).body;
+
+  const { memberId } = await store.spawn({ ownerId: g.ownerId, requestId: randomUUID(), engine: "pi", profile: "fixture" });
+  const conversationId = randomUUID(), requestId = randomUUID();
+  await store.openConversation({ ownerId: g.ownerId, memberId, conversationId });
+  await store.transaction(db => appendAudit(db, { type: "request.finished", ownerId: g.ownerId, memberId, conversationId, requestId,
+    payload: { status: "failed" } }));
+  const states = async (id: string) => (await g.api(`/v1/webhooks/${id}/deliveries`)).body.deliveries
+    .map((d: { state: string; attempts: number; lastOutcome: string; lastStatusCode: number }) => [d.state, d.attempts, d.lastOutcome, d.lastStatusCode]);
+  const settled = async () => JSON.stringify(await Promise.all([view, revoked, crewAtHook, ntfyAtHook].map(e => states(e.webhookId))));
+  const expected = JSON.stringify([[["delivered", 1, "delivered", 200]], [["pending", 1, "http_status", 404]], [["pending", 1, "http_status", 400]],
+    [["pending", 1, "http_status", 400]]]);
+  for (let i = 0; i < 200 && await settled() !== expected; i++) await delay(25);
+  assert.equal(await settled(), expected, "delivered to the hook; an ordinary failed attempt for the revoked hook and each unreadable body");
+  assert.deepEqual(slack.answers.sort(), ["invalid_payload", "no_service", "no_text", "ok"]);
+  const [event] = await deliveredEvents(db, requestId);
+  assert.deepEqual(slack.accepted.map(message => message.text), [["Crew: request failed", `Conversation: \`${conversationId}\``,
+    `Request: \`${requestId}\``, `Member: \`${memberId}\``, `Event: \`${event.eventId}\``, `Occurred at: \`${event.occurredAt}\``].join("\n")]);
+  const [message] = slack.accepted;
+  assert.equal(message.raw, JSON.stringify({ text: message.text }));
+  assert.deepEqual(Object.keys(message.headers).filter(name => name.startsWith("crew-") || name === "authorization" || name === "cookie"), []);
+  assert.ok(!message.raw.includes(secret));
+
+  // The hook's path is its credential. The trail, its CSV export and the delivery rows hold the host only.
+  const audit = await g.api("/v1/audit?limit=1000&eventType=webhook.created");
+  assert.deepEqual(audit.body.events.map((e: { payload: Record<string, unknown> }) => [e.payload.host, e.payload.format]),
+    ["slack", "slack", "crew", "ntfy"].map(format => [`127.0.0.1:${slack.port}`, format]));
+  const csv = (await g.api("/v1/audit?format=csv&limit=10000")).text;
+  const deliveries = (await Promise.all([view, revoked, crewAtHook, ntfyAtHook].map(async e => (await g.api(`/v1/webhooks/${e.webhookId}/deliveries`)).text)))
+    .join("");
+  for (const text of [audit.text, csv, deliveries]) assert.ok(!text.includes("TOKEN") && !text.includes("/services/"), text);
+  // Another owner learns nothing of it.
+  assert.deepEqual((await g.api(`/v1/webhooks/${view.webhookId}`, undefined, g.stranger)).body, { error: "not_found" });
+  assert.deepEqual((await g.api("/v1/webhooks", undefined, g.stranger)).body.webhooks, []);
+  // A delete erases the URL with the secret, whatever the format.
+  assert.equal((await g.api(`/v1/webhooks/${view.webhookId}`, undefined, g.token, "DELETE")).body.url, null);
+  assert.deepEqual((await db.query("SELECT url, secret, format FROM birbcrew_ts.webhook_endpoints WHERE webhook_id=$1", [view.webhookId])).rows,
+    [{ url: null, secret: null, format: "slack" }]);
+});
+
+test("the formats migration reads every existing endpoint as crew, keeps everything else, rewrites nothing and locks only webhook_endpoints", async (t) => {
+  const formatsMigration = migrations.find(file => file.endsWith("-notification-formats.sql"))!;
+  const upgraded = await databaseAt(t, Number(formatsMigration.split("-")[0]) - 1);
+  const { rows: [{ webhook_id: webhookId }] } = await upgraded.query<{ webhook_id: string }>(`INSERT INTO birbcrew_ts.webhook_endpoints
+      (owner_id,create_request_id,url,host,kinds,secret,state,enabled_at)
+    VALUES ('owner-upgrade', gen_random_uuid(), 'https://hooks.example.com/in', 'hooks.example.com', '{request.finished}', repeat('a', 43),
+      'enabled', clock_timestamp()) RETURNING webhook_id`);
+  const before = await schemaCatalog(upgraded);
+  const db = await upgraded.connect();
+  try {
+    await db.query("BEGIN");
+    const files = "SELECT pg_relation_filenode('birbcrew_ts.webhook_endpoints') AS endpoints";
+    const { rows: [unchanged] } = await db.query(files);
+    await db.query(await readFile(new URL(formatsMigration, sql), "utf8"));
+    assert.deepEqual((await db.query(files)).rows[0], unchanged, "no row is rewritten");
+    const { rows: locks } = await db.query(`SELECT c.relname AS relation, l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
+      WHERE l.pid=pg_backend_pid() AND c.relkind='r' AND c.relnamespace='birbcrew_ts'::regnamespace ORDER BY 1,2`);
+    assert.deepEqual(locks, [{ relation: "webhook_endpoints", mode: "AccessExclusiveLock" }]);
+    await db.query("COMMIT");
+  } catch (error) {
+    await db.query("ROLLBACK");
+    throw error;
+  } finally { db.release(); }
+  const after = await schemaCatalog(upgraded);
+  const guard = "function/birbcrew_ts.guard_webhook_endpoint()";
+  assert.deepEqual(Object.keys(before).filter(name => !(name in after)), []);
+  assert.deepEqual(Object.keys(before).filter(name => name in after && after[name] !== before[name]), [guard]);
+  assert.deepEqual(Object.entries(after).filter(([name]) => !(name in before)).sort(), [
+    ["birbcrew_ts.webhook_endpoints/webhook_endpoints_format_check", "CHECK ((format ~ '^[a-z][a-z0-9_]{0,31}$'::text))"],
+    ["column/birbcrew_ts.webhook_endpoints.format", "text NOT NULL DEFAULT 'crew'::text"],
+  ]);
+  // The guard is 032's with the format added to what never changes.
+  assert.equal(after[guard], before[guard].replace("OLD.kinds, OLD.created_at", "OLD.kinds, OLD.format, OLD.created_at")
+    .replace("NEW.kinds, NEW.created_at", "NEW.kinds, NEW.format, NEW.created_at"));
+  assert.deepEqual((await upgraded.query("SELECT format FROM birbcrew_ts.webhook_endpoints WHERE webhook_id=$1", [webhookId])).rows, [{ format: "crew" }]);
+  await assert.rejects(upgraded.query("UPDATE birbcrew_ts.webhook_endpoints SET format='slack'"), { code: "23514" });
 });
