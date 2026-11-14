@@ -129,7 +129,7 @@ const { values } = parseArgs({ options: { engine: { type: "string" }, mode: { ty
 if (values.help) {
   console.log("scripts/verify-members [--mode fixture] [--engine pi|claude|codex]\nscripts/verify-members --mode live --engine ENGINE --approval FILE");
 } else {
-  assert.equal(process.version, "v22.23.3", "Activate pinned Node 22.23.3");
+  assert.equal(process.version, "v24.22.3", "Activate pinned Node 24.22.3");
   const engine = z.enum(["pi", "claude", "codex"]).optional().parse(values.engine);
   if (values.mode === "live") {
     if (!engine || !values.approval) throw new Error("Supply an engine and an explicit proof approval");

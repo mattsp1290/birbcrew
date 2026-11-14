@@ -10,7 +10,7 @@ import { services, until } from "./member-services.mts";
 // Scheduled routines through the real gateway, Temporal worker and Pi fixture provider. No live
 // inference. A routine's window is made due by setting its next_window to the database clock;
 // the dispatcher then decides, claims and drives it exactly as it would at a cron window.
-assert.equal(process.version, "v22.23.3");
+assert.equal(process.version, "v24.22.3");
 const s = await services("pi");
 const ownerId = randomUUID(), token = randomUUID();
 const config = join(s.directory, "gateway.json");

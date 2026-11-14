@@ -10,7 +10,7 @@ import { services, until, type Engine } from "./member-services.mts";
 // Owner-written member memory through the real gateway, Temporal worker and fixture providers. No
 // live inference. Entry texts carry BIRBNOTE_ markers, which the fixture hook in fixture-profiles.mts
 // records from every provider request's system context and, separately, from its other messages.
-assert.equal(process.version, "v22.23.3");
+assert.equal(process.version, "v24.22.3");
 const s = await services();
 const owner = { id: randomUUID(), token: randomUUID() }, other = { id: randomUUID(), token: randomUUID() };
 const config = join(s.directory, "gateway.json");

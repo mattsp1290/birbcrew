@@ -7,7 +7,7 @@ case "$(uname -s)/$(uname -m)" in
   *) echo 'Adapter verification requires Linux arm64 or x64.' >&2; exit 1 ;;
 esac
 
-node_image='node@sha256:363e1587494626837fa7f9a23bdb453d13b0ff3c67c705c2805cfc69c2d2fad7'
+node_image='node@sha256:9d266751ca3d7fdbe651c878ffd5ad0a42fed49a18c283509267c97f025b7496'
 consumer=$(mktemp -d)
 trap 'rm -rf "$consumer"' EXIT
 mkdir -p "$consumer/tests/fixtures"
