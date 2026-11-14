@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+exec "${FINANCE_PYTHON:-python3}" -I -B -c 'import runpy,sys; from pathlib import Path; root=Path(sys.argv.pop(1)); sys.path.insert(0,str(root/"src")); sys.path.insert(0,str(root/"tests/finance")); runpy.run_path(str(root/"tests/finance/qualify.py"),run_name="__main__")' "$root" "$@"
