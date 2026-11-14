@@ -14,6 +14,9 @@ mkdir -p "$consumer/tests/fixtures"
 cp package.json package-lock.json "$consumer/"
 mkdir -p "$consumer/packages/pi-subagents"
 cp packages/pi-subagents/*.tgz "$consumer/packages/pi-subagents/"
+mkdir -p "$consumer/packages/client"
+cp packages/client/package.json packages/client/tsconfig.json "$consumer/packages/client/"
+cp -R packages/client/src "$consumer/packages/client/"
 cp -R vendor "$consumer/"
 cp -R tests/fixtures/engines "$consumer/tests/fixtures/"
 
@@ -22,5 +25,7 @@ run() {
     --volume "$consumer:/consumer" --workdir /consumer "$@"
 }
 
-run "$node_image" npm ci --omit=dev --no-audit --no-fund
+run "$node_image" npm ci --include=dev --no-audit --no-fund
+run --network none "$node_image" npm run build:client
+run --network none "$node_image" npm prune --omit=dev --no-audit --no-fund
 run --network none "$node_image" npm test

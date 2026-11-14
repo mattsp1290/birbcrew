@@ -58,7 +58,7 @@ export const fixedInjectedBytes = Buffer.byteLength(fixedContext(Array.from({ le
 /** The byte count and the SHA-256 of the UTF-8 text in lowercase hex, computed by PostgreSQL for
  * the row aliased `i`, so every route reports the digest the same way. */
 export const instructionsSummarySql = "json_build_object('bytes', octet_length(i.body), 'digest', encode(sha256(convert_to(i.body, 'UTF8')), 'hex'))";
-export type InstructionsSummary = { bytes: number; digest: string };
+export type InstructionsSummary = NonNullable<import("@birbcrew/client/contract").Member["instructions"]>;
 
 /** The member's instructions with their summary, or null when it has none. Assumes the caller
  * already knows the member is the owner's. */

@@ -29,10 +29,14 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 The digest above is the `node:22.23.3-bookworm-slim` index resolved on
 2026-11-12. Use BuildKit: the build context is limited by
 `packaging/service.Dockerfile.dockerignore` to the lockfiles, vendored packages,
-`scripts/build-native`, `native/member-launch.c` and `src/service`. Each platform
-runs `npm ci --omit=dev` and compiles the native launcher against the same
-bookworm glibc into `/app/.proof/bin/member-launch`, the path the source
-resolves. The image runs as `10001:10001` under `tini` and contains no
+the shared client's build inputs, `scripts/build-native`, `native/member-launch.c`
+and `src/service`. Each platform installs the locked development dependencies,
+compiles the shared client, then runs `npm prune --omit=dev`. The runtime image
+includes the client's compiled files and license at the local dependency's link
+target. It omits TypeScript and the client's source files. The builder compiles
+the native launcher against the same bookworm glibc into
+`/app/.proof/bin/member-launch`, the path the source resolves.
+The image runs as `10001:10001` under `tini` and contains no
 credentials. The `Service image` workflow rebuilds it for amd64 on relevant pull
 requests and runs it read-only with the flags below. **Verified:** the command above without `--push` built both
 platforms, arm64 natively and amd64 under QEMU. The amd64 image completed the Pi

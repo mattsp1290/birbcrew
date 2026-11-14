@@ -44,3 +44,4 @@ export PATH="$PWD/.proof/bin:$PATH"
 node --version
 npm ci --prefix clients --ignore-scripts --no-audit --no-fund
 npm ci --include=dev --no-audit --no-fund
+npm run build:client
