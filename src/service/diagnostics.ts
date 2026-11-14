@@ -11,7 +11,9 @@ const secretShapes: [RegExp, string][] = [
   [/(?<![\w-])[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/g, "[redacted]"],
   [/\b(bearer|basic)(\s+)[^\s"',;]+/gi, "$1$2[redacted]"],
   [/(\/\/[^\s/:@]*:)[^\s/@]+@/g, "$1[redacted]@"],
-  [/(token|secret|password|passwd|api[_-]?key|\bkey|authorization|credential)((?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)[^\s"',;\\]+/gi, "$1$2[redacted]"],
+  // The value runs to the next space or quote. A backslash belongs to it unless it escapes the closing quote.
+  [/(token|secret|password|passwd|api[_-]?key|\bkey|authorization|credential)((?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)(?:[^\s"',;\\]|\\(?!["']))+/gi,
+    "$1$2[redacted]"],
   [/[\w+-]{40,}=*/g, "[redacted]"],
 ];
 // Longer text is cut before the shapes run, so one huge message cannot stall the process that logs it.
@@ -58,6 +60,7 @@ export function forwardWarnings(to: (line: string) => void) {
 }
 
 const fixedKeys = new Set(["level", "logger", "event"]);
+const fieldName = /^[A-Za-z]{1,32}$/;
 
 /**
  * Writes one JSON line on stderr. String fields are redacted again here, so a caller's mistake cannot leak a token.
@@ -66,7 +69,7 @@ const fixedKeys = new Set(["level", "logger", "event"]);
 export function warn(event: string, fields: Record<string, Field> = {}) {
   try {
     const clean = Object.entries(fields).flatMap(([key, value]): [string, Field][] => {
-      if (fixedKeys.has(key)) return [];
+      if (fixedKeys.has(key) || !fieldName.test(key)) return [];
       if (typeof value === "string") return [[key, redact(value, 1024)]];
       return typeof value === "number" || typeof value === "boolean" || value === null ? [[key, value]] : [];
     });

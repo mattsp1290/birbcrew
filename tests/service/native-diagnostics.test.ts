@@ -37,6 +37,8 @@ test("redaction removes token-shaped text and keeps the rest readable", () => {
   assert.equal(redact("connect ECONNREFUSED postgres://birbcrew:hunter2@db.internal:5432/crew"),
     "connect ECONNREFUSED postgres://birbcrew:[redacted]@db.internal:5432/crew");
   assert.equal(redact(String.raw`body {\"access_token\":\"shortsecret\"}`), String.raw`body {\"access_token\":\"[redacted]\"}`);
+  assert.equal(redact(String.raw`password=ab\cd key=\\server\share {"password":"ab\/cd+ef"}`),
+    'password=[redacted] key=[redacted] {"password":"[redacted]"}');
 });
 
 test("redaction scans a bounded part of a huge text and drops a token cut at its edge", () => {
@@ -83,13 +85,14 @@ test("the supervisor host cleans a runner's warning again and names its turn", (
   const lines = capturedWarnings(t);
   const turn = { conversationId: randomUUID(), requestId: randomUUID() };
   relayWarning(JSON.stringify({ level: "error", logger: "forged", event: "codex_signin_unavailable", reason: "exited", exitCode: 1,
-    stderr: `first line\n{"level":"warn","event":"forged"} Bearer ${plantedKey}`, conversationId: "forged", nested: { token: plantedKey } }), turn);
+    stderr: `first line\n{"level":"warn","event":"forged"} Bearer ${plantedKey}`, conversationId: "forged", nested: { token: plantedKey },
+    [plantedJwt]: 1, "two words": 2 }), turn);
   const refused = ["not JSON", "null", "[]", '"text"', JSON.stringify({ event: "Not an event" }), JSON.stringify({ event: "long", pad: "y".repeat(9000) }),
     `{"event":"split"}\n{"event":"forged"}`];
   for (const line of refused) relayWarning(line, turn);
   assert.deepEqual(lines.map((line) => JSON.parse(line)), [{ level: "warn", logger: "birbcrew", event: "codex_signin_unavailable", reason: "exited",
     exitCode: 1, stderr: 'first line {"level":"warn","event":"forged"} Bearer [redacted]', ...turn }]);
-  assert.ok(lines.every((line) => !line.includes("\n") && !line.includes(plantedKey)));
+  assert.ok(lines.every((line) => !line.includes("\n") && !line.includes(plantedKey) && !line.includes(plantedJwt)));
 });
 
 async function failingProfiles(t: TestContext) {
