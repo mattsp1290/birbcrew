@@ -23,8 +23,10 @@ RUN scripts/build-native
 COPY src/service src/service
 
 FROM ${NODE_IMAGE}
+# Node carries its own trust roots. The bundled Codex binary reads the system store, and without it
+# every Codex member turn fails with "Connection failed: error sending request".
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini \
+    && apt-get install -y --no-install-recommends ca-certificates tini \
     && rm -rf /var/lib/apt/lists/* \
     && tini --version | grep -q '^tini version 0\.19\.0' \
     && groupadd --gid 10001 crew \
