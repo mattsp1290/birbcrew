@@ -14,6 +14,7 @@ import { textProjection, textWriter } from "./text-stream.ts";
 import { MemberStore } from "./store.ts";
 import { commandSchema, runnerResultSchema, type Launch } from "./supervisor.ts";
 import { recordSegmentUsage } from "./usage.ts";
+import { errorSummary, relayWarning, warn } from "./diagnostics.ts";
 
 const pool = new Pool({ connectionString: process.env.BIRBCREW_DATABASE_URL });
 const store = new MemberStore(pool);
@@ -151,6 +152,7 @@ async function start(launch: Launch): Promise<SegmentResult> {
   let exited: Promise<boolean> | undefined;
   let confirmed = false;
   let reaped = false;
+  let runnerEnd = "no exit";
   try {
     const { continuation } = admission;
     const project = await textProjection(pool, launch.conversationId);
@@ -173,13 +175,15 @@ async function start(launch: Launch): Promise<SegmentResult> {
           const matched = "matchedOperation" in value && value.matchedOperation === true;
           preview = (preview ?? stream.drain()).then(() => store.previewTool(launch, id, matched));
           void preview.catch(() => { });
+        } else if (value && typeof value === "object" && "warning" in value && typeof value.warning === "string") {
+          relayWarning(value.warning, { conversationId: launch.conversationId, requestId: launch.requestId });
         } else {
           reply = value;
         }
       });
       exited = new Promise<boolean>((resolve) => {
-        child.once("error", () => resolve(false));
-        child.once("close", (code) => resolve(code === 0));
+        child.once("error", () => { runnerEnd = "process error"; resolve(false); });
+        child.once("close", (code, signal) => { runnerEnd = signal ? "signal " + signal : "exit code " + code; resolve(code === 0); });
       });
       child.send({ launch, conversation, checkpoint, continuation, childProfile, childResults,threadId:launch.childId ?? conversation.conversationId, runId: launch.requestId, text: launch.text }, (error) => {
         if (error) killNativeGroup(child);
@@ -192,10 +196,14 @@ async function start(launch: Launch): Promise<SegmentResult> {
     await preview;
     const pid = active.get(launch.token)?.pid;
     reaped = pid !== undefined && await groupStopped(pid);
-    if (!confirmed || !reaped) throw new Error("SDK process stopped without a confirmed result");
+    if (!confirmed || !reaped) {
+      const state = [runnerEnd, reply === undefined && "no reply", !reaped && "process group still running"].filter(Boolean).join(", ");
+      throw new Error("SDK process stopped without a confirmed result (" + state + ")");
+    }
     const {ownerId,conversationId,requestId,token} = launch;
     const childKey = launch.childId ? {ownerId,conversationId,requestId,memberId:member.conversation.memberId,childId:launch.childId} : undefined;
-    if (childKey && z.strictObject({error:z.literal("Native SDK turn failed")}).safeParse(reply).success) {
+    if (z.strictObject({error:z.literal("Native SDK turn failed")}).safeParse(reply).success) {
+      if (!childKey) throw new Error("Native runner reported a failed turn");
       await children.finish(childKey,token,null);
       return {kind:"childDone"};
     }
@@ -306,7 +314,8 @@ process.on("message", async (message) => {
   let response;
   try {
     response = { id, ok: true, reply: await handle(launch, action) };
-  } catch {
+  } catch (error) {
+    warn("native_turn_unconfirmed", { action, conversationId: launch.conversationId, requestId: launch.requestId, ...errorSummary(error) });
     response = { id, ok: false, error: "Native turn denied or outcome uncertain" };
   }
   if (process.connected) process.send?.(response, () => {});

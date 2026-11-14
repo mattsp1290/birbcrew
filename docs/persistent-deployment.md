@@ -142,6 +142,7 @@ the gateway, worker and CLI, and a plaintext connection was refused.
 | --- | --- | --- |
 | `/var/lib/birbcrew/native` | Persistent volume, worker only | Writable by uid 10001. The worker creates `.birbcrew-volume` identity files, at the root for Claude and under `codex/` for Codex. Those profiles are registered to that identity, so a replacement worker must mount the same volume. Pi context lives in PostgreSQL. |
 | `/tmp` | tmpfs | Writable, exec allowed, mode `1777`. |
+| `BIRBCREW_CODEX_AUTH_HOME` | Codex sign-in, worker only | Read-only is enough. `auth.json` must be readable by uid 10001. The worker never writes this directory, so the Codex CLI that owns the login stays its only writer. |
 | `/etc/crew/...` | Read-only secrets | Gateway configuration and Temporal TLS files, readable by uid 10001. |
 
 Keep the state directory at the same absolute path for the life of the
@@ -276,14 +277,31 @@ expire. The value names accounts, so supply it from a Secret.
   `.crew.v1`.
 - **Codex (ChatGPT subscription):** add the `codex` entry with provider
   `chatgpt-subscription` and set `BIRBCREW_CODEX_AUTH_HOME` to an absolute
-  directory holding a Codex CLI ChatGPT login. Each turn starts the bundled
-  `codex app-server` with that directory as `CODEX_HOME` and reads the current
-  access token without refreshing it. The turn stops unless the token is current
-  and belongs to `account_id`. Without `BIRBCREW_CODEX_AUTH_HOME` the
+  directory holding a Codex CLI ChatGPT login in `auth.json`. Each turn copies
+  that file without its refresh token into a private directory under `/tmp`,
+  starts the bundled `codex app-server` there and reads the current access token.
+  The copy is removed after the read. A worker killed during the read leaves its
+  copy behind, and a later read removes copies older than five minutes. Refresh
+  requests from that app-server go to a closed loopback port, so the worker never
+  rotates the login. It never writes the sign-in directory either, which can be
+  mounted read-only. The turn stops
+  unless the token is current and belongs to `account_id`. Without `BIRBCREW_CODEX_AUTH_HOME` the
   worker falls back to `CODEX_HOME`, then `$HOME/.codex`, which is the tmpfs
   `/tmp/.codex` in this image, so set it explicitly. Keep the login current with the Codex
   CLI against the same directory. How that refresh runs in the cluster is
   **unverified**.
+
+A failed member turn writes one JSON line per cause to the worker's stderr, each
+with `"level":"warn"`, `conversationId` and `requestId`. A Codex sign-in problem
+gives `codex_signin_unavailable`. Its `reason` is one of `login-file`, `scratch`,
+`start`, `exited`, `timeout`, `protocol`, `signed-out`, `token`, `expired` or
+`account`. An `expired` line carries `expiredAt`. A `codex app-server` that
+stopped adds `exitCode` or `signal` and the end of its stderr. The turn runner
+then logs `native_turn_failed` and the supervisor `native_turn_unconfirmed`, with
+the error class and message. A runner that died without a reply is named with
+its exit code or signal. `codex_signin_copy_left` means a sign-in copy could not
+be removed. Token-shaped text in these lines is replaced with `[redacted]`. The
+message a member sees does not carry the cause.
 
 Releases before this setting read dated attestation files through
 `BIRBCREW_PI_ATTESTATION` and `BIRBCREW_CODEX_ATTESTATION`. Those variables are

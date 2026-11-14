@@ -47,8 +47,11 @@ can revoke a key, and a Codex sign-in must stay current.
 5. For a subscription-backed Codex member, use the worker operator's ChatGPT
    sign-in. Run `codex login status` in the operator's environment. If needed,
    run `codex login` and choose ChatGPT. The worker reads the CLI login from
-   `CODEX_HOME` (default `~/.codex`), or from the absolute directory named by
-   `BIRBCREW_CODEX_AUTH_HOME`. [OpenAI sign-in documentation](https://developers.openai.com/codex/auth/)
+   `auth.json` in `CODEX_HOME` (default `~/.codex`), or in the absolute directory
+   named by `BIRBCREW_CODEX_AUTH_HOME`. A login kept in the operating system
+   keyring is not read. The worker never writes that directory and never
+   refreshes the login, so the directory can be read-only and the CLI that owns
+   the login must keep it current. [OpenAI sign-in documentation](https://developers.openai.com/codex/auth/)
 
    Add a `codex` entry with provider `chatgpt-subscription`, `account_id` set to
    the signed-in ChatGPT workspace ID, and `model` set to a model listed in the
