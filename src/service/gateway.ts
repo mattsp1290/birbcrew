@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { EventType as E, type Event } from "@ag-ui/core";
+import { EventType as E, PROTOCOL_VERSION, type Event } from "@ag-ui/core";
 import { RunAgentInputSchema } from "@ag-ui/core/schemas";
 import { EventEncoder } from "@ag-ui/encoder";
 import { Client, Connection, WorkflowUpdateFailedError } from "@temporalio/client";
@@ -140,7 +140,7 @@ async function observe(
     return true;
   }
   try {
-    await send({ type: E.RUN_STARTED, threadId, runId });
+    await send({ type: E.RUN_STARTED, threadId, runId, protocolVersion: PROTOCOL_VERSION });
     await send({ type: E.MESSAGES_SNAPSHOT, messages: snapshot.messages });
     await send({ type: E.STATE_SNAPSHOT, snapshot: snapshot.state }, cursor);
     if (snapshot.state.openStep) await send({ type: E.STEP_STARTED, stepName: snapshot.state.openStep });

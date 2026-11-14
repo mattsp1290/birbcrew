@@ -56,6 +56,8 @@ test("a conversation that uses its last turn still ends both observers with a su
   const end = await (await host.api(path)).json();
   assert.equal(end.state.phase,"complete");
   for (const reader of readers) {
+    // The pinned AG-UI version; a package bump that changes it needs a deliberate look.
+    assert.deepEqual([reader.events[0]?.type,reader.events[0]?.protocolVersion],["RUN_STARTED","1.0"]);
     const last = reader.events.at(-1);
     assert.equal(last?.type,"RUN_FINISHED");
     assert.ok(last && !("outcome" in last));
