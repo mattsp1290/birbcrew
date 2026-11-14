@@ -43,6 +43,12 @@ export async function verifyObserverProcesses(s: Services, engines: Engine[]) {
       const { memberId } = await api("/members", { engine, profile: "fixture.approval.v1", requestId: randomUUID() });
       const id = randomUUID(), path = "/conversations/" + id;
       await api("/conversations", { memberId, conversationId: id });
+      // Each observe.mjs exits on RUN_FINISHED, which the gateway sends only when the conversation ends:
+      // it is cancelled, or the input that uses its last turn completes. A new conversation has 128 turns
+      // (docs/bounded-conversations.md), so pin this one to the four-turn budget migration 16 keeps for
+      // older conversations; the fourth input below is then its last.
+      assert.equal(await s.sql("WITH pinned AS (UPDATE birbcrew_ts.conversations SET turn_limit=4 WHERE conversation_id='" + id +
+        "' AND turn_limit=128 RETURNING 1) SELECT count(*) FROM pinned"), "1");
       const a = await attach(engine, id, "a");
       const prompts = ["remember " + randomUUID(), "recall", "remember " + randomUUID()];
       for (const [i, text] of prompts.entries()) {
