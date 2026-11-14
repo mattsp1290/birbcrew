@@ -29,6 +29,21 @@ CREATE TABLE IF NOT EXISTS operations (
     payload text NOT NULL, result jsonb NOT NULL, deliveries integer NOT NULL DEFAULT 1
 );
 """
+FINANCE_SCHEMA = """
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+        WHERE conname='conversations_id_owner_unique' AND conrelid='conversations'::regclass)
+    THEN
+        ALTER TABLE conversations ADD CONSTRAINT conversations_id_owner_unique UNIQUE(id,owner);
+    END IF;
+END $$;
+CREATE TABLE IF NOT EXISTS finance_threads (
+    owner text PRIMARY KEY, conversation_id text NOT NULL UNIQUE,
+    CONSTRAINT finance_threads_owner_thread_fkey FOREIGN KEY(conversation_id,owner)
+        REFERENCES conversations(id,owner) DEFERRABLE INITIALLY DEFERRED
+);
+"""
+MIGRATION_LOCK = 8801290
 RETAIN_EVENTS = 256
 
 
@@ -38,7 +53,9 @@ async def connect():
 
 async def migrate() -> None:
     async with await connect() as db:
+        await db.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK,))
         await db.execute(SCHEMA)
+        await db.execute(FINANCE_SCHEMA)
 
 
 async def create(state: Conversation) -> bool:
@@ -56,7 +73,8 @@ async def snapshot(cid: str, owner: str) -> dict | None:
         row = await (
             await db.execute(
                 "SELECT snapshot,snapshot_cursor AS cursor FROM conversations "
-                "WHERE id=%s AND owner=%s",
+                "WHERE id=%s AND owner=%s AND NOT EXISTS "
+                "(SELECT 1 FROM finance_threads f WHERE f.conversation_id=conversations.id)",
                 (cid, owner),
             )
         ).fetchone()
@@ -227,6 +245,11 @@ async def conversations_for_owner(owner: str, project_id: str | None = None) -> 
             )
             params = (owner, project_id)
         rows = await (
-            await db.execute(query + "ORDER BY last_activity_at DESC, id LIMIT 100", params)
+            await db.execute(
+                query + "AND NOT EXISTS (SELECT 1 FROM finance_threads f "
+                "WHERE f.conversation_id=conversations.id) "
+                "ORDER BY last_activity_at DESC, id LIMIT 100",
+                params,
+            )
         ).fetchall()
         return rows

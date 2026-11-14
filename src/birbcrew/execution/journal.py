@@ -1,11 +1,12 @@
 from psycopg.types.json import Jsonb
 
 from birbcrew.execution.contract import digest
-from birbcrew.store import connect
+from birbcrew.store import MIGRATION_LOCK, connect
 
 
 async def migrate():
     async with await connect() as db:
+        await db.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK,))
         await db.execute("""
             CREATE SCHEMA IF NOT EXISTS execution;
             CREATE TABLE IF NOT EXISTS execution.operations (
