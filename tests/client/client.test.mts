@@ -138,3 +138,19 @@ test("receipt validation preserves independent cancellation facts and historical
     assert.deepEqual(requestReceiptSchema.parse(value), value);
   }
 });
+
+test("instruction packs preserve server ordering and reject duplicate normalized UUIDs before dispatch", async () => {
+  const instructionPacks = [randomUUID(), randomUUID()];
+  const s = await serve((request, response) => request.method === "POST"
+    ? json(response, { ...member, instructionPacks }, 201)
+    : json(response, { apiVersion: "1", members: [{ ...member, instructionPacks }], next: null }));
+  try {
+    assert.deepEqual((await s.client.createMember({ requestId, engine: "claude", profile: "test", instructionPacks })).instructionPacks, instructionPacks);
+    assert.deepEqual(JSON.parse(s.seen[0].body).instructionPacks, instructionPacks);
+    assert.deepEqual((await s.client.listMembers()).members[0].instructionPacks, instructionPacks);
+    for (const invalid of [[], [instructionPacks[0], instructionPacks[0].toUpperCase()], Array.from({ length: 9 }, () => randomUUID())]) {
+      assert.throws(() => s.client.createMember({ requestId, engine: "claude", profile: "test", instructionPacks: invalid }));
+    }
+    assert.equal(s.seen.length, 2);
+  } finally { await s.close(); }
+});

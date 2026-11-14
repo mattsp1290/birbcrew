@@ -26,6 +26,8 @@ Every method makes one HTTP attempt. There is no polling, retry, provisioning or
 
 Receipt status, cancellation delivery, native termination and effects are independent facts. Only `completed` requires `result.text`. Historical noncompleted receipts may carry a result. `uncertain` is a server receipt state, distinct from an unknown HTTP command outcome.
 
+Member creation accepts optional instructions and ordered instruction-pack UUIDs, matching the server's eight-pack limit and duplicate rejection. Member creation and listing retain the attached pack IDs.
+
 Methods cover capabilities, health, member listing and creation, conversation opening and snapshot projection, submission, request status, cancellation and approval decisions. `decide` requires the member, request, invocation and approval identities supplied by the observation state. The domain snapshot exposes cursor, conversationId, memberId, engine, profile and phase. Official AG-UI observation owns message and tool interpretation.
 
 Install exact optional peers `@ag-ui/client@1.0.4` and `@ag-ui/core@1.0.4` to use observation.
@@ -37,6 +39,6 @@ await observer.runAgent();
 // observer.abortRun() only disconnects observation.
 ```
 
-`openapi.json` is OpenAPI 3.1 for the core integration endpoints, including bearer authentication, errors and SSE. It is not the complete Crew API. Its `x-excluded-routes` enumerates audit, routine, memory, usage, grant, instructions, handoff, conversation listing and legacy submission/cancellation routes outside this release. JSON snapshot message and tool fields are opaque JSON; use official AG-UI to interpret them. Runtime UTF-8 byte and control-character restrictions appear in schema extension annotations.
+`openapi.json` is OpenAPI 3.1 for the core integration endpoints, including bearer authentication, errors and SSE. It is not the complete Crew API. Its `x-excluded-routes` enumerates audit, routine, memory, instruction-pack, webhook, usage, grant, instructions, handoff, conversation listing and legacy submission/cancellation routes outside this release. JSON snapshot message and tool fields are opaque JSON; use official AG-UI to interpret them. Runtime UTF-8 byte and control-character restrictions appear in schema extension annotations.
 
 The server and client import the same public contract schemas. From the repository root, run `npm run openapi` to generate the document and `npm run check:openapi` to check freshness directly against source. `npm run verify:client` packs the artifact and tests clean Node 22.23.3 and 24.22.3 consumers, browser types and bundling. Set `CREW_NODE22` and `CREW_NODE24` to those binaries. Full native service qualification remains `npm run test:api:service`, after `scripts/build-native` and the existing service prerequisites.
