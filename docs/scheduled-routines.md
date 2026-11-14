@@ -104,7 +104,8 @@ trigger keeps a firing's identity fixed.
 An open refused with `409 memory_limit`, because the member's [memory](memories.md)
 with the project notes would not fit its engine, is such a refusal: the firing fails
 `rejected` and counts. So is `409 instructions_limit`, when the member's
-[instructions](member-instructions.md) with the project notes would not fit. It names no
+[instructions](member-instructions.md) and [instruction packs](instruction-packs.md) with
+the project notes would not fit. It names no
 other reason, so check the member's entries and instructions when a Codex member's
 firings start failing `rejected`.
 

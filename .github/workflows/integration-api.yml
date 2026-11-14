@@ -43,6 +43,7 @@ jobs:
       - run: npm run test:routines
       - run: npm run test:memories
       - run: npm run test:instructions
+      - run: npm run test:packs
       - run: npm run test:grants
       - run: npm run test:handoffs
       - run: npm run test:expiry

@@ -185,7 +185,7 @@ calendar day of the database clock, from midnight to midnight. A budget counts i
 plus output tokens of the member's `reported` rows recorded in the window. Input
 includes cache reads and writes, so a long Codex or Claude conversation that rereads
 its context counts that context every time. That context includes the member's
-[instructions](member-instructions.md), project notes and memory, which every launch
+[instruction packs](instruction-packs.md), [instructions](member-instructions.md), project notes and memory, which every launch
 sends again. Crew meters them as input like the rest; no token limit applies to them
 apart from the member's budget, and their byte limits when a conversation opens are
 unchanged. `unknown` rows count nothing. A budget applies to one member

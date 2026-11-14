@@ -46,8 +46,9 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   records no admission, and a request refused under its member's usage budget
   (`usage.request_refused`, whose payload names the routine instead when a routine's
   firing submitted it). `member.spawned`, `member.instructions_set`,
-  `conversation.opened`, `conversation.handed_off`, the routine facts, the memory
-  facts and the budget facts belong to no request and name the acting owner. Migration 25 adds the
+  `member.instruction_packs_attached`, `conversation.opened`, `conversation.handed_off`,
+  the routine facts, the memory facts, the budget facts, the webhook facts and the
+  instruction pack facts belong to no request and name the acting owner. Migration 25 adds the
   second kind, `routine`, with the routine's ID: an admission records it only from
   the routine's firing row (see
   [scheduled routines](scheduled-routines.md#what-a-firing-records)). Migration 27
@@ -61,8 +62,9 @@ Each row in `birbcrew_ts.audit_events` records one fact:
   Standing grants (migration 24) added no kind: a call a grant approves keeps its
   request's initiator, and `approval.auto_approved` names the system as its actor.
 - `event_type`, `member_id`, `conversation_id`, `request_id` and a small
-  `payload` object. `member_id` is null only for the `webhook.*` types, which belong
-  to the owner and to no member (migration 32, `audit_events_member_check`).
+  `payload` object. `member_id` is null only for the `webhook.*` and
+  `instruction_pack.*` types, which belong to the owner and to no member (migrations
+  32 and 33, `audit_events_member_check`).
 
 The audit row is written in the **same transaction** as the change it records, so
 a rolled-back change leaves no row, and a change committed by a release that
@@ -80,7 +82,8 @@ Payloads contain identifiers, SHA-256 digests, choices and statuses only. They
 never contain prompt or reply text, tool arguments or results, notes, member memory
 text, tokens or credentials. Memory rows carry no digest of their text either: the
 owner can delete an entry, and a digest kept in this table would let an export holder
-confirm a guess of the deleted text. Member instructions are never erased, so their row
+confirm a guess of the deleted text. Instruction pack rows carry only pack IDs, for the
+same reason: a pack no member has can be deleted. Member instructions are never erased, so their row
 carries the SHA-256 of the text, never the text. `src/service/audit.ts` validates each payload against a strict schema
 before insert, so extra fields are refused. The prompt digest is the hex SHA-256 of
 the exact UTF-8 text, the same digest that admission already stores. A handoff's
@@ -101,7 +104,7 @@ audit version may switch to a keyed per-owner digest.
 
 The registry is the `auditEvents` object in `src/service/audit.ts`.
 `audit_events_type_check` in `src/service/sql/021-audit.sql`, widened by
-`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql`, `027-handoffs.sql`, `028-approval-expiry.sql`, `029-member-instructions.sql`, `031-usage.sql` and then `032-webhooks.sql`, lists the same types.
+`024-standing-grants.sql`, `025-routines.sql`, `026-memories.sql`, `027-handoffs.sql`, `028-approval-expiry.sql`, `029-member-instructions.sql`, `031-usage.sql`, `032-webhooks.sql` and then `033-instruction-packs.sql`, lists the same types.
 Each widening replaces the whole constraint, so the last widening lists every type.
 A test checks that the two lists match. `GET /v1/capabilities` lists them under
 `audit.eventTypes`.
@@ -138,6 +141,9 @@ A test checks that the two lists match. `GET /v1/capabilities` lists them under
 | `webhook.enabled` | owner | an endpoint is enabled; no member | endpoint + revision | `webhookId`, `revision`, `host` |
 | `webhook.disabled` | owner, or system for `consecutive_failures` and `recovery_restore` | an endpoint is disabled; no member | endpoint + revision | `webhookId`, `revision`, `host`, `reason` |
 | `webhook.deleted` | owner | an endpoint is deleted and its URL and secret erased; no member | endpoint + revision | `webhookId`, `revision`, `host` |
+| `instruction_pack.created` | owner | an [instruction pack](instruction-packs.md) is created; no member | pack | `packId` |
+| `instruction_pack.deleted` | owner | a pack no member has is deleted and its text erased; no member | pack | `packId` |
+| `member.instruction_packs_attached` | owner | `spawn` inserts a member with instruction packs | member | `packIds`, in the order the model reads them |
 
 `approval.decided` names the deciding owner as its actor. Through the gateway, the
 owner comes from the bearer token at `POST .../human`. The operator CLI names the
@@ -358,6 +364,12 @@ which allows a null member only on the `webhook.*` types, and replaces
 `audit_events`, without queueing; after 31 in one transaction it already holds that
 table. [Outbound webhooks](webhooks.md#upgrade) lists its locks. `memberId` is `null`
 on `webhook.*` rows in JSON, and their CSV cell is empty.
+
+Migration 33 replaces `audit_events_member_check`, so that a null member is also allowed on
+the two `instruction_pack.*` types, and `audit_events_type_check`, with every clause 32 lists
+and the three pack types, both `NOT VALID` and without a rewrite, and adds two partial unique
+indexes. It takes `audit_events` together with `members` without queueing;
+[instruction packs](instruction-packs.md#upgrade) lists its locks.
 
 The audit table carries the `recovery_write_barrier` trigger, so held installations
 refuse audit writes and recovery capture accepts the table. The manifest
