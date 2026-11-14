@@ -194,7 +194,8 @@ Notes and the memory set never grow after a conversation opens. So
 `openConversation` composes the context the way each launch will, and refuses the
 open with `409 memory_limit` when the notes alone fit the member's engine but notes
 and memory together do not. Nothing is written. A member with
-[instructions](member-instructions.md#limits-and-context-size) counts them with the
+[instructions](member-instructions.md#limits-and-context-size) or
+[instruction packs](instruction-packs.md#limits-and-context-size) counts them with the
 notes: `memory_limit` then means notes and instructions fit without the memory. With 31 entries of 1024 quotes and no
 notes, a Codex member opens: its argument is 129,321 bytes. To open with more, delete
 entries. Notes too large on their own are not memory's doing: such a conversation

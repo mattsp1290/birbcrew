@@ -44,12 +44,13 @@ exists. This is how `conversationId` already behaved.
 
 - `memberId` matches every row of the member, including the routine and memory
   rows, which name the routine's or the entry's member, and
-  `member.instructions_set`. A `conversation.handed_off` row names the source
+  `member.instructions_set` and `member.instruction_packs_attached`. A `conversation.handed_off` row names the source
   conversation and its member, so the source member's ID matches it and the
   target member's ID does not, unless the target is the source's own member. The
   target member's ID matches the target's `conversation.opened` row and its
-  reserved request's rows. The [webhook](webhooks.md#audit) rows name no member
-  (`memberId` is `null`), so no `memberId` matches them; `eventType` selects them.
+  reserved request's rows. The [webhook](webhooks.md#audit) and
+  [instruction pack](instruction-packs.md#audit) rows name no member (`memberId` is
+  `null`), so no `memberId` matches them; `eventType` selects them.
 - `eventType` takes names from `audit.eventTypes`. A name is case-sensitive. A
   registered type with no rows yet returns an empty page.
 - `actorKind` and `initiatorKind` match the `actor.kind` and `initiator.kind`

@@ -7,8 +7,8 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { services, until } from "./member-services.mts";
 
-// Owner-written member instructions through the real gateway, Temporal worker and fixture providers.
-// No live inference. Instruction texts carry BIRBNOTE_ markers, which the fixture hook in
+// Owner-written member instructions and instruction packs through the real gateway, Temporal worker and
+// fixture providers. No live inference. Instruction and pack texts carry BIRBNOTE_ markers, which the fixture hook in
 // fixture-profiles.mts records from every provider request's system context and, separately, from
 // its other messages.
 assert.equal(process.version, "v22.23.3");
@@ -152,18 +152,45 @@ try {
       console.log(`${engine}: both turns of a conversation gave the model the member's instructions`);
     }
 
+    // Instruction packs reach every engine the same way, on every turn, with the member's own instructions after them.
+    const [styleMark, safetyMark, reviewMark] = [marker(), marker(), marker()];
+    const style = await api("/v1/instruction-packs", { body: { requestId: randomUUID(), name: "house style", text: "Answer tersely. " + styleMark } });
+    const safety = await api("/v1/instruction-packs", { body: { requestId: randomUUID(), name: "safety", description: "Shared by every member",
+      text: "Never print secrets. " + safetyMark } });
+    await api("/v1/members", { body: { requestId: randomUUID(), engine: "pi", profile: "fixture.approval.v1", instructionPacks: [style.packId] },
+      token: other.token, expected: 404 });
+    for (const engine of ["pi", "claude", "codex"] as const) {
+      const spawned = await api("/v1/members", { body: { requestId: randomUUID(), engine, profile: engine === "pi" ? "fixture.approval.v1" : "fixture.v1",
+        instructionPacks: [style.packId, safety.packId], ...(engine === "pi" && { instructions: "You review migrations. " + reviewMark }) } });
+      assert.deepEqual(spawned.instructionPacks, [style.packId, safety.packId]);
+      const conversation = await open(spawned.memberId);
+      await requests();
+      const system = [styleMark, safetyMark, ...(engine === "pi" ? [reviewMark] : [])].sort();
+      await turn(conversation, "remember cedar");
+      assert.deepEqual(await requests(), [{ engine, system, messages: [], continuation: false }]);
+      assert.equal((await turn(conversation, "recall")).result.text, "recalled cedar");
+      assert.deepEqual(await requests(), [{ engine, system, messages: [], continuation: false }]);
+      console.log(`${engine}: both turns of a conversation gave the model the member's two instruction packs`
+        + (engine === "pi" ? " and its own instructions" : ""));
+    }
+    await api(`/v1/instruction-packs/${style.packId}`, { method: "DELETE", expected: 409 });
+    assert.equal((await api(`/v1/instruction-packs/${style.packId}`)).memberCount, 3);
+    console.log("packs: another owner could not attach them, and a pack in use could not be deleted");
+
     // No marker reaches what observers, receipts, listings or the audit trail return.
-    const all = [role, takeover, ...native];
+    const all = [role, takeover, ...native, styleMark, safetyMark, reviewMark];
     const leaked = async (statement: string) => [...(await s.sql(statement)).matchAll(/BIRBNOTE_[A-Z0-9]+/g)].map(match => match[0]);
     for (const table of ["public_events", "public_snapshots", "request_admissions", "audit_events", "conversation_handoffs"]) {
       assert.deepEqual(await leaked(`SELECT to_jsonb(t) FROM birbcrew_ts.${table} t`), [], table);
     }
     assert.deepEqual(await leaked("SELECT reply FROM birbcrew_ts.turns"), []);
     const published = JSON.stringify([await api(`/v1/conversations/${a}`), await api("/v1/members"), await api("/v1/conversations"),
-      await api(`/v1/conversations/${source}/handoff`), await api("/v1/audit?limit=1000")]) + await api("/v1/audit?format=csv&limit=10000");
+      await api(`/v1/conversations/${source}/handoff`), await api("/v1/audit?limit=1000"), await api("/v1/instruction-packs")])
+      + await api("/v1/audit?format=csv&limit=10000");
     assert.deepEqual(all.filter(value => published.includes(value)), []);
     assert.equal((await api(`/v1/members/${pi.memberId}/instructions`)).instructions.text, "You review database migrations. " + role);
-    console.log("no instruction text reached public events, snapshots, receipts, listings or the audit trail; the owner route returns it");
+    assert.equal((await api(`/v1/instruction-packs/${safety.packId}`)).text, "Never print secrets. " + safetyMark);
+    console.log("no instruction or pack text reached public events, snapshots, receipts, listings or the audit trail; the owner routes return it");
   } finally { await stopGateway?.(); await stopWorker(); await stopTemporal(); }
 } finally { await s.close(); }
-console.log("Member instructions proof passed with actual service fixtures; no live inference.");
+console.log("Member instructions and instruction packs proof passed with actual service fixtures; no live inference.");

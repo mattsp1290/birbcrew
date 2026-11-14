@@ -27,8 +27,8 @@ this in one PostgreSQL transaction:
    UUID the server draws: the project-notes capture, the
    [member memory](memories.md) snapshot, the `409 memory_limit` and
    `409 instructions_limit` refusals and the `conversation.opened` audit row. Every
-   launch of the target gets its member's [instructions](member-instructions.md), as any
-   conversation of that member does.
+   launch of the target gets its member's [instruction packs](instruction-packs.md) and
+   [instructions](member-instructions.md), as any conversation of that member does.
 6. Inserts an immutable `conversation_handoffs` row: the source, the target, the
    client's `requestId`, a server-reserved `firstRequestId`, the transcript, its
    SHA-256 digest and the turn counts. The row seals the source.
@@ -112,8 +112,8 @@ target's first user message in its snapshot, and the reserved request's receipt 
 | `409` | `handoff_too_large` | the source's newest committed turn alone does not fit the transcript budget |
 | `409` | `trusted_conversation` | the source is attached to the [trusted-context lane](trusted-application-context.md) |
 | `409` | `history_unavailable` | the source predates the public event ledger, or a committed prompt does not match its turn's digest |
-| `409` | `memory_limit` | the project notes and the target member's instructions fit its engine but not with its memory, as for any open |
-| `409` | `instructions_limit` | the project notes fit the target member's engine but not with its instructions, as for any open |
+| `409` | `memory_limit` | the project notes and the target member's instructions (and any packs) fit its engine but not with its memory, as for any open |
+| `409` | `instructions_limit` | the project notes fit the target member's engine but not with its instructions (and any packs), as for any open |
 | `409` | `usage_limit` | the target member has used its daily [usage budget](usage-metering.md#budgets) |
 | `409` | `conflict` | the `requestId` was used with another source or member; on the target's request routes, the reserved request's ID sent with other text or with an approval deadline |
 | `409` | `handoff_pending` | on the target's request routes: its reserved request is not admitted yet |

@@ -31,6 +31,8 @@ jobs:
       - run: npm run test:proxy
       - run: npm run test:telemetry
       - run: npm test
+      - name: Codex sign-in on a read-only home
+        run: node --test tests/service/codex-subscription.test.ts
   proxy-service-restart:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
