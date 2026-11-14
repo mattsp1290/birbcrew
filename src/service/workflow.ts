@@ -7,6 +7,7 @@ import { acceptsChoice } from "./deferral.ts";
 import { turnRequestSchema, type Conversation, type TurnRequest } from "./domain.ts";
 import type { Approval, Decision, Choice } from "./approvals.ts";
 import type { ChildKey, ChildStore } from "./children.ts";
+import { childTarget } from "./child-target.ts";
 import type { expiryActivity, MemberActivities, Resume } from "./activities.ts";
 
 import type { MemberStore, ownerAdmissionActivity } from "./store.ts";
@@ -25,7 +26,10 @@ function actions(queue: string) {
 }
 
 export async function piChildWorkflow(key: ChildKey, profile: string): Promise<void> {
-  const { executeChildSegment, settleApproval } = actions(activityQueue("pi", profile));
+  // A child runs on its target's queue. A key without one, as every key recorded before targets,
+  // runs on its parent's Pi profile. Replay compares activity type and ID, not the queue.
+  const runner = childTarget(key.target, profile);
+  const { executeChildSegment, settleApproval } = actions(activityQueue(runner.engine, runner.profile));
   const {reconcileChild, closeExitedChild} = proxyActivities<{reconcileChild:ChildStore["reconcile"]; closeExitedChild:ChildStore["closeExitedChild"]}>({
     taskQueue:memberTaskQueue,startToCloseTimeout:"20 seconds",scheduleToCloseTimeout:"2 minutes",
   });

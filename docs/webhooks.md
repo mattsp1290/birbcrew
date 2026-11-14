@@ -267,6 +267,7 @@ audit rows above:
 | A handoff is refused for its target's budget | None: the handoff writes nothing | Nothing |
 | The handoff's reserved first request finishes | `request.finished` on the target, with the handoff as initiator | `request.finished` with the target's `memberId`, `conversationId` and the reserved `requestId` |
 | A member is spawned with [instructions](member-instructions.md) | `member.instructions_set` | Nothing |
+| An [instruction pack](instruction-packs.md) is created or deleted, or a member is spawned with packs | `instruction_pack.created`, `instruction_pack.deleted`, `member.instruction_packs_attached` | Nothing |
 
 No kind says that a card stopped being pending, whether by a decision, a cancel or
 an expiry; the request's `request.finished` follows each. Its body does not say
@@ -348,8 +349,8 @@ Node's bundled certificate authorities, plus any the operator adds through
 
 `host` is the URL's host and port. The trail never holds the path, the query or the
 secret: a URL path can itself be a credential. Endpoints belong to the owner, not
-to a member, so `webhook.*` rows are the only audit rows whose `memberId` is
-`null`, and their CSV cell is empty. A [`memberId` filter](audit-filters.md) never
+to a member, so `webhook.*` rows, like the [`instruction_pack.*`](instruction-packs.md#audit)
+rows, have a `null` `memberId`, and their CSV cell is empty. A [`memberId` filter](audit-filters.md) never
 matches them; select them with `eventType`. Deliveries are not audited; their rows
 are the record.
 
@@ -440,8 +441,8 @@ migration (see [persistent deployment](persistent-deployment.md#upgrades)).
 
 - Other audit types are not deliverable: spawns, opens, admissions, decisions,
   grants, routine lifecycle changes by the owner, memory and webhook changes,
-  approval expiries, handoffs, member instructions, budget changes and budget
-  refusals (see [what they send](#handoffs-approval-expiry-and-usage-budgets)).
+  approval expiries, handoffs, member instructions, instruction packs, budget changes
+  and budget refusals (see [what they send](#handoffs-approval-expiry-and-usage-budgets)).
   Adding a kind means adding it to `webhookKinds` and to the two CHECKs in a
   migration.
 - Inbound webhooks that start a request (row 24 of the comparison).

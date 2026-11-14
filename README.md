@@ -150,3 +150,11 @@ it: up to 16,384 bytes describing its role. They are fixed for the life of the m
 come before project notes and memory in every native launch of its conversations, and
 never change its tools, approvals or limits. Only the owner reads the text back, through
 `/v1/members/{memberId}/instructions`; listings and the audit trail carry its digest.
+
+An owner can write [instruction packs](docs/instruction-packs.md) through
+`/v1/instruction-packs`, text several members share, and attach up to eight to a member when
+they spawn it. A pack never changes, a member's packs are fixed for its life, and a pack any
+member has cannot be deleted. Packs come before the member's own instructions in every native
+launch and share their 16,384 bytes. They never change a member's tools, approvals or limits,
+but the model follows them as the owner's instructions, so a pack built from untrusted text is
+a prompt-injection path to every member that has it.

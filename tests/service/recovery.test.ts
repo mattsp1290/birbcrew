@@ -17,6 +17,7 @@ import {ApprovalStore} from '../../src/service/approvals.ts';
 import {revokeGrant} from '../../src/service/grants.ts';
 import {conversationContext,MemoryApi} from '../../src/service/memories.ts';
 import {HandoffApi} from '../../src/service/handoffs.ts';
+import {PackApi} from '../../src/service/instruction-packs.ts';
 import {recordSegmentUsage,UsageApi} from '../../src/service/usage.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
@@ -582,6 +583,49 @@ test('capture counts member instructions, a held installation refuses them, and 
   [{event_type:'member.instructions_set'}],'the resume records nothing about instructions');
  assert.deepEqual((await rows(t.pool)).map(row=>row.member_id),[member.memberId,later.memberId]);
  await assert.rejects(restored.query('UPDATE birbcrew_ts.member_instructions SET body=$1',['changed']),{code:'23514'});
+});
+
+test('capture counts instruction packs, a held installation refuses every pack write, and a restore keeps them as they were',async context=>{
+ const t=await setup(context);
+ const packs=new PackApi(t.store);
+ const style='Write commit messages in the imperative mood.';
+ const used=await packs.create('owner',{requestId:randomUUID(),name:'style',text:style});
+ const spare=await packs.create('owner',{requestId:randomUUID(),name:'spare',text:'Spare text the owner deletes after the recovery point.'});
+ const member=await t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture',instructionPacks:[used.packId]});
+ const conversation=await t.store.openConversation({ownerId:'owner',memberId:member.memberId,conversationId:randomUUID()});
+ const launched=await conversationContext(t.pool,conversation);
+ assert.match(launched!,/imperative mood/);
+ await dumpToBundle(t);
+ const manifest=await readRecoveryManifest(t.bundle);
+ assert.deepEqual([manifest.inventory.instruction_packs,manifest.inventory.member_instruction_packs],[2,1]);
+ for(const write of [()=>packs.create('owner',{requestId:randomUUID(),name:'held',text:'held'}),()=>packs.delete('owner',spare.packId),
+  ()=>t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture',instructionPacks:[used.packId]}),
+  ()=>t.pool.query(`INSERT INTO birbcrew_ts.instruction_packs(owner_id,create_request_id,name,body) VALUES('owner',$1,'direct','direct')`,[randomUUID()]),
+  ()=>t.pool.query(`INSERT INTO birbcrew_ts.member_instruction_packs(member_id,position,owner_id,pack_id) VALUES($1,2,'owner',$2)`,[member.memberId,spare.packId])]) {
+  await assert.rejects(write(),{code:'55000'});
+ }
+ // Deleting an attached pack is refused as in use before the barrier is reached, held or not.
+ await assert.rejects(packs.delete('owner',used.packId),{code:'pack_in_use'});
+ assert.equal((await packs.get('owner',used.packId)).text,style,'reads still work');
+ await t.recovery.resume(t.hooks);
+ // After the recovery point: the spare pack is deleted, and a new pack and member appear.
+ await packs.delete('owner',spare.packId);
+ const later=await packs.create('owner',{requestId:randomUUID(),name:'later',text:'after the recovery point'});
+ await t.store.spawn({ownerId:'owner',requestId:randomUUID(),engine:'pi',profile:'fixture',instructionPacks:[later.packId]});
+ await t.recovery.holdForRestore(manifest.generation,t.hooks);
+ const restored=await restoreBundle(t);const recovery=new InstallationRecovery(restored,t.fence);
+ await recovery.acceptRestore(t.bundle,pins,randomUUID());
+ await recovery.resume(t.hooks,manifest);
+ // Nothing is suspended or removed: the member launches with the pack it had, and the deleted pack is back, unattached.
+ const restoredPacks=new PackApi(new MemberStore(restored));
+ assert.deepEqual((await restoredPacks.list('owner',{})).instructionPacks.map(pack=>[pack.packId,pack.state,pack.memberCount]).sort(),
+  [[used.packId,'active',1],[spare.packId,'active',0]].sort());
+ assert.equal(await conversationContext(restored,conversation),launched,'a restored conversation launches with the packs it had');
+ assert.deepEqual((await restored.query(`SELECT event_type FROM birbcrew_ts.audit_events WHERE event_type LIKE '%instruction_pack%' ORDER BY event_id`)).rows
+  .map(row=>row.event_type),['instruction_pack.created','instruction_pack.created','member.instruction_packs_attached'],'the resume records nothing about packs');
+ // The owner deletes the returned pack again; the restored installation takes pack writes.
+ assert.equal((await restoredPacks.delete('owner',spare.packId)).state,'deleted');
+ await assert.rejects(restoredPacks.delete('owner',used.packId),{code:'pack_in_use'});
 });
 
 test('a restore past the fence epoch, its epoch file missing or behind, starts above every ID the restored identity drew',async context=>{
