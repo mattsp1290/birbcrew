@@ -6,8 +6,8 @@ ARG NODE_IMAGE
 FROM ${NODE_IMAGE} AS build
 ARG NODE_IMAGE
 RUN case "$NODE_IMAGE" in *@sha256:*) ;; *) echo "Pin NODE_IMAGE by digest" >&2; exit 1 ;; esac \
-    && test "$(node --version)" = v24.22.3 \
-    && grep -q '^12\.' /etc/debian_version
+    && { test "$(node --version)" = v24.22.3 || { echo "NODE_IMAGE must be Node v24.22.3, not $(node --version)" >&2; exit 1; }; } \
+    && { grep -q '^12\.' /etc/debian_version || { echo "NODE_IMAGE must be Debian 12 (bookworm)" >&2; exit 1; }; }
 # The launcher must link against the runtime image's glibc, so it is compiled from the same base.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc libc6-dev linux-libc-dev \
