@@ -41,8 +41,8 @@ grant, and answer `409` to a standing choice:
 - requests admitted for any other initiator: a [routine](scheduled-routines.md)
   firing or the first request a [handoff](handoffs.md) reserved. A kind this release
   cannot read fails the proposal instead of matching a grant, and a standing answer
-  on a card for such a request fails as a server error (`503`) rather than creating
-  a grant.
+  on a card for a request of such a kind fails as a server error (`503`) rather than
+  creating a grant.
 
 Trusted-context tools never reach approval cards. Their own `authorize()` decides
 them (see [trusted application context](trusted-application-context.md)).

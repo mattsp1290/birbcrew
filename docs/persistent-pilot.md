@@ -30,7 +30,7 @@ The worker registers activities only. It does not start another scheduler or man
 
 ## Recovery and cancellation
 
-Each activity claims `(kind, operation_id)` before effects. A changed payload conflicts. A repeat reconciles the same identity. Author checkpoints use whole-record compare-and-swap, so two attempts cannot both freeze the candidate or overwrite a terminal result. The claim, known thread and turn remain durable in PostgreSQL.
+Each of the three delivery activities claims `(kind, operation_id)` before effects. A changed payload conflicts. A repeat reconciles the same identity. Author checkpoints use whole-record compare-and-swap, so two attempts cannot both freeze the candidate or overwrite a terminal result. The claim, known thread and turn remain durable in PostgreSQL.
 
 A lost turn-start reply is reconciled only against the new, owned thread. Exactly one turn can be adopted. Zero or several turns leave uncertainty; the activity never blindly submits a replacement turn. A worker shutdown is not a cancellation request and must not interrupt the daemon. Interrupted preparation or candidate freezing also leaves uncertainty instead of repeating an ambiguous mutation.
 

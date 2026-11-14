@@ -43,8 +43,8 @@ oversized, linked and oversized serialized history. `npm run test:proxy` restore
 and recalls the same original session for twelve turns independently on Claude,
 Codex and Pi, using local protocol fixtures and no real credentials. It also keeps
 its original tool, renewal, error and cancellation tests. The native checks of all
-three engines require Linux with Landlock ABI 4+, Node 22.23.3 and a C compiler: Pi's
-SDK also runs in the launcher-confined worker.
+three engines require Linux with Landlock (ABI 4+ for Codex, ABI 3+ for Claude and
+Pi), Node 22.23.3 and a C compiler: Pi's SDK also runs in the launcher-confined worker.
 
 This native test is separate from Temporal rollover/replay qualification. A
 successful fixture run is not live-model acceptance or evidence of forced

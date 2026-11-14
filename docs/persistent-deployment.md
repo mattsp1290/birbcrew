@@ -241,7 +241,7 @@ Migration 34 (notification formats) takes `webhook_endpoints` alone in `ACCESS E
 without retrying: only the webhook routes, the webhook dispatcher and a restore use that
 table (see [outbound webhooks](webhooks.md#upgrade)). Migration 35 (estimated cost) takes
 `usage_ledger` in `ACCESS EXCLUSIVE` and `trusted_requests` in `SHARE ROW EXCLUSIVE` with
-`NOWAIT` and retries like 25 to 33, and a running trusted turn never delays it (see
+`NOWAIT` and retries like 25 to 33, and a running trusted turn's lease never delays it (see
 [usage metering](usage-metering.md#upgrade-and-recovery)).
 From the release that adds migration 31 on, every gateway, worker and CLI process
 refuses to start with

@@ -130,17 +130,19 @@ settled without a person: Crew cancels the request and records `approval.expired
 [Usage metering](docs/usage-metering.md) records the token counts each engine reports
 for every native segment that returns, one row per segment in the member lane and one
 per request in the trusted-context lane, with a provider-billed cost or, from a price
-table the operator supplies, an estimated one, kept apart; Crew ships no prices. An owner reads totals per member and conversation through `/v1/usage`
-and can give a member a daily token budget; a member at its budget is refused new
-requests with `409 usage_limit`, as a soft cap.
+table the operator supplies, an estimated one, kept apart; Crew ships no prices. An
+owner reads totals per member and conversation through `/v1/usage` and can give a
+member a daily token budget; a member at its budget is refused new requests with
+`409 usage_limit`, as a soft cap.
 
 An owner can save [member memory](docs/memories.md) through `/v1/memories`: up to 32
 short facts per member. Each conversation of the member outside the trusted-context
 lane gets the facts that were active when it opened, as system context framed as
-reference data. Only the owner writes memory; the model cannot. Deleting a fact erases its text, but Codex, and
-Claude where its SDK records the prompt, keep the context a conversation's first turn
-saw, and native session files and Pi checkpoints keep copies. Memory reaches every
-later conversation of the member, so whoever holds the owner's token can steer them all.
+reference data. Only the owner writes memory; the model cannot. Deleting a fact erases
+its text, but Codex, and Claude where its SDK records the prompt, keep the context a
+conversation's first turn saw, and native session files and Pi checkpoints keep copies.
+Memory reaches every later conversation of the member outside that lane, so whoever
+holds the owner's token can steer them all.
 
 An owner can [hand a conversation off](docs/handoffs.md) to another of their members,
 often of another engine, through `/v1/conversations/{conversationId}/handoffs`. The source
@@ -154,8 +156,8 @@ An owner can give a member [instructions](docs/member-instructions.md) when they
 it: up to 16,384 bytes describing its role. They are fixed for the life of the member,
 come before project notes and memory in every native launch of its conversations except
 a Pi child's and the trusted-context lane's, and never change its tools, approvals or
-limits. Only the owner reads the text back, through
-`/v1/members/{memberId}/instructions`; listings and the audit trail carry its digest.
+limits. Only the owner reads the text back, through `/v1/members/{memberId}/instructions`;
+listings and the audit trail carry its digest.
 
 An owner can write [instruction packs](docs/instruction-packs.md) through
 `/v1/instruction-packs`, text several members share, and attach up to eight to a member when
