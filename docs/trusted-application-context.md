@@ -18,7 +18,10 @@ The existing observer gateway continues to reject those inputs.
 - Claude and Pi SDK adapters and the pinned official Codex app-server expose only
   the registered catalog. Codex uses app-server dynamic tools instead of exec/MCP:
   the pinned MCP path adds resource helper tools that cannot be disabled.
-  Native built-ins remain disabled. Claude/Codex retain their isolated launchers.
+  Native built-ins remain disabled. All three engines run through the isolated
+  launcher. Pi's SDK runs in a confined worker with no network; the backend
+  process still runs each registered tool handler and the model request (see
+  [native confinement](verification.md#native-confinement)).
 - Native checkpoints bind engine, owner/conversation scope, version, generation,
   context and tool manifest. Rotation creates a fresh engine-native session;
   old transcripts are **not** summarized into the new context. Cold restoration
@@ -216,7 +219,7 @@ committed fixture effect, lease disconnects, late settlement after erasure,
 rotation/order preservation and registry immutability. Native tests cover all
 three SDK tool catalogs, result correlation, cold restore and fresh-scope
 rotation. Runner tests compose the native SDK with the durable store. A kernel
-without Landlock fails closed for Claude/Codex; do not bypass that isolation or
+without Landlock fails closed for all three engines; do not bypass that isolation or
 report those tests as passing locally.
 
 This is offline fixture qualification. Live application policy/provider

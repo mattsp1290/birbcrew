@@ -18,8 +18,8 @@ make paid model calls.
 ### TypeScript fixture verification
 
 Run `scripts/setup --mode fixture` on Linux with Docker, Git, curl,
-sha256sum, a C compiler and Linux development headers. Claude needs Landlock ABI
-3 or newer and Codex needs ABI 4. Install Beans (`bn`) for the project-note
+sha256sum, a C compiler and Linux development headers. Claude and Pi need
+Landlock ABI 3 or newer and Codex needs ABI 4. Install Beans (`bn`) for the project-note
 cases. Setup installs the pinned Node and Temporal executables, both npm
 lockfiles, and the native launcher. The member fixture path requires no Python
 interpreter. Offline replay also needs Linux user and network namespaces.
@@ -44,6 +44,143 @@ requires a clean checkout or a verified `git archive`. For an independently
 attested source copy set both `BIRBCREW_SOURCE_REVISION` and
 `BIRBCREW_SOURCE_SHA256` to the revision and source fingerprint established
 from the original checkout.
+
+### Native confinement
+
+Every engine's native process starts through the member launcher,
+`.proof/bin/member-launch`, built from `native/member-launch.c`. It applies a
+Landlock filesystem ruleset and a seccomp filter, sets `no_new_privs` and a
+parent-death signal, and closes inherited descriptors from 3 up (from 4 up for
+Pi, which keeps its channel), before it runs the engine. Every engine may read
+a fixed list of runtime files: the dynamic loader cache, DNS and TLS
+configuration, `/dev/null`, `/dev/urandom` and a few `/proc` and `/sys` entries
+that runtimes read at startup. The seccomp filter
+refuses `setsid` and `setpgid`, so a native process cannot leave the process
+group that its host kills, and on x86-64 it refuses x32 system call numbers,
+which would otherwise bypass the filter.
+
+- **Claude** runs the Claude CLI with its conversation directory writable. The
+  launcher does not restrict its network.
+- **Codex** runs the Codex binary with its private `CODEX_HOME` writable, its
+  workspace readable, and TCP connections only to the provider port and the
+  invocation's tool port.
+- **Pi** runs the Pi SDK in a Node worker, `src/service/pi-worker.ts`. The
+  worker gets no credentials and no network. Its only channel is descriptor 3,
+  a socket pair to its host carrying newline-delimited JSON.
+
+In addition to the runtime files above, the Pi worker may use only these:
+
+| Allowance | Reason |
+| --- | --- |
+| Read and execute the Node binary and anything under `/usr/lib`, `/usr/lib64` and `/lib64` | Node and its dynamic loader start the worker. Executing a file only replaces the worker, which cannot start another process. |
+| Read `package.json`, `node_modules` and `src/service` in the checkout | The worker loads the Pi SDK and Crew's Pi session code. It cannot read the rest of the checkout, such as `tests`, `docs` or a local `.env`. Keep profile modules and secrets out of these directories. |
+| Read, write, create and remove in one private directory | The Pi session needs a scratch working directory. It is the worker's `HOME`, `TMPDIR` and working directory, the host creates a new one for each invocation, and removes it after the worker exits, even when the worker left a directory it cannot list or a tree deeper than `PATH_MAX`. |
+| Keep descriptor 3 | Model requests, text, tool calls and the result cross it. The launcher refuses to start a Pi worker unless descriptor 3 is a socket, and closes every other inherited descriptor; 0 to 2 are `/dev/null`. |
+
+For Pi the seccomp filter also refuses:
+
+- `socket`, `socketpair` and `io_uring_setup`, so the worker cannot open any
+  socket, TCP, UDP or Unix;
+- `fork`, `vfork` and `clone` without `CLONE_THREAD`, so it cannot start a
+  process, and `clone3`, so that threads use `clone`;
+- `prctl(PR_SET_PDEATHSIG)`, so it cannot undo its death signal;
+- `kill` and `tgkill` to any process but itself, and `tkill`,
+  `pidfd_send_signal`, `rt_sigqueueinfo` and `rt_tgsigqueueinfo`;
+- `prlimit64`, `sched_setaffinity`, `sched_setattr`, `sched_setparam`,
+  `sched_setscheduler`, `setpriority` and `ioprio_set` on any process but
+  itself, since a lowered limit or priority also reaches another process of the
+  same user;
+- `fcntl(F_SETOWN)`, `fcntl(F_SETOWN_EX)`, `ioctl(FIOSETOWN)` and
+  `ioctl(SIOCSPGRP)`, which would make the kernel signal another process;
+- `shmget`, `msgget`, `semget` and `mq_open`, whose objects outlive the worker;
+- `chmod`, `fchmodat`, `fchmodat2`, `utime`, `utimes`, `futimesat`,
+  `utimensat`, `setxattr`, `lsetxattr`, `removexattr`, `lremovexattr`,
+  `setxattrat`, `removexattrat` and `file_setattr`, because Landlock does not
+  mediate file metadata: without them the worker could change the mode of any
+  file its user owns, such as the native state volume;
+- `ptrace`.
+
+Landlock also does not mediate `stat`, `access`, `chdir` or `flock`, so the
+worker can still learn whether a path exists and read its metadata. `chown` and
+the descriptor-based `fchmod`, `fchown` and `fsetxattr` stay allowed: they need
+ownership or a descriptor the worker can open, which outside its private
+directory it has only on files its user owns and Landlock lets it read. Run the
+service, as the service image does, as a user that does not own the checkout
+and has no capabilities: the policy assumes both, and the launcher does not
+drop privileges itself.
+
+The worker's environment holds only `HOME` and `TMPDIR`: no database URL and no
+provider key. The host does not trust the worker:
+
+- **Model requests.** The host makes each model request for the worker with the
+  operator's own model, provider, credentials, proxy relay and request
+  identity, with provider retries off. Of the worker's request options it takes
+  only the session ID, transport and bounded timeouts; it ignores any model,
+  key, headers, identity or environment. A member segment may make one model
+  request and a trusted application turn 17, one for each of at most 16 tool
+  calls and one for the reply, never two at once.
+- **Text and previews.** The host publishes the reply text and the argument
+  previews itself, from the events it relays, and fails the turn past 65,536
+  bytes of text; the worker reports neither.
+- **Trusted tools.** The host runs each trusted application tool only for a
+  call that the model sent through it, in a reply that neither failed nor hit
+  its token limit, as the agent requires, with the model's arguments coerced
+  against the tool's schema as the agent does. A failed dispatch fails the
+  turn, as it did in process. The worker still builds the model's context, so a
+  call "the model sent" is one the worker led the model to send.
+- **The channel.** The host reads the worker's frames with a limit of 16 Mi
+  characters, fails the turn if the worker leaves 64 MiB unread, and stops
+  acting on frames after the first failure.
+- **Member results.** The host checks the worker's result before it returns
+  it. A member segment's checkpoint must keep the thread, the session and every
+  earlier turn, and add only this request's turn or pending call. That turn
+  must hold this request's prompt, the reply or tool calls exactly as the model
+  sent them through the host, and system entries that the SDK itself writes:
+  the instructions, the project context, the worker's own working directory,
+  and the declarations of the segment's tools. A resumed turn's tool results
+  must be the ones the host builds from the owner's decision or the children's
+  outcomes. The committed text must equal the model's reply and the published
+  text. A proposal must name the segment's tool and its request. Delegated
+  child profiles come from the `@birbcrew/pi-subagents` role table on the
+  host, not from the worker.
+- **Trusted results.** A trusted turn's reply must equal the text the model
+  sent, and its checkpoint must extend the prior one by this request's prompt,
+  the replies the model sent, the results the host delivered, and the SDK's
+  own system entries.
+- **Usage.** The host records a member segment's usage from the replies it
+  relayed, not from the worker.
+- **Profile hooks.** A Pi profile's `prepare` runs on the host. Its extension
+  may register only the `before_provider_headers`, `before_provider_request`,
+  `after_provider_response` and `provider_stream_event` hooks; any other
+  extension call fails the turn, and so does an error from a hook, which the Pi
+  SDK would only report.
+- **Process groups.** In the member lane the worker stays in the supervised
+  runner's process group, so the supervisor's stop and reaping cover it; in the
+  trusted lane it gets its own group, which the host kills when the worker
+  exits.
+
+Claude and Pi need Landlock ABI 3 or newer, and Codex needs ABI 4. On a kernel
+without Landlock, with an older ABI, or where the container's seccomp profile
+blocks the `landlock_*` system calls, the launcher exits with status 126 before
+the engine starts, and the turn fails. No engine falls back to running
+unconfined. Landlock below ABI 6 cannot scope signals, so a Claude or Codex
+process can still signal other processes of the same user.
+
+`tests/fixtures/engines/pi/confinement.test.ts` proves the Pi policy. It starts
+a process with the launcher invocation of a Pi worker, running `node -e` probe
+code instead of the worker entry. The probe gets `EACCES` when it reads a file
+outside its allowed set: a sibling owner's file, a test file in the same
+checkout, and its host's `/proc/<pid>/environ`. It gets `EPERM` when it
+connects to a listening loopback port, which received no connection, when it
+starts a process, when it signals its host, and when it changes the mode or
+times of a file its user owns. It can still read Crew's code and write its
+private directory. The same test runs a real Pi turn and checks
+that its worker has `no_new_privs`, one more seccomp filter than the test
+process, and only `HOME` and `TMPDIR` in its environment, and that the launcher
+refuses a Pi worker started without descriptor 3.
+`tests/fixtures/engines/claude/durable.test.ts` and
+`tests/fixtures/engines/codex/native.test.ts` prove the Claude and Codex
+filesystem policies.
 
 ### Live member verification
 
