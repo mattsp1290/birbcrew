@@ -88,7 +88,8 @@ echo '{"ownerId":"local","conversationId":"c31bb038-d19e-46bc-a76d-a12526156a0e"
 Use `"engine":"claude"` or `"engine":"codex"` at spawn to select another SDK. In a fixture conversation,
 send `recall` with a fresh request UUID to retrieve the remembered value. Reuse
 the original request UUID and text to recover its recorded reply after a lost
-acknowledgement. Each conversation admits four distinct requests. If a worker
+acknowledgement. A new conversation admits 128 distinct requests; see
+[bounded conversations](docs/bounded-conversations.md). If a worker
 disappears during native generation, a replacement records the uncertain outcome
 and closes that conversation to further turns.
 
