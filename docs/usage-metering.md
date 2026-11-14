@@ -588,7 +588,7 @@ database, and Crew changes neither when the restored installation resumes:
 
 ## Validation
 
-Use Node 22.23.3 on Linux, a C compiler for `scripts/build-native`, and a disposable
+Use Node 24.22.3 on Linux, a C compiler for `scripts/build-native`, and a disposable
 PostgreSQL 17 database whose role may create databases.
 
 ```sh

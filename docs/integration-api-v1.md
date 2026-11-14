@@ -569,7 +569,7 @@ templates, the secret's storage and the restore behaviour.
 
 ## Validation
 
-Use Node 22.23.3 and a disposable PostgreSQL 17 database. The test role needs
+Use Node 24.22.3 and a disposable PostgreSQL 17 database. The test role needs
 CREATEDB so the fixture can create and remove its separate consumer database:
 
 ```sh

@@ -481,7 +481,7 @@ Turning it off later refuses the endpoints it let in at their next attempt, with
 `url_refused` or `address_refused`.
 
 Each request uses its own connection with no proxy: `HTTP_PROXY`, `HTTPS_PROXY`
-and `NODE_USE_ENV_PROXY` do not apply to it (checked on Node 22.23.3). TLS trusts
+and `NODE_USE_ENV_PROXY` do not apply to it (checked on Node 24.22.3). TLS trusts
 Node's bundled certificate authorities, plus any the operator adds through
 `NODE_EXTRA_CA_CERTS`, and presents no client certificate.
 
@@ -642,7 +642,7 @@ endpoints before you run an earlier release.
 
 ## Validation
 
-Use Node 22.23.3 on Linux and a disposable PostgreSQL 17 database whose role may
+Use Node 24.22.3 on Linux and a disposable PostgreSQL 17 database whose role may
 create databases.
 
 ```sh

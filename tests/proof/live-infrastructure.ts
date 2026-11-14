@@ -17,7 +17,7 @@ import type { LiveAccount } from "./live-account.ts";
 const run = promisify(execFile);
 export const root = fileURLToPath(new URL("../../", import.meta.url));
 const postgres = "postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94";
-const nodeImage = "node@sha256:363e1587494626837fa7f9a23bdb453d13b0ff3c67c705c2805cfc69c2d2fad7";
+const nodeImage = "node@sha256:9d266751ca3d7fdbe651c878ffd5ad0a42fed49a18c283509267c97f025b7496";
 export async function until<T>(check: () => Promise<T | undefined>, signal: AbortSignal) {
   while (true) {
     signal.throwIfAborted();
@@ -28,7 +28,7 @@ export async function until<T>(check: () => Promise<T | undefined>, signal: Abor
 }
 
 export async function proofInfrastructure(account: LiveAccount, relay: Awaited<ReturnType<typeof openRelay>>, signal: AbortSignal, cleanup: (() => Promise<unknown>)[]) {
-  if (process.version !== "v22.23.3") throw new Error("Use pinned Node 22.23.3");
+  if (process.version !== "v24.22.3") throw new Error("Use pinned Node 24.22.3");
   const temp = await mkdtemp(join(tmpdir(), "birb-live-"));
   cleanup.push(() => rm(temp, { recursive: true, force: true }));
   const native = join(temp, "native");

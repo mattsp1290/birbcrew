@@ -13,7 +13,7 @@ import { run, services, until } from "./member-services.mts";
 
 // Temporal's development server has no TLS listener, so a TLS terminator that requires a client
 // certificate from the proof CA is the only route from the gateway, worker and SDK children.
-assert.equal(process.version, "v22.23.3");
+assert.equal(process.version, "v24.22.3");
 const serverName = "temporal.crew.test", clientName = "crew-proof-client";
 const s = await services();
 try {

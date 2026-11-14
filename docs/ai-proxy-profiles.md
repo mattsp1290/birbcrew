@@ -139,7 +139,7 @@ your deployment; this relay is not a replacement for a host network firewall.
 
 ## Offline validation and remaining live acceptance
 
-On Linux with Landlock ABI 4 or newer, Node **22.23.3**, a C compiler and the checked-in package lock:
+On Linux with Landlock ABI 4 or newer, Node **24.22.3**, a C compiler and the checked-in package lock:
 
 ```sh
 npm ci
@@ -217,7 +217,7 @@ its acceptance scope.
 ## Maintained service-restart fixture
 
 Run `npm run test:proxy:restart` after `npm ci` and `npm run build` on Linux with
-Landlock ABI4+, Node22.23.3, Docker and Temporal CLI **1.10.0** on PATH (or set
+Landlock ABI4+, Node24.22.3, Docker and Temporal CLI **1.10.0** on PATH (or set
 `TEMPORAL_CLI` to its absolute path). The `proxy-service-restart` CI job installs
 and checksum-verifies that CLI and runs the same command with disposable services.
 

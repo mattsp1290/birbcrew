@@ -51,8 +51,8 @@ def child(command, env, log_path):
 def verify(directory, stack):
     node = shutil.which("node")
     temporal = os.environ.get("TEMPORAL_CLI") or shutil.which("temporal") or str(ROOT / ".proof/bin/temporal")
-    if not node or subprocess.check_output([node, "--version"], text=True).strip() != "v22.23.3":
-        raise RuntimeError("Activate Node 22.23.3 before running verify-members")
+    if not node or subprocess.check_output([node, "--version"], text=True).strip() != "v24.22.3":
+        raise RuntimeError("Activate Node 24.22.3 before running verify-members")
     run(temporal, "--version")
     secret = secrets.token_hex(24)
     db = run("docker", "run", "--rm", "-d", "-e", f"POSTGRES_PASSWORD={secret}",
