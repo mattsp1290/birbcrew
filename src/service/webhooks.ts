@@ -109,7 +109,7 @@ type Rendered = { body: string; headers: Record<string, string> };
 /** How each delivery is written for an endpoint, chosen when it is created. Only `crew` is signed:
  * a chat or push service never checks Crew's signature, so its endpoints get none. Every format
  * goes through the same outbox, target checks, timeouts and retries. The format column's CHECK in
- * 035-notification-formats.sql bounds only a name's shape, so a new format is one entry here. */
+ * 034-notification-formats.sql bounds only a name's shape, so a new format is one entry here. */
 export const webhookFormats = {
   // The stored body, exactly as the fan-out wrote it.
   crew: { signed: true, render: (_kind, body) => ({ body, headers: { "Content-Type": "application/json" } }) },
@@ -128,7 +128,7 @@ export const webhookFormats = {
 } as const satisfies Record<string, { signed: boolean; render: (kind: WebhookKind, body: string) => Rendered }>;
 export type WebhookFormat = keyof typeof webhookFormats;
 export const webhookFormatNames = Object.keys(webhookFormats) as [WebhookFormat, ...WebhookFormat[]];
-// 035-notification-formats.sql repeats it as the column default.
+// 034-notification-formats.sql repeats it as the column default.
 export const defaultWebhookFormat: WebhookFormat = "crew";
 
 /** The kind and body fields one committed audit row yields, or null when no kind covers it. A row

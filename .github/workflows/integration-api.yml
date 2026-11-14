@@ -43,6 +43,7 @@ jobs:
       - run: npm run test:routines
       - run: npm run test:memories
       - run: npm run test:instructions
+      - run: npm run test:packs
       - run: npm run test:grants
       - run: npm run test:handoffs
       - run: npm run test:expiry
@@ -51,6 +52,17 @@ jobs:
       - run: npm run test:webhooks
       - run: node --test tests/service/store.test.ts tests/service/rollover-client.test.ts
       - run: node --test tests/service/approvals.test.ts tests/service/codex-calls.test.ts tests/service/codex-registration.test.ts
+      - name: Install pinned Temporal CLI
+        run: |
+          mkdir -p .proof/bin
+          archive=temporal_cli_1.10.0_linux_amd64.tar.gz
+          curl -fsSL "https://github.com/temporalio/cli/releases/download/v1.10.0/$archive" -o ".proof/bin/$archive"
+          curl -fsSL https://github.com/temporalio/cli/releases/download/v1.10.0/checksums.txt -o .proof/bin/checksums.txt
+          (cd .proof/bin && grep " $archive$" checksums.txt | sha256sum -c -)
+          tar -xzf ".proof/bin/$archive" -C .proof/bin temporal
+      - run: npm run test:child-targets
+        env:
+          TEMPORAL_CLI: ${{ github.workspace }}/.proof/bin/temporal
   actual-service:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

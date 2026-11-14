@@ -24,7 +24,8 @@ restore), `usage` (the ledger states, what each engine reports, the budget perio
 refusal codes), `webhooks` (the webhook route, kinds, formats and the default one,
 signature and the formats it covers, retry and restore
 semantics, and `insecureTargets`, which says an operator setting for testing exists,
-not whether it is on), health dependencies and listing limits. Additive
+not whether it is on), `instructionPacks` (the pack route, the spawn field, limits, order,
+deletion and restore), health dependencies and listing limits. Additive
 response fields are compatible; consumers must reject an unsupported major version.
 Trusted context is currently an operator-configured local runtime, **not** a public
 HTTP context/tool injection endpoint. Capabilities are implementation contracts, not
@@ -32,7 +33,7 @@ proof of the operator's provider access or configured profile availability.
 
 | Route | Purpose |
 | --- | --- |
-| `POST /v1/members` | Existing member creation contract (`requestId`, `engine`, `profile`), plus optional `instructions` |
+| `POST /v1/members` | Existing member creation contract (`requestId`, `engine`, `profile`), plus optional `instructions` and `instructionPacks` |
 | `POST /v1/conversations` | Open an owned conversation (`conversationId`, `memberId`) |
 | `POST /v1/conversations/{conversationId}/requests` | Submit `{ "requestId": "UUID", "text": "exact input" }`, optionally with `approvalDeadlineSeconds` |
 | `GET /v1/conversations/{conversationId}/requests/{requestId}` | Reconcile status and original committed result; never invokes inference |
@@ -53,7 +54,9 @@ proof of the operator's provider access or configured profile availability.
 | `GET`/`DELETE /v1/memories/{memoryId}` | Read one entry, or erase its text and keep a tombstone |
 | `POST /v1/conversations/{conversationId}/handoffs` | Hand the conversation to another member (`requestId`, `memberId`): seal it and open a target whose first request carries its transcript |
 | `GET /v1/conversations/{conversationId}/handoff` | The handoff that created or sealed this conversation; never its transcript |
-| `GET /v1/members/{memberId}/instructions` | The member's instructions, or `null` |
+| `GET /v1/members/{memberId}/instructions` | The member's instructions, or `null`, and its instruction packs |
+| `POST /v1/instruction-packs`, `GET /v1/instruction-packs` | Create (`requestId`, `name`, optional `description`, `text`) and list the owner's instruction packs |
+| `GET`/`DELETE /v1/instruction-packs/{packId}` | Read one pack, or delete one no member has: erase its text and keep a tombstone |
 | `GET /v1/usage`, `GET /v1/usage/members`, `GET /v1/usage/conversations` | Token totals for the owner, per member (with its budget) and per conversation, over an optional time range |
 | `GET /v1/usage/records` | Usage ledger rows, one per native segment, newest first |
 | `GET`/`PUT`/`DELETE /v1/usage/budgets/{memberId}` | Read, set (`tokenLimit`) or clear a member's daily token budget |
@@ -142,7 +145,8 @@ rows:
 ```
 
 A member spawned with instructions also carries `"instructions": { "bytes": 73, "digest": "sha256 hex" }`,
-never the text.
+never the text, and one spawned with instruction packs carries `"instructionPacks": ["UUID", ...]`, their
+IDs in order.
 
 ```json
 {
@@ -392,7 +396,7 @@ upgrade without them.
 | `after` | Decimal event ID; return later events only. Default `0`. |
 | `limit` | Default 100 in both formats. At most 1000 for JSON and 10000 for CSV (the hard row cap). |
 | `conversationId` | Restrict to one conversation. Another owner's ID yields an empty page. |
-| `memberId` | Restrict to one member. Another owner's ID yields an empty page. `webhook.*` rows name no member and never match. |
+| `memberId` | Restrict to one member. Another owner's ID yields an empty page. `webhook.*` and `instruction_pack.*` rows name no member and never match. |
 | `eventType` | Comma-separated registered event types. |
 | `actorKind`, `initiatorKind` | `owner` or `system`; one of `initiatorKinds`. |
 | `initiatorId` | Requests a routine or a handoff started, by routine or handoff ID. Another owner's ID yields an empty page. |
@@ -483,6 +487,26 @@ together do not, and `409 memory_limit` when notes and instructions fit but memo
 does not. A handoff adds no instructions to its transcript; a source reply that quotes
 them is carried like any other reply. A restore keeps instructions as they were. See
 [member instructions](member-instructions.md).
+
+## Instruction packs
+
+An owner can write up to 32 active instruction packs: a name and an optional description for
+the owner, and 1 to 16,384 bytes of text for the model. A pack never changes. `POST /v1/members`
+takes optional `instructionPacks`, 1 to 8 distinct pack IDs of the owner's, in order; a member's
+packs are fixed for its life, and a spawn replay must repeat them exactly or fails
+`409 conflict`. A pack that is not the owner's fails `404 not_found` and a deleted one
+`409 pack_deleted`. The member's own instructions and its packs' texts share 16,384 bytes; a
+spawn over that fails `409 pack_limit`, as does a 33rd active pack. Every native launch of the
+member's conversations gets the packs' texts first, before its instructions, project notes and
+memory; Pi children and the trusted-context lane do not, and a handoff carries none: its target
+gets its own member's packs. Names and descriptions never reach the model. A pack any member has
+cannot be deleted (`409 pack_in_use`); deleting another erases its text. Packs never change a
+member's tools, approvals or limits, and the model follows their text as the owner's
+instructions, so text pasted into a pack from an untrusted source is a prompt-injection path to
+every member that has it. `instruction_pack.*` audit rows belong to no member, like
+`webhook.*`. Packs count with instructions toward `409 instructions_limit` when a
+conversation opens. A restore keeps packs as they were at the recovery point, so a pack
+deleted after it comes back, unattached. See [instruction packs](instruction-packs.md).
 
 ## Usage metering
 

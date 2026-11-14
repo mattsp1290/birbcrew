@@ -18,6 +18,7 @@ import { listGrants, revokeGrant } from "./grants.ts";
 import { HandoffApi } from "./handoffs.ts";
 import { MemoryApi, memoryListParameterNames } from "./memories.ts";
 import { readInstructions } from "./instructions.ts";
+import { PackApi, packListParameterNames } from "./instruction-packs.ts";
 import { MemberStoreError, openSchema, spawnSchema, submitSchema, turnKey } from "./domain.ts";
 import { readEvents, readSnapshot, toolBootstrap, type PublicSnapshot } from "./observation.ts";
 import { MemberStore } from "./store.ts";
@@ -199,7 +200,12 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
   let databaseProbe: Promise<number | null> | undefined;
   const schemaVersion = () => databaseProbe ??= readSchemaVersion(store.pool.options).finally(() => { databaseProbe = undefined; });
   const routines = new RoutineApi(store, clock);
-  const memories = new MemoryApi(store);
+  // Owner collections that share one route shape: create and list on the collection, read and
+  // delete on one item, with strict UTF-8 bodies and no query string where none is read.
+  const collections = [
+    { pattern: /^\/memories(?:\/([^/]+))?$/, api: new MemoryApi(store), listParameterNames: memoryListParameterNames },
+    { pattern: /^\/instruction-packs(?:\/([^/]+))?$/, api: new PackApi(store), listParameterNames: packListParameterNames },
+  ];
   const handoffs = new HandoffApi(store, members);
   const usage = new UsageApi(store);
   const dispatcher = new RoutineDispatcher({ store, members, integration, owners: accounts.map(({ actor }) => actor), clock });
@@ -253,21 +259,22 @@ export function createGateway(store: MemberStore, members: MemberClient, owners:
       if (action === undefined && request.method === "DELETE") return json(response, 200, await routines.change(ownerId, routineId, "delete"));
       throw new HttpError(405, "method_not_allowed");
     }
-    const memoryRoute = versioned && /^\/memories(?:\/([^/]+))?$/.exec(path);
-    if (memoryRoute) {
-      const [, id] = memoryRoute;
+    for (const { pattern, api, listParameterNames } of collections) {
+      const match = versioned && pattern.exec(path);
+      if (!match) continue;
+      const [, id] = match;
       if (id === undefined) {
         if (request.method === "POST") {
           if (url.search) throw new HttpError(400, "invalid_input");
-          return json(response, 201, await memories.create(ownerId, await body(request, true)));
+          return json(response, 201, await api.create(ownerId, await body(request, true)));
         }
-        if (request.method === "GET") return json(response, 200, await memories.list(ownerId, queryOf(url, memoryListParameterNames)));
+        if (request.method === "GET") return json(response, 200, await api.list(ownerId, queryOf(url, listParameterNames)));
         throw new HttpError(405, "method_not_allowed");
       }
-      const memoryId = z.uuid().parse(id);
+      const itemId = z.uuid().parse(id);
       if (url.search) throw new HttpError(400, "invalid_input");
-      if (request.method === "GET") return json(response, 200, await memories.get(ownerId, memoryId));
-      if (request.method === "DELETE") return json(response, 200, await memories.delete(ownerId, memoryId));
+      if (request.method === "GET") return json(response, 200, await api.get(ownerId, itemId));
+      if (request.method === "DELETE") return json(response, 200, await api.delete(ownerId, itemId));
       throw new HttpError(405, "method_not_allowed");
     }
     const webhookRoute = versioned && /^\/webhooks(?:\/([^/]+)(?:\/(enable|disable|deliveries))?)?$/.exec(path);

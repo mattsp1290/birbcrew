@@ -12,7 +12,7 @@ Run the idempotent migration once with the database migration identity.
 BIRBCREW_CONFIG=/private/crew.json python -m birbcrew.migrate
 ```
 
-Run the API alongside Birbforge's loopback gateway. Set `mode` to `approved-goal`. This mode stores owner-scoped conversations without starting the synthetic conversation workflow or invoking an OpenCode model. Existing proof modes remain separate.
+Every file named by `BIRBCREW_CONFIG` must set `mode`, including the migration and executor store files. There is no default, and a file without it fails to load. Run the API alongside Birbforge's loopback gateway. Set `mode` to `approved-goal`. This mode stores owner-scoped conversations without starting the synthetic conversation workflow or invoking an OpenCode model. Existing proof modes remain separate.
 
 ```sh
 BIRBCREW_CONFIG=/private/crew.json python -m uvicorn birbcrew.api:app --host 127.0.0.1 --port 8000

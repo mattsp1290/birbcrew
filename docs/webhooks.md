@@ -5,7 +5,7 @@ reach only a client that polled or held an AG-UI stream open. Routines run with
 nobody watching, so their outcomes went unseen. Migration 32 lets an owner
 register webhook endpoints. Crew calls an endpoint when one of the events it
 selected happens, with a small signed body that names what happened. The
-receiver fetches the details with the owner's own token. Since migration 35 an
+receiver fetches the details with the owner's own token. Since migration 34 an
 endpoint can ask for a short readable message instead. A chat or push service's
 incoming-webhook URL accepts it and shows it to a person, so no service of the
 owner's own is needed in between (see [formats](#formats)).
@@ -306,7 +306,7 @@ repeated field fails `400 invalid_input`.
 `kinds` is one to four distinct kinds and is returned sorted. `format` is `crew`,
 `slack` or `ntfy`, and `crew` when the create leaves it out; any other value fails
 `400 invalid_input`. Every read returns it, including a tombstone's, and an endpoint
-created before migration 35 reads as `crew`. `url` is
+created before migration 34 reads as `crew`. `url` is
 normalized (lowercase host, default port dropped) and is `null` once the endpoint
 is deleted; `host` stays. `requestId` makes a create idempotent: the same owner
 sending the same `requestId`, URL, kinds and format gets the endpoint back without
@@ -415,6 +415,7 @@ audit rows above:
 | A handoff is refused for its target's budget | None: the handoff writes nothing | Nothing |
 | The handoff's reserved first request finishes | `request.finished` on the target, with the handoff as initiator | `request.finished` with the target's `memberId`, `conversationId` and the reserved `requestId` |
 | A member is spawned with [instructions](member-instructions.md) | `member.instructions_set` | Nothing |
+| An [instruction pack](instruction-packs.md) is created or deleted, or a member is spawned with packs | `instruction_pack.created`, `instruction_pack.deleted`, `member.instruction_packs_attached` | Nothing |
 
 No kind says that a card stopped being pending, whether by a decision, a cancel or
 an expiry; the request's `request.finished` follows each. Its body does not say
@@ -496,10 +497,10 @@ Node's bundled certificate authorities, plus any the operator adds through
 
 `host` is the URL's host and port. The trail never holds the path, the query or the
 secret: a URL path can itself be a credential, and for a `slack` or `ntfy` endpoint
-it always is. A `webhook.created` row written before migration 35 has no `format`;
+it always is. A `webhook.created` row written before migration 34 has no `format`;
 that endpoint is `crew`. Endpoints belong to the owner, not
-to a member, so `webhook.*` rows are the only audit rows whose `memberId` is
-`null`, and their CSV cell is empty. A [`memberId` filter](audit-filters.md) never
+to a member, so `webhook.*` rows, like the [`instruction_pack.*`](instruction-packs.md#audit)
+rows, have a `null` `memberId`, and their CSV cell is empty. A [`memberId` filter](audit-filters.md) never
 matches them; select them with `eventType`. Deliveries are not audited; their rows
 are the record.
 
@@ -571,7 +572,7 @@ now also appends `approval.requested`. Processes of an earlier release write no
 such row, so stop them before the first upgraded process starts, as for every
 migration (see [persistent deployment](persistent-deployment.md#upgrades)).
 
-Migration 35 adds `webhook_endpoints.format`, `NOT NULL` with the constant default
+Migration 34 adds `webhook_endpoints.format`, `NOT NULL` with the constant default
 `crew`. Its CHECK takes a name that is a lowercase letter followed by up to 31
 lowercase letters, digits or underscores. The migration also replaces 032's guard
 function with one that keeps the format from changing, and changes no other
@@ -582,6 +583,10 @@ commits, the only application table it holds is `webhook_endpoints`, in
 webhook table, so none waits for it. Only the webhook routes, the dispatcher and a
 restore do, and with the earlier release's processes stopped, none of them runs
 before `migrate()` commits.
+
+The migration was numbered 35 in review and took 34, the next number after 33, when it
+was restacked onto `main`. `migrate()` refuses to apply a migration numbered below one
+already applied, so a database that ran this branch under number 35 must be recreated.
 
 Three changes reach existing clients. Every route that returns an endpoint returns
 its `format`, `webhook.created` rows gain `format`, and `capabilities.webhooks` gains
@@ -611,8 +616,8 @@ endpoints before you run an earlier release.
 
 - Other audit types are not deliverable: spawns, opens, admissions, decisions,
   grants, routine lifecycle changes by the owner, memory and webhook changes,
-  approval expiries, handoffs, member instructions, budget changes and budget
-  refusals (see [what they send](#handoffs-approval-expiry-and-usage-budgets)).
+  approval expiries, handoffs, member instructions, instruction packs, budget changes
+  and budget refusals (see [what they send](#handoffs-approval-expiry-and-usage-budgets)).
   Adding a kind means adding it to `webhookKinds` and to the two CHECKs in a
   migration.
 - Inbound webhooks that start a request (row 24 of the comparison).
@@ -734,7 +739,7 @@ receiver in the test process and a settable clock. It checks:
   them, unchanged and in order; its locks, no rewrite, `NOT VALID` CHECKs,
   the cursor at the newest event, that it retries instead of queueing behind an
   audited writer, and that it completes while a native turn holds its admission;
-- migration 35 on a database without it: an existing endpoint read as `crew`,
+- migration 34 on a database without it: an existing endpoint read as `crew`,
   every other constraint, trigger, function, index and column kept, the guard
   changed only by the format, the format refused as a change, no rewrite, and
   `webhook_endpoints` the only table it locks.
