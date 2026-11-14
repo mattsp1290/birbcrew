@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { runCodexTurn } from "../../src/service/codex.ts";
-import { readCodexSubscription, signInCopy } from "../../src/service/codex-subscription.ts";
+import { readCodexSubscription, readLogin, signInCopy } from "../../src/service/codex-subscription.ts";
 import { forwardWarnings } from "../../src/service/diagnostics.ts";
 
 const signInRequired = /^A current ChatGPT Codex sign-in for the approved account is required$/;
@@ -58,14 +58,25 @@ function chatgpt(accountId: string, { revision = "first", expiresIn = 3600, refr
   };
 }
 
-// Paths, kinds, modes, sizes and contents of every entry.
+// Paths, kinds, modes, sizes, contents and write times of the directory and every entry.
+// A directory's write time changes when an entry is made or removed, so a file that came and went shows too.
 async function snapshot(dir: string) {
   const entries = await readdir(dir, { recursive: true, withFileTypes: true });
-  return Promise.all(entries.map(async (entry) => {
-    const path = join(entry.parentPath, entry.name), info = await stat(path);
-    const digest = entry.isFile() ? createHash("sha256").update(await readFile(path)).digest("hex") : "directory";
-    return `${path} ${info.mode.toString(8)} ${info.size} ${digest}`;
+  const paths = [dir, ...entries.map((entry) => join(entry.parentPath, entry.name))];
+  return Promise.all(paths.map(async (path) => {
+    const info = await stat(path);
+    const digest = info.isFile() ? createHash("sha256").update(await readFile(path)).digest("hex") : "directory";
+    return `${path} ${info.mode.toString(8)} ${info.size} ${info.mtimeMs} ${digest}`;
   })).then((lines) => lines.sort());
+}
+
+// A stand-in for the Codex binary. It ignores its arguments and its input.
+async function stub(t: TestContext, script: string) {
+  const dir = await mkdtemp(join(tmpdir(), "birb-test-codex-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "codex");
+  await writeFile(path, "#!/bin/sh\n" + script + "\n", { mode: 0o755 });
+  return path;
 }
 
 /** Makes the home read-only, or returns false when this user can still write it (root ignores modes). */
@@ -151,7 +162,7 @@ test("a Codex API key cannot satisfy a subscription login", async (t) => {
   await assert.rejects(readCodexSubscription(home), { message: signInRequired, reason: "signed-out" });
 });
 
-test("an expired access token fails with its own logged reason and the refresh token stays unused", async (t) => {
+test("an expired access token fails with its own logged reason and does not wait for a refresh", async (t) => {
   const { home, auth } = await isolatedLogin(t);
   const tmp = await privateTmp(t);
   const log = warnings(t);
@@ -161,13 +172,122 @@ test("an expired access token fails with its own logged reason and the refresh t
   const before = await snapshot(home);
   const started = Date.now();
   await assert.rejects(readCodexSubscription(home, accountId), { message: signInRequired, reason: "expired" });
-  // Codex tries to refresh a token this close to expiry. The refresh goes nowhere, so the read does not wait on it.
+  // Codex tries to refresh a token this close to expiry. The closed endpoint refuses at once. A refresh sent to the
+  // real endpoint from a host without network holds the read until its deadline of 25 seconds.
   assert.ok(Date.now() - started < 10_000);
   const exp = JSON.parse(Buffer.from(login.tokens.access_token.split(".")[1], "base64url").toString()).exp;
   assert.deepEqual(log.parsed(), [{ level: "warn", logger: "birbcrew", event: "codex_signin_unavailable", reason: "expired",
     expiredAt: new Date(exp * 1000).toISOString() }]);
   assert.deepEqual(await snapshot(home), before);
   assert.deepEqual(await scratchCopies(tmp), []);
+});
+
+test("app-server's refresh attempts go to the given endpoint and carry no refresh token", async (t) => {
+  const { home, auth } = await isolatedLogin(t);
+  const tmp = await privateTmp(t);
+  warnings(t);
+  await writeFile(auth, JSON.stringify(chatgpt(randomUUID(), { expiresIn: -60, refresh: plantedRefresh })), { mode: 0o600 });
+  const requests: string[] = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.setEncoding("utf8").on("data", (text: string) => { body += text; }).on("end", () => {
+      requests.push(`${req.method} ${req.url} ${body}`);
+      res.writeHead(500).end();
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => { server.closeAllConnections(); return new Promise<void>((done) => server.close(() => done())); });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const before = await snapshot(home);
+  await assert.rejects(readLogin(home, { refreshEndpoint: `http://127.0.0.1:${address.port}/oauth/token` }),
+    { message: signInRequired, reason: "expired" });
+  // The bundled Codex refreshes an expired token although the read asks it not to. This is what the closed endpoint stops.
+  assert.ok(requests.length > 0, "Codex sent no refresh request to the given endpoint");
+  for (const request of requests) {
+    assert.ok(request.startsWith("POST /oauth/token "));
+    assert.ok(!request.includes(plantedRefresh), "the refresh token left the worker");
+    const body = request.slice("POST /oauth/token ".length);
+    let sent: Record<string, unknown>;
+    try { sent = JSON.parse(body); } catch { sent = Object.fromEntries(new URLSearchParams(body)); }
+    assert.equal(sent.refresh_token, "");
+  }
+  assert.deepEqual(await snapshot(home), before);
+  assert.deepEqual(await scratchCopies(tmp), []);
+});
+
+test("an app-server that stops at startup is logged with its exit code and the end of its stderr", async (t) => {
+  const { home, auth } = await isolatedLogin(t);
+  const tmp = await privateTmp(t);
+  const log = warnings(t);
+  await writeFile(auth, JSON.stringify(chatgpt(randomUUID())), { mode: 0o600 });
+  // What Codex 0.167.1 printed on the read-only sign-in home in production.
+  const binary = await stub(t, `echo 'WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)' >&2
+echo 'Error: Read-only file system (os error 30)' >&2
+exit 1`);
+  await assert.rejects(readLogin(home, { binary }), { message: signInRequired, reason: "exited" });
+  assert.deepEqual(log.parsed(), [{ level: "warn", logger: "birbcrew", event: "codex_signin_unavailable", reason: "exited", exitCode: 1,
+    stderr: "WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30) " +
+      "Error: Read-only file system (os error 30)" }]);
+  assert.deepEqual(await scratchCopies(tmp), []);
+});
+
+test("each way app-server can fail has its own logged reason and no reply reaches the log", async (t) => {
+  const { home, auth } = await isolatedLogin(t);
+  const tmp = await privateTmp(t);
+  const log = warnings(t);
+  await writeFile(auth, JSON.stringify(chatgpt(randomUUID())), { mode: 0o600 });
+  const answers = (reply: object) => `echo '{"id":1,"result":{}}'\necho '${JSON.stringify({ id: 2, ...reply })}'\nexec sleep 30`;
+  const signedIn = (authToken: string) => answers({ result: { authMethod: "chatgpt", requiresOpenaiAuth: true, authToken } });
+  const cases: { binary: string; deadlineMs?: number; logged: object }[] = [
+    { binary: join(tmp, "missing"), logged: { reason: "start", code: "ENOENT" } },
+    { binary: await stub(t, "exec sleep 30"), deadlineMs: 300, logged: { reason: "timeout" } },
+    { binary: await stub(t, `echo 'not JSON ${plantedJwt}'\nexec sleep 30`), logged: { reason: "protocol", error: "SyntaxError" } },
+    { binary: await stub(t, answers({ error: { code: -32600, message: plantedJwt } })), logged: { reason: "protocol", error: "status refused" } },
+    { binary: await stub(t, answers({ result: { authMethod: "chatgpt", requiresOpenaiAuth: false, authToken: plantedJwt } })),
+      logged: { reason: "signed-out", authMethod: "chatgpt" } },
+    { binary: await stub(t, signedIn("opaque-" + plantedRefresh)), logged: { reason: "token" } },
+    { binary: await stub(t, signedIn(plantedJwt)), logged: { reason: "token" } },
+  ];
+  for (const { binary, deadlineMs, logged } of cases) {
+    const started = Date.now();
+    await assert.rejects(readLogin(home, { binary, deadlineMs }), { message: signInRequired, reason: (logged as { reason: string }).reason });
+    // That stand-in sleeps for 30 seconds and the usual deadline is 25 seconds.
+    if (deadlineMs) assert.ok(Date.now() - started < 10_000, "the read outlived its deadline");
+  }
+  assert.deepEqual(log.parsed(), cases.map(({ logged }) => ({ level: "warn", logger: "birbcrew", event: "codex_signin_unavailable", ...logged })));
+  for (const secret of [plantedJwt, plantedRefresh]) assert.ok(log.lines.every((line) => !line.includes(secret)), "a log line contains a reply value");
+  assert.deepEqual(await scratchCopies(tmp), []);
+});
+
+test("a descendant that keeps app-server's pipes open does not hold the read", async (t) => {
+  const { home, auth } = await isolatedLogin(t);
+  const tmp = await privateTmp(t);
+  const log = warnings(t);
+  await writeFile(auth, JSON.stringify(chatgpt(randomUUID())), { mode: 0o600 });
+  const binary = await stub(t, "sleep 20 &\necho 'Error: stopped' >&2\nexit 3");
+  const started = Date.now();
+  await assert.rejects(readLogin(home, { binary }), { message: signInRequired, reason: "exited" });
+  // The sleeping descendant holds both pipes for 20 seconds. The read ends shortly after app-server itself.
+  assert.ok(Date.now() - started < 10_000);
+  assert.deepEqual(log.parsed(), [{ level: "warn", logger: "birbcrew", event: "codex_signin_unavailable", reason: "exited", exitCode: 3,
+    stderr: "Error: stopped" }]);
+  assert.deepEqual(await scratchCopies(tmp), []);
+});
+
+test("the end of a long app-server stderr is logged and a token cut by the kept length does not leak", async (t) => {
+  const { home, auth } = await isolatedLogin(t);
+  await privateTmp(t);
+  const log = warnings(t);
+  await writeFile(auth, JSON.stringify(chatgpt(randomUUID())), { mode: 0o600 });
+  // 8192 characters are kept. The cut falls inside the first word and leaves 25 characters of it, too few to look like a token.
+  const secret = "opaque0123456789".repeat(4).slice(0, 60);
+  const binary = await stub(t, `{ printf '%s ' '${secret}'; head -c 8150 /dev/zero | tr '\\0' Z; printf '\\nError: stopped\\n'; } >&2\nexit 1`);
+  await assert.rejects(readLogin(home, { binary }), { message: signInRequired, reason: "exited" });
+  assert.deepEqual(log.parsed(), [{ level: "warn", logger: "birbcrew", event: "codex_signin_unavailable", reason: "exited", exitCode: 1,
+    stderr: "[redacted] Error: stopped" }]);
+  assert.ok(!log.lines[0].includes(secret.slice(-10)));
 });
 
 test("the cause of a failed read is logged without any token", async (t) => {

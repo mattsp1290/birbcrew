@@ -51,7 +51,7 @@ jobs:
       - run: npm run test:webhooks
       - run: node --test tests/service/store.test.ts tests/service/rollover-client.test.ts
       - run: node --test tests/service/approvals.test.ts tests/service/codex-calls.test.ts tests/service/codex-registration.test.ts
-      - name: Codex sign-in failure reaches the worker log
+      - name: Turn failure diagnostics
         run: node --test tests/service/native-diagnostics.test.ts
   actual-service:
     runs-on: ubuntu-24.04

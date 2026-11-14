@@ -154,6 +154,7 @@ async function start(launch: Launch): Promise<SegmentResult> {
   let exited: Promise<boolean> | undefined;
   let confirmed = false;
   let reaped = false;
+  let runnerEnd = "no exit";
   try {
     const { continuation } = admission;
     const project = await textProjection(pool, launch.conversationId);
@@ -177,15 +178,14 @@ async function start(launch: Launch): Promise<SegmentResult> {
           preview = (preview ?? stream.drain()).then(() => store.previewTool(launch, id, matched));
           void preview.catch(() => { });
         } else if (value && typeof value === "object" && "warning" in value && typeof value.warning === "string") {
-          // A runner's warning was redacted where it was written. Only its length is bounded here.
-          if (value.warning.length <= 8192) relayWarning(value.warning);
+          relayWarning(value.warning, { conversationId: launch.conversationId, requestId: launch.requestId });
         } else {
           reply = value;
         }
       });
       exited = new Promise<boolean>((resolve) => {
-        child.once("error", () => resolve(false));
-        child.once("close", (code) => resolve(code === 0));
+        child.once("error", () => { runnerEnd = "process error"; resolve(false); });
+        child.once("close", (code, signal) => { runnerEnd = signal ? "signal " + signal : "exit code " + code; resolve(code === 0); });
       });
       child.send({ launch, conversation, checkpoint, continuation, childProfile, childResults,threadId:launch.childId ?? conversation.conversationId, runId: launch.requestId, text: launch.text }, (error) => {
         if (error) killNativeGroup(child);
@@ -198,7 +198,10 @@ async function start(launch: Launch): Promise<SegmentResult> {
     await preview;
     const pid = active.get(launch.token)?.pid;
     reaped = pid !== undefined && await groupStopped(pid);
-    if (!confirmed || !reaped) throw new Error("SDK process stopped without a confirmed result");
+    if (!confirmed || !reaped) {
+      const state = [runnerEnd, reply === undefined && "no reply", !reaped && "process group still running"].filter(Boolean).join(", ");
+      throw new Error("SDK process stopped without a confirmed result (" + state + ")");
+    }
     const {ownerId,conversationId,requestId,token} = launch;
     const childKey = launch.childId ? {ownerId,conversationId,requestId,memberId:member.conversation.memberId,childId:launch.childId} : undefined;
     if (z.strictObject({error:z.literal("Native SDK turn failed")}).safeParse(reply).success) {

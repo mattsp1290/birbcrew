@@ -20,11 +20,16 @@ const signInRequired = "A current ChatGPT Codex sign-in for the approved account
 const loginBytes = 1 << 20;
 const scratchPrefix = "birb-codex-signin-";
 const readDeadlineMs = 25_000;
+// A descendant that inherited app-server's pipes keeps them open. The read waits this long for their end, then stops.
+const exitGraceMs = 500;
 const stderrChars = 8192;
 // Every read ends within its deadline, so an older scratch directory belongs to a reader that was killed.
 const abandonedScratchMs = 5 * 60_000;
 // Codex refreshes an access token that expires within minutes, even when asked not to. The executor owns rotation.
 const closedRefreshEndpoint = "http://127.0.0.1:0/oauth/token";
+
+/** What a test replaces. A member turn reads with the bundled Codex, the closed refresh endpoint and the full deadline. */
+export interface ReadOptions { binary?: string; refreshEndpoint?: string; deadlineMs?: number }
 
 export type SignInFailure = "login-file" | "scratch" | "start" | "exited" | "timeout" | "protocol" | "signed-out" | "token" | "expired" | "account";
 
@@ -65,16 +70,17 @@ export async function readCodexSubscription(codexHome: string, expectedAccountId
 // mounts it read-only. App-server creates installation_id and skills in its CODEX_HOME at startup and stops when it
 // cannot, so it runs on a private copy of auth.json that has no refresh token. Only the current access token crosses
 // its stdio channel.
-async function readLogin(codexHome: string): Promise<Subscription> {
-  const binary = codexExecutable();
+export async function readLogin(codexHome: string, options: ReadOptions = {}): Promise<Subscription> {
+  const { binary = codexExecutable(), refreshEndpoint = closedRefreshEndpoint, deadlineMs = readDeadlineMs } = options;
   await removeAbandonedScratch();
-  let login: Buffer;
+  const file = join(codexHome, "auth.json");
+  let login: Buffer | undefined;
   try {
-    login = await readFile(join(codexHome, "auth.json"));
+    if ((await stat(file)).size <= loginBytes) login = await readFile(file);
   } catch (error) {
     failed("login-file", { code: errorCode(error) });
   }
-  if (login.length > loginBytes) failed("login-file", { code: "too large" });
+  if (!login || login.length > loginBytes) failed("login-file", { code: "too large" });
   const copy = signInCopy(login);
   let scratch: string;
   try {
@@ -88,7 +94,7 @@ async function readLogin(codexHome: string): Promise<Subscription> {
     } catch (error) {
       failed("scratch", { code: errorCode(error) });
     }
-    return await askAppServer(binary, scratch);
+    return await askAppServer(binary, scratch, refreshEndpoint, deadlineMs);
   } finally {
     // The next read sweeps a copy that could not be removed now.
     await rm(scratch, { recursive: true, force: true })
@@ -120,23 +126,33 @@ async function removeAbandonedScratch() {
   }));
 }
 
-async function askAppServer(binary: string, scratch: string): Promise<Subscription> {
+async function askAppServer(binary: string, scratch: string, refreshEndpoint: string, deadlineMs: number): Promise<Subscription> {
   // App-server normally fetches a catalog at startup. This process only handles sign-in.
   const child = spawn(binary, ["app-server", "--listen", "stdio://",
     "-c", 'model_provider="openai"', "-c", 'chatgpt_base_url="http://127.0.0.1:0"', "-c", 'cli_auth_credentials_store="file"',
     "-c", "log_dir=" + JSON.stringify(scratch), "-c", "analytics.enabled=false"], {
     cwd: scratch,
     env: {
-      HOME: scratch, CODEX_HOME: scratch, CODEX_SQLITE_HOME: scratch, CODEX_REFRESH_TOKEN_URL_OVERRIDE: closedRefreshEndpoint,
+      HOME: scratch, CODEX_HOME: scratch, CODEX_SQLITE_HOME: scratch, CODEX_REFRESH_TOKEN_URL_OVERRIDE: refreshEndpoint,
       PATH: "/usr/local/bin:/usr/bin:/bin", RUST_LOG: "off",
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
-  const lines = createInterface({ input: child.stdout });
+  let stopReading = () => {};
   const ended = new Promise<{ code: number | null; signal: NodeJS.Signals | null; error?: unknown }>((resolve) => {
-    child.once("error", (error) => { lines.close(); resolve({ code: null, signal: null, error }); });
+    child.once("error", (error) => { stopReading(); resolve({ code: null, signal: null, error }); });
     child.once("close", (code, signal) => resolve({ code, signal }));
+    child.once("exit", (code, signal) => setTimeout(() => {
+      stopReading();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolve({ code, signal });
+    }, exitGraceMs).unref());
   });
+  // A spawn that fails for lack of descriptors leaves no pipes and reports its error afterwards.
+  if (!child.stdin || !child.stdout || !child.stderr) failed("start", { code: errorCode((await ended).error) });
+  const lines = createInterface({ input: child.stdout });
+  stopReading = () => lines.close();
   let stderr = "", clipped = false;
   child.stderr.setEncoding("utf8").on("data", (text: string) => {
     stderr += text;
@@ -148,7 +164,7 @@ async function askAppServer(binary: string, scratch: string): Promise<Subscripti
   // The clip can leave the end of a token that no longer looks like one, so the clipped word is dropped.
   const output = () => redact(clipped ? stderr.replace(/^\S*/, "") : stderr, 512, "end") || undefined;
   let timedOut = false;
-  const timeout = setTimeout(() => { timedOut = true; lines.close(); child.kill("SIGKILL"); }, readDeadlineMs);
+  const timeout = setTimeout(() => { timedOut = true; lines.close(); child.kill("SIGKILL"); }, deadlineMs);
   child.stdin.on("error", () => {});
   const send = (message: object) => child.stdin.write(JSON.stringify(message) + "\n");
   let answer: { result?: unknown } | undefined;
@@ -164,6 +180,7 @@ async function askAppServer(binary: string, scratch: string): Promise<Subscripti
         send({ id: 2, method: "getAuthStatus", params: { includeToken: true, refreshToken: false } });
       }
       if (response.id === 2) {
+        if (response.result === undefined) failed("protocol", { error: "status refused", stderr: output() });
         answer = response;
         break;
       }

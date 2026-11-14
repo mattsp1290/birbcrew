@@ -29,7 +29,7 @@ interface AdmittedTurn {
 }
 
 const controller = new AbortController();
-// This process's stderr is closed. The supervisor host writes what it is sent.
+// This process has no stderr. The supervisor host writes what it is sent.
 forwardWarnings((line) => { if (process.connected) process.send?.({ warning: line }); });
 process.once("disconnect", () => process.exit(1));
 process.on("message", (message) => {

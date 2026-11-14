@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { Pool } from "pg";
-import { redact } from "../../src/service/diagnostics.ts";
+import { errorSummary, forwardWarnings, redact, relayWarning, warn } from "../../src/service/diagnostics.ts";
 import { MemberStore } from "../../src/service/store.ts";
 
 const plantedJwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJwbGFudGVkIn0.cGxhbnRlZA";
@@ -34,6 +34,62 @@ test("redaction removes token-shaped text and keeps the rest readable", () => {
   assert.equal(redact("WARNING: first\nWARNING: second\nError: Read-only file system (os error 30)\n", 42, "end"),
     "…Error: Read-only file system (os error 30)");
   assert.equal(redact(`Bearer ${plantedKey}\nError: stopped`, 14, "end"), "…Error: stopped");
+  assert.equal(redact("connect ECONNREFUSED postgres://birbcrew:hunter2@db.internal:5432/crew"),
+    "connect ECONNREFUSED postgres://birbcrew:[redacted]@db.internal:5432/crew");
+  assert.equal(redact(String.raw`body {\"access_token\":\"shortsecret\"}`), String.raw`body {\"access_token\":\"[redacted]\"}`);
+});
+
+test("redaction scans a bounded part of a huge text and drops a token cut at its edge", () => {
+  // Longer text is cut at 16384 characters. Either cut leaves 24 characters of the secret, too few to look like a token.
+  const secret = "opaque0123456789".repeat(4).slice(0, 60);
+  const start = redact("w ".repeat(8180) + secret + " after", 100_000);
+  const end = redact("before " + secret + " w".repeat(8180), 100_000, "end");
+  for (const kept of [start, end]) assert.ok(!kept.includes("opaque") && kept.length > 16_000);
+  // One long word used to cost quadratic time: five seconds for 60 thousand characters.
+  const began = performance.now();
+  assert.equal(redact("a".repeat(100_000), 300), "");
+  assert.equal(redact("a".repeat(30) + ".b ".repeat(5000), 12), "aaaaaaaaaaaa…");
+  assert.ok(performance.now() - began < 2000);
+});
+
+function capturedWarnings(t: TestContext) {
+  const lines: string[] = [];
+  forwardWarnings((line) => { lines.push(line); });
+  t.after(() => forwardWarnings(() => {}));
+  return lines;
+}
+
+test("logging a failure never throws, whatever was caught", (t) => {
+  const lines = capturedWarnings(t);
+  const caught = [
+    Object.assign(new Error("x"), { message: 42 }),
+    Object.assign(new Error("x"), { name: { toString() { throw new Error("no name"); } } }),
+    Object.create(Error.prototype, { message: { get() { throw new Error("no message"); } } }),
+    undefined, null, "text", 10n,
+  ];
+  assert.deepEqual(caught.map(errorSummary), [{ error: "Error", message: "42" }, { error: "unreadable error" }, { error: "unreadable error" },
+    { error: "undefined" }, { error: "object" }, { error: "string" }, { error: "bigint" }]);
+  for (const error of caught) warn("native_turn_failed", errorSummary(error));
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  warn("native_turn_failed", { level: "error", event: "forged", logger: "forged", big: 10n, circular, reason: "kept" } as never);
+  forwardWarnings(() => { throw new Error("the channel to the supervisor host is closed"); });
+  warn("native_turn_failed", { reason: "dropped" });
+  assert.equal(lines.length, caught.length + 1);
+  assert.deepEqual(JSON.parse(lines.at(-1)!), { level: "warn", logger: "birbcrew", event: "native_turn_failed", reason: "kept" });
+});
+
+test("the supervisor host cleans a runner's warning again and names its turn", (t) => {
+  const lines = capturedWarnings(t);
+  const turn = { conversationId: randomUUID(), requestId: randomUUID() };
+  relayWarning(JSON.stringify({ level: "error", logger: "forged", event: "codex_signin_unavailable", reason: "exited", exitCode: 1,
+    stderr: `first line\n{"level":"warn","event":"forged"} Bearer ${plantedKey}`, conversationId: "forged", nested: { token: plantedKey } }), turn);
+  const refused = ["not JSON", "null", "[]", '"text"', JSON.stringify({ event: "Not an event" }), JSON.stringify({ event: "long", pad: "y".repeat(9000) }),
+    `{"event":"split"}\n{"event":"forged"}`];
+  for (const line of refused) relayWarning(line, turn);
+  assert.deepEqual(lines.map((line) => JSON.parse(line)), [{ level: "warn", logger: "birbcrew", event: "codex_signin_unavailable", reason: "exited",
+    exitCode: 1, stderr: 'first line {"level":"warn","event":"forged"} Bearer [redacted]', ...turn }]);
+  assert.ok(lines.every((line) => !line.includes("\n") && !line.includes(plantedKey)));
 });
 
 async function failingProfiles(t: TestContext) {
@@ -112,27 +168,15 @@ test("the supervisor host logs why a turn was denied, with tokens removed, and k
 });
 
 const database = process.env.BIRBCREW_TEST_DATABASE_URL;
+const needsDatabase = !database &&
+  "needs a disposable PostgreSQL database in BIRBCREW_TEST_DATABASE_URL; the integration API workflow runs this case";
 
-test("a Codex sign-in failure reaches the worker's stderr through the turn runner and the supervisor host", { timeout: 60_000,
-  skip: !database && "needs a disposable PostgreSQL database in BIRBCREW_TEST_DATABASE_URL; the integration API workflow runs this case" }, async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "birb-diagnostics-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const home = join(dir, "sign-in"), state = join(dir, "state"), scratch = join(dir, "tmp"), config = join(dir, "profiles.mjs");
-  for (const path of [home, state, scratch]) await mkdir(path, { mode: 0o700 });
-  const accountId = randomUUID(), profile = "sign-in-" + randomUUID();
-  const exp = Math.floor(Date.now() / 1000) - 60;
-  const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  const token = (kind: string) => [encode({ alg: "none", typ: "JWT" }),
-    encode({ exp, kind, "https://api.openai.com/auth": { chatgpt_account_id: accountId, chatgpt_plan_type: "plus" } }), "eA"].join(".");
-  const tokens = { account_id: accountId, id_token: token("id"), access_token: token("access"), refresh_token: "planted-refresh-" + randomUUID() };
-  await writeFile(join(home, "auth.json"), JSON.stringify({ auth_mode: "chatgpt", last_refresh: new Date().toISOString(), tokens }), { mode: 0o600 });
-  const reader = new URL("../../src/service/codex-subscription.ts", import.meta.url).href;
-  // The closed loopback endpoint keeps a turn off the network if the sign-in check ever lets this login through.
-  await writeFile(config, `import { readCodexSubscription } from ${JSON.stringify(reader)};
-export const profiles = new Map([[${JSON.stringify(profile)}, { accountId: ${JSON.stringify(accountId)}, codex: { model: "gpt-5.4",
-  baseUrl: "http://127.0.0.1:1/closed", authorize: async () => {},
-  subscription: () => readCodexSubscription(${JSON.stringify(home)}, ${JSON.stringify(accountId)}) } }]]);\n`);
-
+/** Runs one admitted Codex turn through a real supervisor host and returns its answer and what it wrote on stderr. */
+async function hostTurn(t: TestContext, dir: string, profiles: (name: string) => string) {
+  const state = join(dir, "state"), scratch = join(dir, "tmp"), config = join(dir, "profiles.mjs");
+  for (const path of [state, scratch]) await mkdir(path, { mode: 0o700 });
+  const profile = "diagnostics-" + randomUUID();
+  await writeFile(config, profiles(profile));
   const pool = new Pool({ connectionString: database });
   t.after(() => pool.end());
   const store = new MemberStore(pool);
@@ -159,16 +203,46 @@ export const profiles = new Map([[${JSON.stringify(profile)}, { accountId: ${JSO
   const exited = Promise.all([once(host, "exit"), once(host.stderr!, "close")]);
   host.disconnect();
   await exited;
+  const logged = stderr.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  return { stderr, logged, scratch, turn: { conversationId, requestId: request.requestId } };
+}
+
+test("a Codex sign-in failure reaches the worker's stderr through the turn runner and the supervisor host",
+  { timeout: 60_000, skip: needsDatabase }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "birb-diagnostics-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const home = join(dir, "sign-in");
+  await mkdir(home, { mode: 0o700 });
+  const accountId = randomUUID();
+  const exp = Math.floor(Date.now() / 1000) - 60;
+  const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const token = (kind: string) => [encode({ alg: "none", typ: "JWT" }),
+    encode({ exp, kind, "https://api.openai.com/auth": { chatgpt_account_id: accountId, chatgpt_plan_type: "plus" } }), "eA"].join(".");
+  const tokens = { account_id: accountId, id_token: token("id"), access_token: token("access"), refresh_token: "planted-refresh-" + randomUUID() };
+  await writeFile(join(home, "auth.json"), JSON.stringify({ auth_mode: "chatgpt", last_refresh: new Date().toISOString(), tokens }), { mode: 0o600 });
+  const reader = new URL("../../src/service/codex-subscription.ts", import.meta.url).href;
+  // The closed loopback endpoint keeps a turn off the network if the sign-in check ever lets this login through.
+  const { stderr, logged, scratch, turn } = await hostTurn(t, dir, (profile) => `import { readCodexSubscription } from ${JSON.stringify(reader)};
+export const profiles = new Map([[${JSON.stringify(profile)}, { accountId: ${JSON.stringify(accountId)}, codex: { model: "gpt-5.4",
+  baseUrl: "http://127.0.0.1:1/closed", authorize: async () => {},
+  subscription: () => readCodexSubscription(${JSON.stringify(home)}, ${JSON.stringify(accountId)}) } }]]);\n`);
   const signInRequired = "A current ChatGPT Codex sign-in for the approved account is required";
-  assert.deepEqual(stderr.trim().split("\n").map((line) => JSON.parse(line)), [
-    { level: "warn", logger: "birbcrew", event: "codex_signin_unavailable", reason: "expired", expiredAt: new Date(exp * 1000).toISOString() },
-    { level: "warn", logger: "birbcrew", event: "native_turn_failed", conversationId, requestId: request.requestId,
-      error: "CodexSignInError", reason: "expired", message: signInRequired },
-    { level: "warn", logger: "birbcrew", event: "native_turn_unconfirmed", action: "start", conversationId, requestId: request.requestId,
+  assert.deepEqual(logged, [
+    { level: "warn", logger: "birbcrew", event: "codex_signin_unavailable", reason: "expired", expiredAt: new Date(exp * 1000).toISOString(), ...turn },
+    { level: "warn", logger: "birbcrew", event: "native_turn_failed", ...turn, error: "CodexSignInError", reason: "expired", message: signInRequired },
+    { level: "warn", logger: "birbcrew", event: "native_turn_unconfirmed", action: "start", ...turn,
       error: "Error", message: "Native runner reported a failed turn" },
   ]);
   for (const secret of [tokens.id_token, tokens.access_token, tokens.refresh_token]) {
     assert.ok(!stderr.includes(secret), "the worker's stderr contains a token");
   }
   assert.deepEqual(await readdir(scratch), []);
+});
+
+test("a turn runner that dies without a reply is logged with how it ended", { timeout: 60_000, skip: needsDatabase }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "birb-diagnostics-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { logged, turn } = await hostTurn(t, dir, () => "process.exit(7);\n");
+  assert.deepEqual(logged, [{ level: "warn", logger: "birbcrew", event: "native_turn_unconfirmed", action: "start", ...turn,
+    error: "Error", message: "SDK process stopped without a confirmed result (exit code 7, no reply)" }]);
 });

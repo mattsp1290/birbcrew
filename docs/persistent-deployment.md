@@ -272,9 +272,11 @@ expire. The value names accounts, so supply it from a Secret.
   directory holding a Codex CLI ChatGPT login in `auth.json`. Each turn copies
   that file without its refresh token into a private directory under `/tmp`,
   starts the bundled `codex app-server` there and reads the current access token.
-  The copy is removed after the read. Refresh requests from that app-server go to
-  a closed loopback port, so the worker never rotates the login. It never writes
-  the sign-in directory either, which can be mounted read-only. The turn stops
+  The copy is removed after the read. A worker killed during the read leaves its
+  copy behind, and a later read removes copies older than five minutes. Refresh
+  requests from that app-server go to a closed loopback port, so the worker never
+  rotates the login. It never writes the sign-in directory either, which can be
+  mounted read-only. The turn stops
   unless the token is current and belongs to `account_id`. Without `BIRBCREW_CODEX_AUTH_HOME` the
   worker falls back to `CODEX_HOME`, then `$HOME/.codex`, which is the tmpfs
   `/tmp/.codex` in this image, so set it explicitly. Keep the login current with the Codex
@@ -282,14 +284,16 @@ expire. The value names accounts, so supply it from a Secret.
   **unverified**.
 
 A failed member turn writes one JSON line per cause to the worker's stderr, each
-with `"level":"warn"`. A Codex sign-in problem gives `codex_signin_unavailable`.
-Its `reason` is one of `login-file`, `scratch`, `start`, `exited`, `timeout`,
-`protocol`, `signed-out`, `token`, `expired` or `account`. An `expired` line
-carries `expiredAt`. A `codex app-server` that stopped adds its exit code and
-the end of its stderr. The turn runner then logs `native_turn_failed` and the
-supervisor `native_turn_unconfirmed`, with the error class and message.
-Token-shaped text in these lines is replaced with `[redacted]`. The member sees
-the same message as before.
+with `"level":"warn"`, `conversationId` and `requestId`. A Codex sign-in problem
+gives `codex_signin_unavailable`. Its `reason` is one of `login-file`, `scratch`,
+`start`, `exited`, `timeout`, `protocol`, `signed-out`, `token`, `expired` or
+`account`. An `expired` line carries `expiredAt`. A `codex app-server` that
+stopped adds `exitCode` or `signal` and the end of its stderr. The turn runner
+then logs `native_turn_failed` and the supervisor `native_turn_unconfirmed`, with
+the error class and message. A runner that died without a reply is named with
+its exit code or signal. `codex_signin_copy_left` means a sign-in copy could not
+be removed. Token-shaped text in these lines is replaced with `[redacted]`. The
+message a member sees does not carry the cause.
 
 Releases before this setting read dated attestation files through
 `BIRBCREW_PI_ATTESTATION` and `BIRBCREW_CODEX_ATTESTATION`. Those variables are
