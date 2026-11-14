@@ -17,6 +17,12 @@ for (const engine of ["claude", "pi"]) {
     const cid = randomUUID(), path = "/conversations/" + cid;
     const opened = await host.post("/conversations", { memberId: member.memberId, conversationId: cid });
     assert.equal(opened.state.engine, engine);
+    // The gateway sends RUN_FINISHED only when the conversation ends: it is cancelled, or the input
+    // that uses its last turn completes. A new conversation has 128 turns (docs/bounded-conversations.md),
+    // so pin this one to the four-turn budget migration 16 keeps for older conversations. The record
+    // request (sent twice under one requestId) and three recalls below use exactly four turns.
+    const pinned = await host.db.query("UPDATE birbcrew_ts.conversations SET turn_limit=4 WHERE conversation_id=$1 AND turn_limit=128", [cid]);
+    assert.equal(pinned.rowCount, 1);
     assert.equal((await host.api(path, undefined, host.stranger)).status, 404);
     assert.equal((await host.api(path, undefined, "wrong")).status, 401);
     let first = host.attach(cid);
