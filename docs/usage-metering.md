@@ -96,7 +96,7 @@ request to end first. Per-segment rows are written once, as each segment returns
 | `usage_id` | Identity, newest highest |
 | `owner_id`, `member_id`, `conversation_id`, `request_id` | Whose segment it was |
 | `token`, `child_id` | The launch generation, and the Pi child it ran for, if any |
-| `engine` | `pi`, `claude` or `codex` |
+| `engine` | `pi`, `claude` or `codex`: the engine that ran the segment. A child's row takes its child target's engine (always `pi` so far) and keeps the parent member's `member_id`, so a child's tokens count toward its parent member's budget |
 | `state` | `reported`, or `unknown` when the SDK reported nothing usable |
 | `model` | As the engine reported it, at most 256 bytes; null for Codex |
 | `input_tokens`, `output_tokens` | Integers; both set exactly when `state` is `reported` |
@@ -454,6 +454,8 @@ host, which records a row for each segment, but none reads the ledger. So these 
 exercised end to end: a refusal by the admission activity inside a real workflow (the
 mapping is tested with a constructed failure), the workflow closing that conversation,
 a handoff's reserved request metered through Temporal, and a gateway's dispatcher firing
-a routine on Temporal. A Pi child's segment is recorded by the same
-insert with its `childId`, but no test runs a delegation. Real providers were not
-called, so the field mappings rest on the SDK types and the fixtures.
+a routine on Temporal. A Pi child's segment is recorded by the same insert with its
+`childId`. `npm run test:child-targets` runs one child workflow through Temporal and the
+supervisor and reads its row, but no test reads the ledger after a whole delegation.
+Real providers were not called, so the field mappings rest on the SDK types and the
+fixtures.
