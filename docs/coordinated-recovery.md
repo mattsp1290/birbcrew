@@ -397,7 +397,7 @@ persistence. That is **development fixture evidence only**, not support for usin
 
 ## Reproduce checks
 
-Use Node 22.23.3 and disposable PostgreSQL 17, with permission to create/drop test
+Use Node 24.22.3 and disposable PostgreSQL 17, with permission to create/drop test
 databases. `BIRBCREW_PG_BIN` may name the directory containing matching `pg_dump`
 and `pg_restore`, or `BIRBCREW_RECOVERY_POSTGRES_CONTAINER` may name the PostgreSQL
 17 container for `docker exec`. These tools operate only on randomly named test

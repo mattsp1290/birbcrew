@@ -207,7 +207,7 @@ rewrite the legacy workflow or prove a full Temporal-server replacement.
 
 ## Validate without personal credentials or paid inference
 
-Requires Linux with Landlock ABI 4+, Node **22.23.3**, a C compiler and a disposable
+Requires Linux with Landlock ABI 4+, Node **24.22.3**, a C compiler and a disposable
 PostgreSQL 17 database. CI uses Ubuntu 24.04 and exercises the actual locked SDKs
 against scripted local providers, not paid models.
 

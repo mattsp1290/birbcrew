@@ -23,6 +23,14 @@ for (const pkg of manifest) {
   });
 }
 
+// npm ci can install a cached copy under the lock's integrity, so a repacked archive must match it here.
+test("the packed pi-subagents archive is the one the lock names", async () => {
+  const { packages } = JSON.parse(await readFile(new URL("package-lock.json", root), "utf8"));
+  const { resolved, integrity } = packages["node_modules/@birbcrew/pi-subagents"];
+  const bytes = await readFile(new URL(resolved.slice("file:".length), root));
+  assert.equal(`sha512-${createHash("sha512").update(bytes).digest("base64")}`, integrity);
+});
+
 test("Pi's public coding-session example loads in the consumer", async () => {
   const { createExampleServer } = await import("@ag-ui/pi/examples/server");
   assert.equal(typeof createExampleServer, "function");

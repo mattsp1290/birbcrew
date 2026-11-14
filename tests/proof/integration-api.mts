@@ -11,7 +11,7 @@ import { services, until, type Engine } from "./member-services.mts";
 import { startRestartFixtures } from "./proxy-restart-fixtures.mts";
 
 // Public HTTP boundary + real Temporal/SQL/native worker fixtures. No live inference.
-assert.equal(process.version, "v22.23.3");
+assert.equal(process.version, "v24.22.3");
 const s = await services();
 const ownerId = randomUUID(), token = randomUUID(), stranger = randomUUID();
 const config = join(s.directory, "gateway.json");
