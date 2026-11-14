@@ -1,12 +1,12 @@
 # check=skip=InvalidDefaultArgInFrom
 # TypeScript member gateway and worker. See docs/persistent-deployment.md.
-# NODE_IMAGE must be a digest-pinned Node 22.23.3 Debian bookworm image; there is no default.
+# NODE_IMAGE must be a digest-pinned Node 24.22.3 Debian bookworm image; there is no default.
 ARG NODE_IMAGE
 
 FROM ${NODE_IMAGE} AS build
 ARG NODE_IMAGE
 RUN case "$NODE_IMAGE" in *@sha256:*) ;; *) echo "Pin NODE_IMAGE by digest" >&2; exit 1 ;; esac \
-    && test "$(node --version)" = v22.23.3 \
+    && test "$(node --version)" = v24.22.3 \
     && grep -q '^12\.' /etc/debian_version
 # The launcher must link against the runtime image's glibc, so it is compiled from the same base.
 RUN apt-get update \

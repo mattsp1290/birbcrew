@@ -19,7 +19,7 @@ import {commands,pendingSchema,decision} from './member-commands.mts';
 import {services,run,until,type Services,type Engine} from './member-services.mts';
 import {prepareRecoveryNativeRuntime} from './recovery-native-runtime.mts';
 
-assert.equal(process.version,'v22.23.3');
+assert.equal(process.version,'v24.22.3');
 const postgresImage='postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94';
 async function pg(tool:'pg_dump'|'pg_restore',url:string,input?:Buffer) {
  const parsed=new URL(url);
