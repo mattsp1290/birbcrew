@@ -56,8 +56,11 @@ test("a conversation that uses its last turn still ends both observers with a su
   const end = await (await host.api(path)).json();
   assert.equal(end.state.phase,"complete");
   for (const reader of readers) {
-    // The pinned AG-UI version; a package bump that changes it needs a deliberate look.
-    assert.deepEqual([reader.events[0]?.type,reader.events[0]?.protocolVersion],["RUN_STARTED","1.0"]);
+    assert.equal(reader.events[0]?.type,"RUN_STARTED");
+    // The gateway sends @ag-ui/core's PROTOCOL_VERSION, so a package bump changes the wire value with no source edit.
+    assert.equal(reader.events[0]?.protocolVersion,"1.0",
+      "RUN_STARTED declares the pinned AG-UI protocol version. After an @ag-ui/core bump, review what the new version requires, " +
+      "then update this pin and the RUN_STARTED sentence in docs/integration-api-v1.md.");
     const last = reader.events.at(-1);
     assert.equal(last?.type,"RUN_FINISHED");
     assert.ok(last && !("outcome" in last));
