@@ -6,6 +6,19 @@ An owner spawns a member with a fixed engine and execution profile. Each convers
 
 Pi and Claude release the inference worker during a confirmed human wait. Pi can delegate to two child workflows with separate native sessions and one shared write budget. Codex keeps its invocation-scoped MCP call open until the owner responds or the deadline expires. SQL records the decision, effect receipt and confirmation of native delivery separately. On interruption, clients can distinguish a proven zero-effect call from a committed receipt with unknown delivery. See the [gateway contract](member-gateway.md).
 
+### Internal: child targets
+
+A delegated child can carry a target: the engine and registered profile it runs on, stored as `target` in its `pi_children.role_profile` JSON. A child without one runs on its parent's Pi profile, and that is still every child a member can start: the runner's reply schema (`runnerResultSchema`) has no `target`, so nothing a runner returns can set one. The child workflow schedules its two engine activities, the segment and the card's settlement, on the target's queue; its reconcile and close activities stay on the member queue. The supervisor runs the target profile's driver, and the child's usage row records that engine under its parent member.
+
+`ChildStore.delegate` refuses any target but a registered delegating Pi profile, with a `ChildTargetError`. The target, and the parent too, must hold every tool the child gets. The target must also run the model its parent pinned on the child, which only the child's launch can check, because the profiles table has no model column. The Claude and Codex drivers refuse a child.
+
+The segment activity (`executeChildSegment`) refuses to run on any queue but the one its row names, and refuses a target that is not Pi or that it cannot read, before it reserves a launch. The card's settlement is not checked, since it only writes to the database. Replay does not compare task queues, so without that check a workflow worker from before targets would quietly run a targeted child on its parent's queue. Two rules follow from that:
+
+- Every worker must run this release or a later one before anything writes a target.
+- A release that has written targets must not be rolled back past this one.
+
+A registered target with no running worker leaves its child waiting until the activity's 10-minute schedule-to-close, and then the child fails. Depth stays one: a delegation needs the parent turn's token, a child runs its profile's child branch, and the supervisor refuses a delegation from a child launch. `npm run test:child-targets` covers this, including replay of histories recorded with the workflow source from before targets.
+
 ## Historical Python proof
 
 One Temporal workflow owns each conversation. Its stable ID derives from the

@@ -104,7 +104,8 @@ trigger keeps a firing's identity fixed.
 An open refused with `409 memory_limit`, because the member's [memory](memories.md)
 with the project notes would not fit its engine, is such a refusal: the firing fails
 `rejected` and counts. So is `409 instructions_limit`, when the member's
-[instructions](member-instructions.md) with the project notes would not fit. It names no
+[instructions](member-instructions.md) and [instruction packs](instruction-packs.md) with
+the project notes would not fit. It names no
 other reason, so check the member's entries and instructions when a Codex member's
 firings start failing `rejected`.
 
@@ -305,7 +306,7 @@ safe: two gateways never fire one window twice. With several gateways:
 - a firing whose gateway stopped mid-attempt is retried by any gateway after its
   2-minute lease, with the same identity.
 
-The gateway cannot see a profile's attestation status, which only the worker reads.
+The gateway cannot see whether a profile's credential works, which only the worker checks.
 A firing whose profile is unavailable is admitted, its turn fails or becomes
 uncertain in the worker, and the firing fails, counting toward the limit of ten.
 

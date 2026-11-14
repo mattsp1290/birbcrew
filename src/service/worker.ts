@@ -17,6 +17,15 @@ async function touch(path: string) {
   try { const now = new Date(); await file.utimes(now, now); } finally { await file.close(); }
 }
 
+/** The activities the member task queue serves beside the conversation workflows. */
+export function memberQueueActivities(store: MemberStore) {
+  const children = new ChildStore(store.pool);
+  return { rejectUnstartedAdmission:store.rejectUnstartedAdmission.bind(store), recordAcceptance:ownerAdmissionActivity(store), rejectAccepted:store.rejectAccepted.bind(store), conversationProgress:progressActivity(store), cancelGenerating:store.cancelGenerating.bind(store), decideLive:answerLive.bind(null,store.pool), cancelLive:cancelLive.bind(null,store.pool),
+    reconcileTurn: store.reconcileTurn.bind(store), reconcileChild:children.reconcile.bind(children),
+    closeExitedChild: children.closeExitedChild.bind(children), quarantineDelegation: children.quarantineDelegation.bind(children),
+    expireApproval: expiryActivity(store) };
+}
+
 export async function runMemberWorker(store: MemberStore, temporal: TemporalSettings, profiles: ReadonlyMap<string, MemberProfile>,
   configPath: string, stateDir: string, heartbeat?: string) {
   const connection = await NativeConnection.connect(await temporalConnectionOptions(temporal));
@@ -24,13 +33,8 @@ export async function runMemberWorker(store: MemberStore, temporal: TemporalSett
   const workers: Worker[] = [];
   let supervisor;
   try {
-    const children = new ChildStore(store.pool);
     workers.push(await Worker.create({
-      connection, namespace, taskQueue: memberTaskQueue,
-      activities: { rejectUnstartedAdmission:store.rejectUnstartedAdmission.bind(store), recordAcceptance:ownerAdmissionActivity(store), rejectAccepted:store.rejectAccepted.bind(store), conversationProgress:progressActivity(store), cancelGenerating:store.cancelGenerating.bind(store), decideLive:answerLive.bind(null,store.pool), cancelLive:cancelLive.bind(null,store.pool),
-        reconcileTurn: store.reconcileTurn.bind(store), reconcileChild:children.reconcile.bind(children),
-        closeExitedChild: children.closeExitedChild.bind(children), quarantineDelegation: children.quarantineDelegation.bind(children),
-        expireApproval: expiryActivity(store) },
+      connection, namespace, taskQueue: memberTaskQueue, activities: memberQueueActivities(store),
       workflowsPath: fileURLToPath(new URL("./workflow.ts", import.meta.url)),
     }));
     supervisor = await startSupervisor(configPath, stateDir);

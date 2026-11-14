@@ -22,7 +22,7 @@ import type { Launch } from "../../src/service/supervisor.ts";
 import { recordSegmentUsage, UsageApi } from "../../src/service/usage.ts";
 import { conversation, databaseAt, gateway, launched, member, migrationNumbers, pool, reported, spend, sql, store } from "./usage-fixtures.ts";
 
-// Estimated cost, the trusted-context lane's metering and migration 36 are in usage-cost.test.ts.
+// Estimated cost, the trusted-context lane's metering and migration 35 are in usage-cost.test.ts.
 before(() => store.migrate());
 after(() => pool.end());
 

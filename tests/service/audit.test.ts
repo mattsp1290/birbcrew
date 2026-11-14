@@ -410,7 +410,7 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
   try {
     await db.query("BEGIN");
     const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), digest = "0".repeat(64);
-    const routineId = randomUUID(), memoryId = randomUUID(), webhookId = randomUUID();
+    const routineId = randomUUID(), memoryId = randomUUID(), webhookId = randomUUID(), packId = randomUUID();
     const { rows: [{ member_id: memberId }] } = await db.query<{ member_id: string }>(`INSERT INTO birbcrew_ts.members
       (owner_id,spawn_request_id,engine,profile) VALUES ($1,$2,'pi',$3) RETURNING member_id`, [ownerId, randomUUID(), profile]);
     await db.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)",
@@ -449,10 +449,13 @@ test("every event type's natural key is a working ON CONFLICT arbiter", async ()
         windowStart: "2031-01-01T00:00:00.000Z", budgetRevision: 1 } },
       "approval.requested": { conversationId, requestId, payload: { approvalId: randomUUID(), invocationId: requestId,
         toolName: "choose_next_step", argumentDigest: digest } },
-      "webhook.created": { payload: { webhookId, revision: 1, host: "hooks.example.com", kinds: ["request.finished"] } },
+      "webhook.created": { payload: { webhookId, revision: 1, host: "hooks.example.com", kinds: ["request.finished"], format: "crew" } },
       "webhook.enabled": { payload: { webhookId, revision: 3, host: "hooks.example.com" } },
       "webhook.disabled": { payload: { webhookId, revision: 2, host: "hooks.example.com", reason: "consecutive_failures" } },
       "webhook.deleted": { payload: { webhookId, revision: 4, host: "hooks.example.com" } },
+      "instruction_pack.created": { payload: { packId } },
+      "instruction_pack.deleted": { payload: { packId } },
+      "member.instruction_packs_attached": { payload: { packIds: [packId, randomUUID()] } },
     };
     for (const type of auditEventTypes) {
       // A type that belongs to no member names none.
@@ -1347,8 +1350,12 @@ test("migration 30 indexes a version-29 trail without queueing for an open audit
   const current = new MemberStore(upgraded);
   const ownerId = "owner-" + randomUUID(), conversationId = randomUUID(), requestId = randomUUID(), text = "running at upgrade";
   const { memberId } = await current.spawn({ ownerId, requestId: randomUUID(), engine: "pi", profile });
-  await current.openConversation({ ownerId, memberId, conversationId });
-  // Admitted by the previous release, in SQL: this release's admission also reads the budgets 031 adds.
+  // Opened and admitted by the previous release, in SQL: this release's open also reads the packs 033
+  // adds, and its admission the budgets 031 adds.
+  await current.transaction(async db => {
+    await db.query("INSERT INTO birbcrew_ts.conversations (owner_id,member_id,conversation_id) VALUES ($1,$2,$3)", [ownerId, memberId, conversationId]);
+    await appendAudit(db, { type: "conversation.opened", ownerId, memberId, conversationId, payload: {} });
+  });
   await current.transaction(async db => {
     const digest = createHash("sha256").update(text).digest();
     await db.query(`INSERT INTO birbcrew_ts.request_admissions (conversation_id,request_id,prompt_digest,initiator_kind)

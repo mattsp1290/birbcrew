@@ -12,7 +12,7 @@ import { recordSegmentUsage, recordTrustedUsage, UsageApi } from "../../src/serv
 import type { PriceTable } from "../../src/service/usage-prices.ts";
 import { conversation, databaseAt, gateway, launched, member, migrationNumbers, pool, reported, spend, sql, store } from "./usage-fixtures.ts";
 
-// Estimated cost, the trusted-context lane's metering and migration 36 (docs/usage-metering.md).
+// Estimated cost, the trusted-context lane's metering and migration 35 (docs/usage-metering.md).
 before(() => store.migrate());
 after(() => pool.end());
 
@@ -182,12 +182,12 @@ test("a trusted-context request is metered once in its own lane, as the owner's,
   await assert.rejects(direct({ request_id: next.requestId, trusted_request_id: next.requestId }), { code: "23505" }, "one row per trusted request");
 });
 
-test("migration 036 adds the estimate and the trusted lane without a rewrite or a scan, never queues, and leaves earlier rows unestimated", async (t) => {
-  const upgraded = await databaseAt(t, 32);
+test("migration 035 adds the estimate and the trusted lane without a rewrite or a scan, never queues, and leaves earlier rows unestimated", async (t) => {
+  const upgraded = await databaseAt(t, 34);
   const current = new MemberStore(upgraded);
   const owner = await member(current, undefined, "claude");
   const conversationId = await conversation(current, owner);
-  // A row recorded before the upgrade, as release 32 wrote it.
+  // A row recorded before the upgrade, as release 34 wrote it.
   const earlier = await launched(current, owner.ownerId, conversationId, "before the upgrade");
   await upgraded.query(`INSERT INTO birbcrew_ts.usage_ledger (owner_id,member_id,conversation_id,request_id,token,engine,state,model,input_tokens,output_tokens)
     VALUES ($1,$2,$3,$4,$5,'claude','reported','fixture-model',1000,100)`,
@@ -198,7 +198,7 @@ test("migration 036 adds the estimate and the trusted lane without a rewrite or 
     await db.query("BEGIN");
     const file = "SELECT pg_relation_filenode('birbcrew_ts.usage_ledger') AS ledger";
     const { rows: [before] } = await db.query(file);
-    await db.query(await readFile(new URL("036-usage-cost.sql", sql), "utf8"));
+    await db.query(await readFile(new URL("035-usage-cost.sql", sql), "utf8"));
     assert.deepEqual((await db.query(file)).rows[0], before, "no rewrite");
     const { rows } = await db.query(`SELECT c.relname AS relation, l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
       WHERE l.pid=pg_backend_pid() AND c.relkind='r' AND c.relnamespace='birbcrew_ts'::regnamespace ORDER BY 1,2`);
@@ -235,8 +235,8 @@ test("migration 036 adds the estimate and the trusted lane without a rewrite or 
     await holder.query("COMMIT");
     await migrating;
   } finally { holder.release(); }
-  assert.deepEqual((await upgraded.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version>=32 ORDER BY 1")).rows
-    .map(row => row.version), (await migrationNumbers()).filter(version => version >= 32));
+  assert.deepEqual((await upgraded.query("SELECT version FROM birbcrew_ts.schema_versions WHERE version>=34 ORDER BY 1")).rows
+    .map(row => row.version), (await migrationNumbers()).filter(version => version >= 34));
 
   // The earlier row keeps no estimate: the price table never reaches back. A new segment is priced.
   const later = await launched(current, owner.ownerId, conversationId, "after the upgrade");
@@ -247,15 +247,15 @@ test("migration 036 adds the estimate and the trusted lane without a rewrite or 
     [[later.request.requestId, "0.0028"], [earlier.request.requestId, null]]);
 });
 
-test("migration 036 completes while a trusted-context turn holds its lease", async (t) => {
-  const upgraded = await databaseAt(t, 32);
+test("migration 035 completes while a trusted-context turn holds its lease", async (t) => {
+  const upgraded = await databaseAt(t, 34);
   const current = new MemberStore(upgraded);
   const owner = await member(current, undefined, "claude");
   const { trusted, claim } = await trustedStart(current, owner);
   // A trusted native turn reads its request under its lease's transaction for the whole turn.
   await trusted.admitted(claim, AbortSignal.timeout(30_000), async () => {
     const migrated = await Promise.race([current.migrate().then(() => true), delay(5_000, false)]);
-    assert.equal(migrated, true, "migration 036 must not wait for a running trusted turn");
+    assert.equal(migrated, true, "migration 035 must not wait for a running trusted turn");
   });
   await recordTrustedUsage(upgraded, claim, reported(3, 4));
   assert.equal((await upgraded.query("SELECT count(*)::integer AS n FROM birbcrew_ts.usage_ledger WHERE trusted_request_id IS NOT NULL")).rows[0].n, 1);

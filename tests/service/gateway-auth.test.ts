@@ -30,7 +30,7 @@ const members = new Proxy({}, { get: (_, name) => () => { record("members." + St
 
 const token = randomUUID();
 const conversation = randomUUID(), request = randomUUID(), member = randomUUID(), grant = randomUUID();
-const routine = randomUUID(), memory = randomUUID(), webhook = randomUUID();
+const routine = randomUUID(), memory = randomUUID(), webhook = randomUUID(), pack = randomUUID();
 // Every route and method main serves, versioned and unversioned, plus health-like paths that must not exist.
 const routes: [string, string][] = [
   ["GET", "/v1/capabilities"], ["GET", "/v1/health"], ["GET", "/v1/members"], ["GET", "/v1/conversations"],
@@ -42,6 +42,8 @@ const routes: [string, string][] = [
   ["POST", `/v1/webhooks/${webhook}/enable`], ["POST", `/v1/webhooks/${webhook}/disable`], ["GET", `/v1/webhooks/${webhook}/deliveries`],
   ["GET", `/v1/members/${member}/grants`], ["POST", `/v1/members/${member}/grants/${grant}/revoke`],
   ["GET", `/v1/members/${member}/instructions`],
+  ["POST", "/v1/instruction-packs"], ["GET", "/v1/instruction-packs"], ["GET", `/v1/instruction-packs/${pack}`],
+  ["DELETE", `/v1/instruction-packs/${pack}`],
   ["GET", "/v1/usage"], ["GET", "/v1/usage/members"], ["GET", "/v1/usage/conversations"], ["GET", "/v1/usage/records"],
   ["GET", `/v1/usage/budgets/${member}`], ["PUT", `/v1/usage/budgets/${member}`], ["DELETE", `/v1/usage/budgets/${member}`],
   ["POST", "/v1/members"], ["POST", "/v1/conversations"],

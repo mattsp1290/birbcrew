@@ -12,7 +12,8 @@ are pinned. The JavaScript lockfile pins the AG-UI clients.
 For the historical Python journey, use `scripts/verify` or
 `scripts/verify-legacy --mode test`. Its report and private temporary files
 belong to that run. To reproduce the historical hosted proof, invoke
-`scripts/verify-legacy` explicitly with its approved attestation.
+`scripts/verify-legacy --mode live` explicitly, with the owner's approval to
+make paid model calls.
 
 ### TypeScript fixture verification
 
@@ -47,33 +48,33 @@ from the original checkout.
 ### Live member verification
 
 The opt-in member entrypoint is `scripts/verify --mode live --engine ENGINE
---attestation /absolute/private/account.json`. Each provider needs its own
-approved account and credential. Fixture results apply only to the controlled
+--approval /absolute/private/proof.json`. Each run needs its own single-use
+owner approval, and each provider its own account and credential. Fixture results apply only to the controlled
 local providers. See the [account and profile guide](member-profiles.md).
 
 ## Run the Python subscription journey
 
-Before model calls, verify that the chosen account is an eligible OpenCode Go
-subscription and that Extra Usage is disabled. If it is enabled or unknown, stop
-and ask the owner to check or change it. Do not enable paid fallback.
+This journey makes paid model calls. Run it only with the owner's approval.
+Overage billing is a provider console setting that no code here reads. Keep
+Extra Usage off there, and do not enable paid fallback.
 
 The proof reads the literal `OPENCODE_GO_API_KEY` assignment from `~/.profile`.
 It never prints that value or sources the profile. Use the owner's supported
 credential flow to provision it. Do not put a credential in this repository.
 
-Write a local account-evidence file outside Git. The schema is defined by
-`SubscriptionEvidence` in `src/birbcrew/provider.py`. Record provider
-`opencode-go`, a nonsecret account-path label, boolean `extra_usage_disabled`
-and `eligible_coding_use`, a current UTC `checked_at`, and the evidence source.
-Evidence older than twelve hours is rejected. This is an explicit owner
-attestation, not an automated billing-console check.
+Run `scripts/verify-legacy --mode live`. The credential is the only account
+input. Before the first model call the proof asks the provider for its model
+list with that key and stops on any answer but 200 or when `glm-5.3-flash` is
+not listed. Earlier releases also required `--attestation`, a dated owner
+statement that expired after twelve hours. That option was removed, and nothing
+replaces it.
 
-Run `scripts/verify --mode live --attestation /absolute/path/to/account.json`.
-It uses the same conversation runtime with the compatible OpenAI provider and
-`glm-5.3-flash`. The request identifies Birbcrew and supplies a stable conversation
-session header. It performs only the synthetic coding journey. The account
-preflight and returned model identity appear in the report. This live journey
-is opt-in for routine runs and required for milestone acceptance.
+The journey uses the same conversation runtime with the compatible OpenAI
+provider and `glm-5.3-flash`. The request identifies Birbcrew and supplies a
+stable conversation session header. It performs only the synthetic coding
+journey. The credential preflight and returned model identity appear in the
+report, which states that billing was not checked. This live journey is opt-in
+for routine runs and required for milestone acceptance.
 
 ## Inspect the evidence
 

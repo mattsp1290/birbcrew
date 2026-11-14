@@ -106,7 +106,7 @@ request to end first. Per-segment rows are written once, as each segment returns
 | `owner_id`, `member_id`, `conversation_id`, `request_id` | Whose segment it was |
 | `token`, `child_id` | The launch generation, and the Pi child it ran for, if any; both null on a trusted-context row |
 | `trusted_request_id` | On a trusted-context row only, the trusted request, equal to `request_id` |
-| `engine` | `pi`, `claude` or `codex` |
+| `engine` | `pi`, `claude` or `codex`: the engine that ran the segment. A child's row takes its child target's engine (always `pi` so far) and keeps the parent member's `member_id`, so a child's tokens count toward its parent member's budget |
 | `state` | `reported`, or `unknown` when the SDK reported nothing usable |
 | `model` | As the engine reported it (see the table above), at most 256 bytes, or null |
 | `input_tokens`, `output_tokens` | Integers; both set exactly when `state` is `reported` |
@@ -348,7 +348,7 @@ lane is refused, though; the trusted lane has no admission that consults the bud
 so its requests run whatever the budget says. Budgets count tokens, not money. Input
 includes cache reads and writes, so a long Codex or Claude conversation that rereads
 its context counts that context every time. That context includes the member's
-[instructions](member-instructions.md), project notes and memory, which every launch
+[instruction packs](instruction-packs.md), [instructions](member-instructions.md), project notes and memory, which every launch
 sends again. Crew meters them as input like the rest; no token limit applies to them
 apart from the member's budget, and their byte limits when a conversation opens are
 unchanged. `unknown` rows count nothing. A budget applies to one member
@@ -530,7 +530,7 @@ Recreate it, restore a backup taken before that build, or run this release's two
 `ALTER TABLE` statements from `031-usage.sql` (the reason CHECK and the type CHECK) on
 it by hand.
 
-Migration 36 adds `estimated_cost_usd`, `estimate_price` and `trusted_request_id` to
+Migration 35 adds `estimated_cost_usd`, `estimate_price` and `trusted_request_id` to
 the ledger, all nullable without a default, so no row is rewritten; drops `NOT NULL`
 from `token`; and adds three CHECKs and a foreign key to `trusted_requests`, all
 `NOT VALID`, so no row is scanned. Rows written before it keep no estimate: the price
@@ -649,7 +649,7 @@ names being one the reason CHECK allows; the capabilities' usage values, which i
 and a held installation refusing usage writes.
 
 `usage-cost.test.ts`, which `npm run test:usage` runs with it, covers cost, the trusted
-lane and migration 36. For cost it checks an estimate written with the rates it used and
+lane and migration 35. For cost it checks an estimate written with the rates it used and
 kept when the price rises, a table that skipped validation costing a segment its
 estimate but never its counts, a retried write adding nothing under another price, a
 billed segment never estimated, unpriced, unnamed and unknown segments left without
@@ -659,7 +659,7 @@ trusted lane it checks one row per trusted request, none for a stale claim or an
 owner, the `trusted` lane and owner initiator in records and its part of every total,
 its tokens in the member's budget, the row surviving `erase()`, the lane CHECKs and
 keys, and a table built in code that the file rules refuse stopping `runTrustedRequest`
-before it claims a request. Migration 36 is applied to a version-32 database: no
+before it claims a request. Migration 35 is applied to a version-34 database: no
 rewrite, its locks, NOT VALID constraints, a retry instead of a queue while a ledger
 write holds the table, no wait for a running trusted turn's lease, and earlier rows left
 unestimated.
@@ -685,7 +685,9 @@ apart. The other service proofs run the same supervisor host but do not read the
 So these are not exercised end to end: a refusal by the admission activity inside a real
 workflow (the mapping is tested with a constructed failure), the workflow closing that conversation,
 a handoff's reserved request metered through Temporal, and a gateway's dispatcher firing
-a routine on Temporal. A Pi child's segment is recorded by the same
-insert with its `childId`, but no test runs a delegation. Real providers were not
-called, so the field mappings and model names rest on the SDK types and the fixtures,
-and no estimate has been compared with a provider's bill.
+a routine on Temporal. A Pi child's segment is recorded by the same insert with its
+`childId`. `npm run test:child-targets` runs one child workflow through Temporal and the
+supervisor and reads its row, and prices child rows by the model each reported, but no
+test reads the ledger after a whole delegation. Real providers were not called, so the
+field mappings and model names rest on the SDK types and the fixtures, and no estimate
+has been compared with a provider's bill.

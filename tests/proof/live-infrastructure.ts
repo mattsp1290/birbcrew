@@ -122,7 +122,7 @@ export async function proofInfrastructure(account: LiveAccount, relay: Awaited<R
   const stop = async () => { if (running) { await docker(["rm", "-f", worker]); running = false; } };
   cleanup.push(stop);
   const start = async () => {
-    const env = { ...durable, DD_INJECTION_ENABLED: "false", DD_TRACE_ENABLED: "false", DD_INSTRUMENTATION_TELEMETRY_ENABLED: "false", BIRBCREW_STATE_DIR: "/state", BIRBCREW_LIVE_ENGINE: account.engine, BIRBCREW_LIVE_AUTH: account.auth, BIRBCREW_LIVE_RELAY: relay.url, BIRBCREW_LIVE_TOKEN: relay.workerKey };
+    const env = { ...durable, DD_INJECTION_ENABLED: "false", DD_TRACE_ENABLED: "false", DD_INSTRUMENTATION_TELEMETRY_ENABLED: "false", BIRBCREW_STATE_DIR: "/state", BIRBCREW_LIVE_ENGINE: account.engine, BIRBCREW_LIVE_AUTH: account.auth, BIRBCREW_LIVE_PROFILES: account.liveProfiles, BIRBCREW_LIVE_RELAY: relay.url, BIRBCREW_LIVE_TOKEN: relay.workerKey };
     const id = await docker(["run", "-d", "--name", worker, "--log-driver", "none", "--network", "host", "--read-only", "--init",
       "--user", uid, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
       "--tmpfs", "/tmp:rw,exec,nosuid,nodev,mode=1777", "-e", "HOME=/tmp", "-w", "/app",
@@ -130,7 +130,7 @@ export async function proofInfrastructure(account: LiveAccount, relay: Awaited<R
       ...["src/service", "node_modules", "package.json", "tests/proof/live-profiles.ts",
         "tests/proof/live-account.ts"].flatMap((path) => mount(join(root, path), "/app/" + path)),
       ...mount(join(build, "bin/member-launch"), "/app/.proof/bin/member-launch"),
-      ...mount(account.path, "/run/birb-account.json"), ...mount(native, "/state", true),
+      ...mount(native, "/state", true),
       nodeImage, "node", "src/service/cli.ts", "worker", "tests/proof/live-profiles.ts"], env);
     running = true;
     await until(async () => {

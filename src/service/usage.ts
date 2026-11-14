@@ -103,12 +103,16 @@ async function insertUsage(db: Queryable, segment: Segment, usage: SegmentUsage,
     return;
   }
   const { launch } = segment;
+  // A child's segment records the engine its target ran on, and stays the parent member's spend. Its
+  // estimate is keyed on the model the segment reported, whatever engine ran it.
   const identity = [launch.ownerId, launch.conversationId, launch.requestId, launch.token, launch.execution.workflowRunId,
     launch.execution.activityId, launch.execution.attempt, launch.childId ?? null];
   await db.query(`INSERT INTO birbcrew_ts.usage_ledger (owner_id,member_id,conversation_id,request_id,token,child_id,engine,${usageColumns})
-    SELECT c.owner_id,c.member_id,n.conversation_id,n.request_id,n.token,n.child_id,m.engine,${usageValues(identity.length + 1)}
+    SELECT c.owner_id,c.member_id,n.conversation_id,n.request_id,n.token,n.child_id,
+        coalesce(j.role_profile->'target'->>'engine',m.engine),${usageValues(identity.length + 1)}
       FROM birbcrew_ts.native_launches n JOIN birbcrew_ts.conversations c USING (conversation_id)
       JOIN birbcrew_ts.members m USING (owner_id,member_id)
+      LEFT JOIN birbcrew_ts.pi_children j ON j.child_id=n.child_id
      WHERE c.owner_id=$1 AND n.conversation_id=$2 AND n.request_id=$3 AND n.token=$4 AND n.workflow_run_id=$5
        AND n.activity_id=$6 AND n.attempt=$7 AND n.child_id IS NOT DISTINCT FROM $8::uuid
     ON CONFLICT (conversation_id,request_id,token) DO NOTHING`,

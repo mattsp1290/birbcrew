@@ -2,7 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { nextStep, standingChoice, toolNameSchema } from "./deferral.ts";
-import { approvalDeadlineSeconds, engineSchema, initiatorKinds, instructionsBytes, type RequestInitiator } from "./domain.ts";
+import { approvalDeadlineSeconds, engineSchema, initiatorKinds, instructionPacksPerMember, instructionsBytes, type RequestInitiator } from "./domain.ts";
 
 const uuid = z.uuid();
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
@@ -21,13 +21,14 @@ const webhookFact = "((payload->>'webhookId'), (payload->>'revision')) WHERE eve
 const webhookHost = z.string().max(300).regex(/^[a-z0-9._\-[\]:]+$/);
 const webhookChange = { webhookId: uuid, revision: z.int().min(2).max(2_147_483_647), host: webhookHost };
 const budgetFact = "(member_id, (payload->>'revision')) WHERE event_type IN ('usage.budget_set', 'usage.budget_cleared')";
+const packFact = "((payload->>'packId'), event_type) WHERE event_type IN ('instruction_pack.created', 'instruction_pack.deleted')";
 const tokenLimit = z.int().min(1).max(1_000_000_000_000);
 
 /** The actors audit_events_actor_check in 021-audit.sql allows. */
 export const actorKinds = ["owner", "system"] as const;
 type Actor = (typeof actorKinds)[number];
 /** The closed audit vocabulary. 021-audit.sql repeats these types in a CHECK, widened by
- * 024-standing-grants.sql, 025-routines.sql, 026-memories.sql, 027-handoffs.sql, 028-approval-expiry.sql, 029-member-instructions.sql, 031-usage.sql and 032-webhooks.sql. Payloads are strict: identifiers, digests, choices and statuses only,
+ * 024-standing-grants.sql, 025-routines.sql, 026-memories.sql, 027-handoffs.sql, 028-approval-expiry.sql, 029-member-instructions.sql, 031-usage.sql, 032-webhooks.sql and 033-instruction-packs.sql. Payloads are strict: identifiers, digests, choices and statuses only,
  * never prompt/reply text, tool arguments or secrets. An actor given as a function is
  * decided by the validated payload. A routine acts with its owner's authority, so rows its
  * firings cause name the owner; Crew's own decisions about a routine name the system.
@@ -113,8 +114,10 @@ export const auditEvents = {
   "approval.requested": { actor: "system", key: "((payload->>'approvalId')) WHERE event_type = 'approval.requested'",
     payload: z.strictObject({ approvalId: uuid, invocationId: uuid, toolName: toolNameSchema, argumentDigest: sha256 }) },
   // Webhook endpoints are the owner's, not a member's. The host only: a URL can carry a credential.
+  // format: webhookFormats in webhooks.ts. Rows written before 034-notification-formats.sql have none; those endpoints are `crew`.
   "webhook.created": { actor: "owner", member: false, key: webhookFact, payload: z.strictObject({
     webhookId: uuid, revision: z.literal(1), host: webhookHost, kinds: z.array(z.string().regex(/^[a-z]+\.[a-z_]+$/)).min(1).max(4),
+    format: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/),
   }) },
   "webhook.enabled": { actor: "owner", member: false, key: webhookFact, payload: z.strictObject(webhookChange) },
   // The owner disables an endpoint; Crew does after its tenth failed delivery in a row, and when a restore resumes.
@@ -122,6 +125,13 @@ export const auditEvents = {
     member: false, key: webhookFact,
     payload: z.strictObject({ ...webhookChange, reason: z.enum(["owner", "consecutive_failures", "recovery_restore"]) }) },
   "webhook.deleted": { actor: "owner", member: false, key: webhookFact, payload: z.strictObject(webhookChange) },
+  // Instruction packs are the owner's, not a member's. As with memory, no digest: a pack can be
+  // deleted, and a digest kept here would let an export holder confirm a guess of its erased text.
+  "instruction_pack.created": { actor: "owner", member: false, key: packFact, payload: z.strictObject({ packId: uuid }) },
+  "instruction_pack.deleted": { actor: "owner", member: false, key: packFact, payload: z.strictObject({ packId: uuid }) },
+  // Follows member.spawned in the spawn's transaction: the packs, in the order the model reads them.
+  "member.instruction_packs_attached": { actor: "owner", key: "(member_id) WHERE event_type = 'member.instruction_packs_attached'",
+    payload: z.strictObject({ packIds: z.array(uuid).min(1).max(instructionPacksPerMember) }) },
 } as const;
 export type AuditEventType = keyof typeof auditEvents;
 export const auditEventTypes = Object.keys(auditEvents) as AuditEventType[];
@@ -245,7 +255,7 @@ export interface AuditEvent {
   eventId: string; occurredAt: string; type: AuditEventType;
   actor: { kind: "owner" | "system"; id: string | null };
   initiator: { kind: RequestInitiator["kind"]; id: string };
-  /** Null only for types that belong to no member (the webhook facts). */
+  /** Null only for types that belong to no member (the webhook and instruction pack facts). */
   memberId: string | null; conversationId: string | null; requestId: string | null;
   payload: Record<string, unknown>;
 }

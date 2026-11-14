@@ -5,42 +5,58 @@ The built-in module supports Pi on OpenCode Go, Claude on the Anthropic API, and
 The member's spawn request selects one of the configured profile names. Create a
 new member to select a different model or engine.
 
-## Configure an approved account
+## Configure a live account
 
-1. Use a private JSON file outside the checkout for each account. Record
-   `checked_at` as an ISO 8601 timestamp with a timezone from the past 12 hours.
-   Use `account_path` to identify the approved account without a secret. In
-   `evidence`, record how the operator verified its settings and permitted use.
-   For API-key profiles, keep the key in the worker's environment.
-2. For Pi, set `BIRBCREW_PI_ATTESTATION` to the absolute path of the file and
-   provide the eligible Go credential in `OPENCODE_GO_API_KEY`. Include
-   `provider` set to `opencode-go`, `eligible_coding_use` set to `true`, and
-   `extra_usage_disabled` set to `true`. Spawn with engine `pi` and profile
-   `pi-go-glm-5.3-flash.v1`. Each turn checks eligibility and model availability
-   before inference. The worker checks the returned model identity before saving
-   a result. [OpenCode Go model routes](https://opencode.ai/docs/console/go/)
-3. For Claude, set `BIRBCREW_CLAUDE_ATTESTATION` to the absolute path of its
-   separate file. Provide the approved Anthropic API key in
-   `BIRBCREW_CLAUDE_API_KEY`. Include `provider` set to `anthropic-api`,
-   `approved_sdk_use` set to `true`, and `model` set to the exact approved API
-   model ID. Spawn with engine `claude` and profile `anthropic-<model>.v1`.
-   For example, model `claude-sonnet-4-6` gives profile
-   `anthropic-claude-sonnet-4-6.v1`.
-4. For an OpenAI API-key Codex member, set `BIRBCREW_CODEX_ATTESTATION` to its own attestation and
-   `BIRBCREW_CODEX_API_KEY` to its approved OpenAI API key. Use provider
-   `openai-api`, `approved_sdk_use` set to `true`, and the exact approved
-   GPT model. Spawn with engine `codex` and profile `openai-<model>.v1`.
+The worker reads one setting, `BIRBCREW_LIVE_PROFILES`. Its value is a JSON object
+with one entry for each engine this worker serves. Nothing else selects a live
+profile. Without the variable, with a value that is not valid, or without the API
+key of a configured engine, the worker stops at startup. It never starts with
+fewer profiles than the setting names. A Codex subscription has no API key. The
+worker reads its sign-in on every turn, and a turn fails when the sign-in is
+missing, expired or belongs to another account.
+
+```json
+{
+  "pi": {"provider": "opencode-go", "account": "ACCOUNT LABEL"},
+  "claude": {"provider": "anthropic-api", "account": "ACCOUNT LABEL", "model": "claude-sonnet-4-6"},
+  "codex": {"provider": "chatgpt-subscription", "account_id": "CHATGPT_ACCOUNT_ID", "model": "gpt-5.4"}
+}
+```
+
+Unknown keys are refused. The setting carries no date and does not expire. The
+credentials it points at are real ones and keep their own lifetimes: a provider
+can revoke a key, and a Codex sign-in must stay current.
+
+1. `account` is a label you choose for the account, without a secret. The worker
+   stores its digest with each registered profile and refuses to start when a
+   profile name is already registered for a different label. Keep it stable.
+2. For Pi, add the `pi` entry and provide the Go credential in
+   `OPENCODE_GO_API_KEY`. Spawn with engine `pi` and profile
+   `pi-go-glm-5.3-flash.v1`. Each turn asks the provider for its model list with
+   that key before inference and stops when the request fails or the model is
+   not listed. The worker checks the returned model identity before saving a
+   result. [OpenCode Go model routes](https://opencode.ai/docs/console/go/)
+3. For Claude, add the `claude` entry with the exact API model ID and provide the
+   Anthropic API key in `BIRBCREW_CLAUDE_API_KEY`. Spawn with engine `claude` and
+   profile `anthropic-<model>.v1`. For example, model `claude-sonnet-4-6` gives
+   profile `anthropic-claude-sonnet-4-6.v1`.
+4. For an OpenAI API-key Codex member, add a `codex` entry with provider
+   `openai-api`, an `account` label and the exact GPT model. Provide the key in
+   `BIRBCREW_CODEX_API_KEY`. Spawn with engine `codex` and profile
+   `openai-<model>.v1`.
 5. For a subscription-backed Codex member, use the worker operator's ChatGPT
    sign-in. Run `codex login status` in the operator's environment. If needed,
    run `codex login` and choose ChatGPT. The worker reads the CLI login from
-   `CODEX_HOME` (default `~/.codex`), or from the absolute directory named by
-   `BIRBCREW_CODEX_AUTH_HOME`. [OpenAI sign-in documentation](https://developers.openai.com/codex/auth/)
+   `auth.json` in `CODEX_HOME` (default `~/.codex`), or in the absolute directory
+   named by `BIRBCREW_CODEX_AUTH_HOME`. A login kept in the operating system
+   keyring is not read. The worker never writes that directory and never
+   refreshes the login, so the directory can be read-only and the CLI that owns
+   the login must keep it current. [OpenAI sign-in documentation](https://developers.openai.com/codex/auth/)
 
-   In `BIRBCREW_CODEX_ATTESTATION`, set `provider` to `chatgpt-subscription`,
-   `account_id` to the signed-in ChatGPT workspace ID, `approved_sdk_use` to
-   `true`, and `model` to an approved model listed in the Codex CLI’s `/model` picker.
-   To display just the workspace
-   ID with the repository's pinned Node and dependencies installed, run
+   Add a `codex` entry with provider `chatgpt-subscription`, `account_id` set to
+   the signed-in ChatGPT workspace ID, and `model` set to a model listed in the
+   Codex CLI’s `/model` picker. To display just the workspace ID with the
+   repository's pinned Node and dependencies installed, run
 
    ```sh
    .proof/bin/node --input-type=module -e '
@@ -52,29 +68,50 @@ new member to select a different model or engine.
 
    Spawn engine `codex` with `chatgpt-<model>.v1` for chat,
    `chatgpt-<model>.approval.v1` for protected writes, or
-   `chatgpt-<model>.next-step.v1` for human input. Each turn checks the
-   approved workspace. The native session volume stores conversation state;
-   the operator's CLI manages the subscription login separately.
+   `chatgpt-<model>.next-step.v1` for human input. Each turn reads the sign-in
+   and stops unless it is current and belongs to `account_id`. The native
+   session volume stores conversation state; the operator's CLI manages the
+   subscription login separately.
 6. Start the worker with the service database, Temporal address, and absolute
-   durable state directory configured. Supply only the attestations for the
-   engines this worker will serve.
+   durable state directory configured.
 
    ```sh
    npm run members -- worker src/service/providers.ts
    ```
 
-Renew the operator evidence before its 12-hour window ends. Each live turn
-rereads the corresponding file. Restart the worker when rotating a provider key.
-All three engines require independent live-account acceptance using the intended
-account and model.
+Restart the worker to change the setting or to rotate a provider key. All three
+engines require independent live-account acceptance using the intended account
+and model.
+
+### What replaced provider attestations
+
+Earlier releases read a dated owner statement for each account
+(`BIRBCREW_PI_ATTESTATION`, `BIRBCREW_CLAUDE_ATTESTATION`,
+`BIRBCREW_CODEX_ATTESTATION`) and refused live turns when it was more than 12
+hours old. Those variables and files are no longer read. An old, expired or
+missing statement has no effect.
+
+| Statement field | Now |
+| --- | --- |
+| `provider`, `model`, `account_id` | Explicit in `BIRBCREW_LIVE_PROFILES`. |
+| `account_path` | The `account` label. Use the same text to keep registered profiles. |
+| `extra_usage_disabled`, `eligible_coding_use`, `approved_sdk_use` | Not asserted by anyone. No code ever checked them against the provider. Keep overage billing off in the provider's console. |
+| `checked_at`, `evidence` | Removed. No statement expires. |
+
+The credential checks did not change: the API key variable or the Codex sign-in,
+the Go model list on each Pi turn, the returned Go model identity, and the
+ChatGPT account on each Codex turn. Request limits did not change either: no
+SDK retries, 1200 output tokens for Pi, and the member's
+[usage budget](usage-metering.md).
 
 ## Verify the profiles offline
 
 With the project's Node version and dependencies installed, run
-`node --test tests/service/providers.test.ts` with the three attestation variables
-unset. The suite uses temporary files, synthetic keys, and a loopback HTTP
-server. It checks credential selection and expiry, the model ID in both
-directions, redirect refusal, and Pi's session headers across checkpoint restore.
+`node --test tests/service/providers.test.ts`. The suite uses synthetic keys and
+a loopback HTTP server. It checks that only the explicit setting selects
+profiles, that each engine needs its own credential, that a leftover attestation
+file that is absent, expired or invalid changes nothing, the model ID in both directions, redirect
+refusal, a refused key, and Pi's session headers across checkpoint restore.
 
 ## Approve a protected work item
 
@@ -137,26 +174,26 @@ while waiting returns a cancelled tool result. Neither path creates a work item.
 After `scripts/setup --mode fixture`, run the following command on a supported Linux host with Docker and the pinned Node and Temporal binaries. Select one account per run. The ten-minute deadline covers service startup and the provider journey.
 
 ```sh
-.proof/bin/node tests/proof/live-members.ts --engine pi --attestation /absolute/private/pi-proof.json
+.proof/bin/node tests/proof/live-members.ts --engine pi --approval /absolute/private/pi-proof.json
 ```
 
-With the pinned Node on `PATH`, `npm run test:live -- --engine pi --attestation /absolute/private/pi-proof.json` runs the same entry. The runner uses `.proof/bin/temporal` unless `TEMPORAL_CLI` names the pinned executable elsewhere.
+With the pinned Node on `PATH`, `npm run test:live -- --engine pi --approval /absolute/private/pi-proof.json` runs the same entry. The runner uses `.proof/bin/temporal` unless `TEMPORAL_CLI` names the pinned executable elsewhere.
 
-Use a private file owned by the invoking user outside the checkout (`chmod 600`). Give each newly approved journey its own `approval_id` UUID. The file must contain the current `checked_at`, `account_path`, and `evidence` fields described above. Also specify `approved_live_proof: true`, `max_requests` as an integer from 1 through 24, and the exact endpoint and model. The first provider submission permanently reserves the approval in the invoking OS user's private `~/.local/state/birbcrew/live-proof-claims` directory. Use each approval on the machine where it was granted. Concurrent or repeated invocations, including after an interruption, require a fresh owner-approved UUID. Keep this directory across restarts. The request limit covers provider model discovery, token counts and SDK retries as well as inference. For API-key providers, supply the credential through the selected environment variable. For a ChatGPT subscription, use the operator’s Codex login.
+The approval is the owner's decision to spend up to `max_requests` provider requests on one run. Use a private file owned by the invoking user outside the checkout (`chmod 600`). Give each newly approved journey its own `approval_id` UUID. Specify `approved_live_proof: true`, `max_requests` as an integer from 1 through 24, the account fields from the table below, and the exact endpoint and model. Unknown fields are refused. The approval carries no date and does not expire; to withdraw it, change or remove the file. The first provider submission permanently reserves the approval in the invoking OS user's private `~/.local/state/birbcrew/live-proof-claims` directory. Use each approval on the machine where it was granted. Concurrent or repeated invocations, including after an interruption, require a fresh owner-approved UUID. Keep this directory across restarts. The request limit covers provider model discovery, token counts and SDK retries as well as inference. For API-key providers, supply the credential through the selected environment variable. For a ChatGPT subscription, use the operator’s Codex login.
 
-| Engine | Provider and credential | Endpoint and model | Additional attestation fields |
+| Engine | Provider and credential | Endpoint and model | Account field |
 |---|---|---|---|
-| `pi` | `opencode-go` / `OPENCODE_GO_API_KEY` | `https://opencode.ai/inference/go/openai/v1` / `glm-5.3-flash` | `eligible_coding_use: true` and `extra_usage_disabled: true` |
-| `claude` | `anthropic-api` / `BIRBCREW_CLAUDE_API_KEY` | `https://api.anthropic.com` / exact approved Claude model ID | `approved_sdk_use: true` |
-| `codex` | `chatgpt-subscription` / Codex ChatGPT login | `https://chatgpt.com/backend-api/codex` / an approved GPT model | `approved_sdk_use: true` and the signed-in `account_id` |
-| `codex` | `openai-api` / `BIRBCREW_CODEX_API_KEY` | `https://api.openai.com/v1` / exact approved GPT model ID | `approved_sdk_use: true` |
+| `pi` | `opencode-go` / `OPENCODE_GO_API_KEY` | `https://opencode.ai/inference/go/openai/v1` / `glm-5.3-flash` | `account` label |
+| `claude` | `anthropic-api` / `BIRBCREW_CLAUDE_API_KEY` | `https://api.anthropic.com` / exact Claude model ID | `account` label |
+| `codex` | `chatgpt-subscription` / Codex ChatGPT login | `https://chatgpt.com/backend-api/codex` / a GPT model | the signed-in `account_id` |
+| `codex` | `openai-api` / `BIRBCREW_CODEX_API_KEY` | `https://api.openai.com/v1` / exact GPT model ID | `account` label |
 
-A subscription proof uses the same Codex verifier command with its own subscription attestation:
+A subscription proof uses the same Codex verifier command with its own approval:
 
 ```sh
-.proof/bin/node tests/proof/live-members.ts --engine codex --attestation /absolute/private/codex-subscription.json
+.proof/bin/node tests/proof/live-members.ts --engine codex --approval /absolute/private/codex-subscription.json
 ```
 
 The verifier creates a disposable database, Temporal server, authenticated gateway and worker. Two independent observation clients compare their histories with the gateway. The verifier approves one synthetic work item, checks the provider's returned receipt, replaces the worker container and asks the member to recall a random marker. Pi also delegates to a separate analyst. Codex checks the native rollout contains exactly the two submitted user messages on the same thread.
 
-A private loopback relay signs provider requests, rechecks the account file before each upstream request and enforces the model, official route and request limit. The worker presents a disposable credential to that endpoint. API-key Codex uses the stock OpenAI provider and its HTTP Responses fallback. Subscription Codex uses ChatGPT’s Codex Responses endpoint and the approved workspace header. The hosted verifier keeps the operator’s login on the host. Billing eligibility comes from the account owner's evidence. The command emits one redacted JSON result and removes its private transcripts and service state. A nonzero exit marks an incomplete gate. To rehearse all three journeys with synthetic accounts and local responses, run `PATH="$PWD/.proof/bin:$PATH" node --test tests/proof/live-controlled.test.ts tests/proof/live-native-controlled.test.ts`.
+A private loopback relay signs provider requests, rereads the approval before each upstream request and enforces the model, official route and request limit. The worker presents a disposable credential to that endpoint. API-key Codex uses the stock OpenAI provider and its HTTP Responses fallback. Subscription Codex uses ChatGPT’s Codex Responses endpoint and the approved workspace header. The hosted verifier keeps the operator’s login on the host. The verifier does not check billing or any console setting, and its result says so. The command emits one redacted JSON result and removes its private transcripts and service state. A nonzero exit marks an incomplete gate. To rehearse all three journeys with synthetic accounts and local responses, run `PATH="$PWD/.proof/bin:$PATH" node --test tests/proof/live-controlled.test.ts tests/proof/live-native-controlled.test.ts`.
