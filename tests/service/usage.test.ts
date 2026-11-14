@@ -1,18 +1,16 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { once } from "node:events";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, test, type TestContext } from "node:test";
+import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { ActivityFailure, ApplicationFailure, WorkflowUpdateFailedError, type Client } from "@temporalio/client";
-import { Pool, type PoolClient } from "pg";
+import type { PoolClient } from "pg";
 import { MemberClient } from "../../src/service/client.ts";
 import { auditEvents, auditEventTypes, auditQuerySchema, readAudit } from "../../src/service/audit.ts";
 import { ApprovalStore } from "../../src/service/approvals.ts";
-import { MemberStoreError, ownerInitiator, type Engine, type TurnRequest } from "../../src/service/domain.ts";
-import { createGateway } from "../../src/service/gateway.ts";
+import { MemberStoreError, ownerInitiator, type TurnRequest } from "../../src/service/domain.ts";
 import { HandoffApi } from "../../src/service/handoffs.ts";
 import { IntegrationApi } from "../../src/service/integration-api.ts";
 import { withNativeAdmission } from "../../src/service/native-admission.ts";
@@ -22,40 +20,11 @@ import { failReasons, RoutineApi, RoutineDispatcher, skipReasons, type Clock } f
 import { MemberStore, ownerAdmissionActivity } from "../../src/service/store.ts";
 import type { Launch } from "../../src/service/supervisor.ts";
 import { recordSegmentUsage, UsageApi } from "../../src/service/usage.ts";
-import type { SegmentUsage } from "../../src/service/usage-capture.ts";
+import { conversation, databaseAt, gateway, launched, member, migrationNumbers, pool, reported, spend, sql, store } from "./usage-fixtures.ts";
 
-const url = process.env.BIRBCREW_TEST_DATABASE_URL;
-if (!url) throw new Error("Set BIRBCREW_TEST_DATABASE_URL to a disposable PostgreSQL database.");
-const pool = new Pool({ connectionString: url });
-const store = new MemberStore(pool);
+// Estimated cost, the trusted-context lane's metering and migration 35 are in usage-cost.test.ts.
 before(() => store.migrate());
 after(() => pool.end());
-const sql = new URL("../../src/service/sql/", import.meta.url);
-
-/** A database migrated only up to `version`, as that release left it; dropped after the test. */
-async function databaseAt(t: TestContext, version = Infinity, skip: readonly number[] = []) {
-  const name = "usage_" + randomUUID().replaceAll("-", "");
-  await pool.query("CREATE DATABASE " + name);
-  const target = new URL(url!); target.pathname = "/" + name;
-  const db = new Pool({ connectionString: target.href });
-  t.after(async () => { await db.end(); await pool.query("DROP DATABASE " + name); });
-  if (version === Infinity) {
-    await new MemberStore(db).migrate();
-    return db;
-  }
-  await db.query("CREATE SCHEMA birbcrew_ts");
-  await db.query("CREATE TABLE birbcrew_ts.schema_versions (version integer PRIMARY KEY)");
-  for (const file of (await readdir(sql)).sort()) {
-    const applied = Number(file.split("-")[0]);
-    if (applied > version || skip.includes(applied)) continue;
-    await db.query(await readFile(new URL(file, sql), "utf8"));
-    await db.query("INSERT INTO birbcrew_ts.schema_versions VALUES ($1)", [applied]);
-  }
-  return db;
-}
-
-/** Every migration number in the sql directory, in order. */
-const migrationNumbers = async () => (await readdir(sql)).map(file => Number(file.split("-")[0])).sort((a, b) => a - b);
 
 /** The top-level OR clauses of a CHECK as pg_get_constraintdef prints it: "CHECK ((a OR b ...)) NOT VALID". */
 function orClauses(definition: string) {
@@ -109,60 +78,6 @@ async function whileHeld<T>(conversationId: string, writes: (db: PoolClient) => 
   }
 }
 
-const reported = (input: number, output = 0, more: Partial<Extract<SegmentUsage, { state: "reported" }>> = {}): SegmentUsage => ({
-  state: "reported", model: "fixture-model", inputTokens: input, outputTokens: output, cachedInputTokens: null,
-  cacheWriteTokens: null, reasoningTokens: null, costUsd: null, ...more });
-
-async function member(db: MemberStore, ownerId = "owner-" + randomUUID(), engine: Engine = "pi") {
-  const spawned = await db.spawn({ ownerId, requestId: randomUUID(), engine, profile: "fixture" });
-  return { ownerId, memberId: spawned.memberId };
-}
-async function conversation(db: MemberStore, owner: { ownerId: string; memberId: string }) {
-  const conversationId = randomUUID();
-  await db.openConversation({ ...owner, conversationId });
-  return conversationId;
-}
-
-/** Admits a request, starts its turn and reserves its native launch as the supervisor does. */
-async function launched(db: MemberStore, ownerId: string, conversationId: string, text = "hello", requestId = randomUUID()) {
-  const request = { ownerId, conversationId, requestId, text };
-  await db.recordAcceptance(request, ownerInitiator);
-  const execution = { workflowRunId: randomUUID(), activityId: "turn", attempt: 1 };
-  const turn = await db.beginTurn(request, execution);
-  assert.equal(turn.kind, "start"); if (turn.kind !== "start") throw new Error("unreachable");
-  await db.pool.query(`INSERT INTO birbcrew_ts.native_launches (conversation_id,request_id,token,workflow_run_id,activity_id,attempt)
-    VALUES ($1,$2,$3,$4,$5,1)`, [conversationId, requestId, turn.token, execution.workflowRunId, execution.activityId]);
-  const launch: Launch = { ...request, token: turn.token, execution };
-  return { request, launch, commit: () => db.commitTurn({ ownerId, conversationId, requestId, token: turn.token, reply: "done",
-    checkpoint: { version: 1, engine: turn.conversation.engine, state: {} } }) };
-}
-/** One finished segment that reported `usage`, in a conversation of its own. */
-async function spend(db: MemberStore, owner: { ownerId: string; memberId: string }, usage?: SegmentUsage) {
-  const conversationId = await conversation(db, owner);
-  const segment = await launched(db, owner.ownerId, conversationId);
-  await recordSegmentUsage(db.pool, segment.launch, usage);
-  await segment.commit();
-  return { conversationId, requestId: segment.request.requestId };
-}
-
-async function gateway(t: TestContext, members: MemberClient, ownerId: string, clock: Clock = () => new Date()) {
-  const token = randomUUID(), stranger = randomUUID();
-  const hash = (value: string) => createHash("sha256").update(value).digest("hex");
-  const server = createGateway(store, members, { [hash(token)]: ownerId, [hash(stranger)]: "owner-" + randomUUID() }, { clock });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  const port = address.port;
-  t.after(async () => { const closed = once(server, "close"); server.close(); server.closeAllConnections(); await closed; });
-  async function api(path: string, body?: unknown, credential: string = token, method = body === undefined ? "GET" : "POST") {
-    const response = await fetch(`http://127.0.0.1:${port}${path}`, { method,
-      headers: { Authorization: "Bearer " + credential, "Content-Type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    return { status: response.status, body: await response.json().catch(() => undefined) };
-  }
-  return { api, stranger };
-}
 /** Temporal must not be reached: the budget refuses before any workflow update. */
 const unreachable = new Proxy({}, { get() { throw new Error("Temporal was used"); } }) as Client;
 const audit = async (ownerId: string, type: string) => (await pool.query(`SELECT actor_kind AS actor, initiator_kind AS initiator,
@@ -236,20 +151,21 @@ test("the usage routes total an owner's usage by member and conversation, mark r
   await spend(store, stranger, reported(7777, 7));
 
   const zero = { segments: 0, unknownSegments: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0,
-    cacheWriteTokens: 0, reasoningTokens: 0, costUsd: null, costReportedSegments: 0 };
+    cacheWriteTokens: 0, reasoningTokens: 0, costUsd: null, costReportedSegments: 0, estimatedCostUsd: null, costEstimatedSegments: 0 };
   const routineTotals = { ...zero, segments: 1, inputTokens: 50, outputTokens: 5, totalTokens: 55 };
   const summary = await g.api("/v1/usage");
   assert.deepEqual(summary, { status: 200, body: { apiVersion: "1", from: null, to: null,
     total: { segments: 4, unknownSegments: 1, inputTokens: 1350, outputTokens: 135, totalTokens: 1485, cachedInputTokens: 400,
-      cacheWriteTokens: 0, reasoningTokens: 10, costUsd: "0.25", costReportedSegments: 1 }, routine: routineTotals } });
+      cacheWriteTokens: 0, reasoningTokens: 10, costUsd: "0.25", costReportedSegments: 1, estimatedCostUsd: null, costEstimatedSegments: 0 },
+    routine: routineTotals, trusted: zero } });
 
   const members = (await g.api("/v1/usage/members")).body;
   const piTotals = { segments: 3, unknownSegments: 1, inputTokens: 1050, outputTokens: 105, totalTokens: 1155, cachedInputTokens: 400,
-    cacheWriteTokens: 0, reasoningTokens: 0, costUsd: "0.25", costReportedSegments: 1 };
+    cacheWriteTokens: 0, reasoningTokens: 0, costUsd: "0.25", costReportedSegments: 1, estimatedCostUsd: null, costEstimatedSegments: 0 };
   const codexTotals = { ...zero, segments: 1, inputTokens: 300, outputTokens: 30, totalTokens: 330, reasoningTokens: 10 };
   assert.deepEqual(members.members, [
-    { memberId: pi.memberId, engine: "pi", total: piTotals, routine: routineTotals, budget: null },
-    { memberId: codex.memberId, engine: "codex", total: codexTotals, routine: zero, budget: null },
+    { memberId: pi.memberId, engine: "pi", total: piTotals, routine: routineTotals, trusted: zero, budget: null },
+    { memberId: codex.memberId, engine: "codex", total: codexTotals, routine: zero, trusted: zero, budget: null },
   ].sort((a, b) => a.memberId.localeCompare(b.memberId)));
   const page = (await g.api("/v1/usage/members?limit=1")).body;
   assert.equal(page.hasMore, true);
@@ -258,7 +174,7 @@ test("the usage routes total an owner's usage by member and conversation, mark r
 
   const conversations = (await g.api("/v1/usage/conversations?memberId=" + codex.memberId)).body;
   assert.deepEqual(conversations, { apiVersion: "1", conversations: [{ conversationId: third.conversationId, memberId: codex.memberId,
-    total: codexTotals, routine: zero }], nextAfter: third.conversationId, hasMore: false });
+    total: codexTotals, routine: zero, trusted: zero }], nextAfter: third.conversationId, hasMore: false });
   assert.equal((await g.api("/v1/usage/conversations")).body.conversations.length, 4);
 
   const records = (await g.api("/v1/usage/records?limit=3")).body;
@@ -269,9 +185,9 @@ test("the usage routes total an owner's usage by member and conversation, mark r
   const rest = (await g.api("/v1/usage/records?before=" + records.nextBefore)).body;
   assert.deepEqual(rest.records.map((r: { requestId: string }) => r.requestId), [first.requestId]);
   assert.deepEqual({ ...rest.records[0], usageId: undefined, recordedAt: undefined }, { usageId: undefined, recordedAt: undefined,
-    memberId: pi.memberId, conversationId: first.conversationId, requestId: first.requestId, childId: null, engine: "pi",
+    memberId: pi.memberId, conversationId: first.conversationId, requestId: first.requestId, childId: null, lane: "member", engine: "pi",
     state: "reported", model: "fixture-model", inputTokens: 1000, outputTokens: 100, cachedInputTokens: 400, cacheWriteTokens: null,
-    reasoningTokens: null, costUsd: "0.25", initiator: { kind: "owner" } });
+    reasoningTokens: null, costUsd: "0.25", estimatedCostUsd: null, estimatePrice: null, initiator: { kind: "owner" } });
   assert.equal((await g.api("/v1/usage/records?conversationId=" + third.conversationId)).body.records.length, 1);
 
   // Time range: [from, to) on the database's record time.
@@ -304,6 +220,17 @@ test("the usage routes total an owner's usage by member and conversation, mark r
   const capabilities = (await g.api("/v1/capabilities")).body;
   assert.deepEqual([capabilities.usage.route, capabilities.usage.budget.period, capabilities.usage.budget.refusal,
     capabilities.usage.budget.refusalClosingConversation], ["/v1/usage", "utc_day", "usage_limit", "usage_limit_closed"]);
+  // Pinned, so rewording a value consumers may match is a deliberate change. Values that were true
+  // before estimates still are, since costUsd is still billed only; only Codex's model changed.
+  assert.deepEqual([capabilities.usage.cost, capabilities.usage.engines, capabilities.usage.lanes, capabilities.usage.estimate,
+    capabilities.usage.budget.lanesCounted, capabilities.usage.budget.lanesRefused], ["provider-billed-only; never-estimated", {
+    pi: { usage: "per-model-call", model: "reported", modelSource: "answering-model", cost: "when-provider-billed",
+      estimate: "when-priced-and-not-billed" },
+    claude: { usage: "per-query", model: "reported", cost: "never", estimate: "when-priced" },
+    codex: { usage: "per-turn-from-thread-total", model: "from-rollout-turn-context", cost: "never", estimate: "when-priced" },
+  }, ["member", "trusted"], { field: "estimatedCostUsd", source: "operator-price-table", setting: "BIRBCREW_USAGE_PRICES_PATH",
+    unit: "usd-per-million-tokens", keyedBy: "recorded-model", computed: "at-write; never-recomputed", builtInPrices: false,
+    withBilledCost: "never-on-one-segment; totals-never-added" }, ["member", "trusted"], ["member"]]);
   assert.ok(capabilities.audit.eventTypes.includes("usage.request_refused"));
 });
 

@@ -32,6 +32,8 @@ async function main() {
           throw new Error("BIRBCREW_WORKER_HEARTBEAT_FILE must be in an existing writable directory");
         });
       }
+      // A malformed price table stops the worker here, naming the setting, before its supervisor reads it.
+      (await import("./usage-prices.ts")).operatorPrices();
       const { runMemberWorker } = await import("./worker.ts");
       const { registerProfiles } = await import("./deployment.ts");
       const { profiles, close } = await import(pathToFileURL(resolve(configPath)).href);

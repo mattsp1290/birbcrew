@@ -5,6 +5,7 @@ import { sdkSystemEntries, type PiProfile } from "./pi.ts";
 import { runPiWorker } from "./pi-launch.ts";
 import { replyBytes,systemEntrySchema,trustedSessionPrefix,trustedStateSchema } from "./pi-state.ts";
 import type { TrustedNativeInput } from "./trusted-native-types.ts";
+import { piUsage } from "./usage-capture.ts";
 
 const workerTurn=z.strictObject({text:z.string().min(1).refine(text=>Buffer.byteLength(text)<=replyBytes),checkpoint:trustedStateSchema});
 const textPart=z.object({type:z.literal("text"),text:z.string()});
@@ -48,5 +49,6 @@ export async function runTrustedPi(input:TrustedNativeInput,profile:PiProfile) {
      !isDeepStrictEqual(results.map(message=>[message.toolCallId,message.toolName,message.isError,message.content.map(part=>part.text).join("\n")]),
        delivered.map(result=>[result.toolCallId,result.toolName,result.isError,result.text])))
     throw outside();
-  return turn;
+  // This request's own model calls, as the host received them from the provider, never the worker's account.
+  return {text:turn.text,checkpoint:turn.checkpoint,usage:piUsage(observed)};
 }

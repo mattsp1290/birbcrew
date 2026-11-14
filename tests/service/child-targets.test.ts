@@ -14,6 +14,7 @@ import { memberProfiles, type MemberProfile } from "../../src/service/profiles.t
 import { MemberStore } from "../../src/service/store.ts";
 import { runnerResultSchema } from "../../src/service/supervisor.ts";
 import { recordSegmentUsage } from "../../src/service/usage.ts";
+import type { PriceTable } from "../../src/service/usage-prices.ts";
 import { createPiFixtureOptions } from "../fixtures/engines/pi/index.mts";
 
 // Child targets in the shared child path (docs/architecture.md): the stored record, the refusals,
@@ -195,7 +196,7 @@ test("nothing a runner returns can set a child target", () => {
   assert.equal(runnerResultSchema.safeParse(targeted).success, false);
 });
 
-test("a child's usage row records the engine that ran it and stays the parent member's", async () => {
+test("a child's usage row records the engine that ran it, is priced by the model it reported, and stays the parent member's", async () => {
   const parent = await parentTurn();
   const [targeted, untargeted] = await parent.delegate([proposal("remember a", { engine: "pi", profile: names.analysts }), proposal("remember b")]);
   // The store refuses a Claude target until Claude has a child driver. Write one directly to show
@@ -204,7 +205,11 @@ test("a child's usage row records the engine that ran it and stays the parent me
   const [crossed] = await other.delegate([proposal("remember c")]);
   await pool.query(`UPDATE birbcrew_ts.pi_children SET role_profile=role_profile || jsonb_build_object('target',
     jsonb_build_object('engine','claude','profile',$2::text)) WHERE child_id=$1`, [crossed.childId, names.claude]);
-  async function spend(key: ChildKey | undefined, owner: typeof parent) {
+  // The estimate is keyed on the model the segment reported, never on its engine or its member's:
+  // a child whose provider answered with another model is priced as that model.
+  const prices: PriceTable = new Map([["fixture", { input: "1", cachedInput: "1", cacheWrite: "1", output: "2" }],
+    ["fixture-routed", { input: "10", cachedInput: "10", cacheWrite: "10", output: "20" }]]);
+  async function spend(key: ChildKey | undefined, owner: typeof parent, model = "fixture") {
     const execution = { workflowRunId: randomUUID(), activityId: key ? "child" : "turn", attempt: 1 };
     let token = owner.token;
     if (key) {
@@ -217,19 +222,21 @@ test("a child's usage row records the engine that ran it and stays the parent me
       VALUES ($1,$2,$3,$4,$5,1,$6)`, [owner.request.conversationId, owner.request.requestId, token, execution.workflowRunId,
       execution.activityId, key?.childId ?? null]);
     await recordSegmentUsage(pool, { ...owner.request, token, execution, ...(key && { childId: key.childId }) }, {
-      state: "reported", model: "fixture", inputTokens: 3, outputTokens: 2, cachedInputTokens: null, cacheWriteTokens: null,
-      reasoningTokens: null, costUsd: null });
+      state: "reported", model, inputTokens: 3, outputTokens: 2, cachedInputTokens: null, cacheWriteTokens: null,
+      reasoningTokens: null, costUsd: null }, prices);
   }
   await spend(undefined, parent);
-  await spend(targeted, parent);
+  await spend(targeted, parent, "fixture-routed");
   await spend(untargeted, parent);
-  await spend(crossed, other);
-  const { rows } = await pool.query<{ child_id: string | null; member_id: string; engine: string }>(`SELECT child_id,member_id,engine
+  await spend(crossed, other, "fixture-routed");
+  const { rows } = await pool.query<{ child_id: string | null; member_id: string; engine: string; model: string; estimated: string }>(
+    `SELECT child_id,member_id,engine,model,estimated_cost_usd::text AS estimated
     FROM birbcrew_ts.usage_ledger WHERE request_id=ANY($1::uuid[]) ORDER BY usage_id`, [[parent.request.requestId, other.request.requestId]]);
+  // 3 input and 2 output tokens, at $1 and $2 or at $10 and $20 per million.
   assert.deepEqual(rows, [
-    { child_id: null, member_id: parent.conversation.memberId, engine: "pi" },
-    { child_id: targeted.childId, member_id: parent.conversation.memberId, engine: "pi" },
-    { child_id: untargeted.childId, member_id: parent.conversation.memberId, engine: "pi" },
-    { child_id: crossed.childId, member_id: other.conversation.memberId, engine: "claude" },
+    { child_id: null, member_id: parent.conversation.memberId, engine: "pi", model: "fixture", estimated: "0.000007000000" },
+    { child_id: targeted.childId, member_id: parent.conversation.memberId, engine: "pi", model: "fixture-routed", estimated: "0.000070000000" },
+    { child_id: untargeted.childId, member_id: parent.conversation.memberId, engine: "pi", model: "fixture", estimated: "0.000007000000" },
+    { child_id: crossed.childId, member_id: other.conversation.memberId, engine: "claude", model: "fixture-routed", estimated: "0.000070000000" },
   ]);
 });

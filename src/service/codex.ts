@@ -9,7 +9,7 @@ import { Codex, type McpToolCallItem } from "@openai/codex-sdk";
 import { z } from "zod";
 import { codexSubscriptionEndpoint } from "./accounts.ts";
 import { turnTextBytes } from "./domain.ts";
-import { codexRolloutTotal, codexUsage, type SegmentUsage } from "./usage-capture.ts";
+import { codexRolloutModel, codexRolloutTotal, codexUsage, type SegmentUsage } from "./usage-capture.ts";
 
 const uuid = z.uuid();
 const hash = (data: Buffer | string) => createHash("sha256").update(data).digest("hex");
@@ -183,7 +183,9 @@ async function executeCodexTurn(input: CodexInput, profile: CodexProfile): Promi
   }
   input.signal.throwIfAborted();
   if (!nativeId || !text || !completed) throw new Error("Incomplete native Codex turn");
+  let model: string | null = null;
+  const history = await nativeHistory(home, scratch, nativeId, undefined, lines => { model = codexRolloutModel(lines); });
   return { text, checkpoint: { version: 1, engine: "codex", state: {
-    threadId, requestId, nativeId, memberId, ownerDigest, model: profile.model, ...await nativeHistory(home, scratch, nativeId),
-  } }, usage: codexUsage(completed.usage, priorTotal) };
+    threadId, requestId, nativeId, memberId, ownerDigest, model: profile.model, ...history,
+  } }, usage: codexUsage(completed.usage, priorTotal, model) };
 }
