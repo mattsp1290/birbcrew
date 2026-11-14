@@ -34,9 +34,10 @@ runs `npm ci --omit=dev` and compiles the native launcher against the same
 bookworm glibc into `/app/.proof/bin/member-launch`, the path the source
 resolves. The image runs as `10001:10001` under `tini` and contains no
 credentials. The `Service image` workflow rebuilds it for amd64 on relevant pull
-requests and runs it read-only with the flags below. **Verified:** the command above without `--push` built both
+requests and runs it read-only with the flags below. **Verified** on the previous Node 22.23.3 base: the command above without `--push` built both
 platforms, arm64 natively and amd64 under QEMU. The amd64 image completed the Pi
-fixture path below under emulation; Codex was exercised on arm64 only.
+fixture path below under emulation; Codex was exercised on arm64 only. On the
+Node 24.22.3 base only that workflow's amd64 build and smoke run are verified.
 
 ## Processes
 
