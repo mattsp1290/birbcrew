@@ -6,6 +6,8 @@ import { connect as connectTcp, createServer as createTcpServer, type Socket } f
 import { setTimeout as delay } from "node:timers/promises";
 import { after, before, test } from "node:test";
 import { Pool } from "pg";
+import { CrewClient, CrewUnknownOutcomeError } from "@birbcrew/client";
+import { createCrewObserver } from "@birbcrew/client/agui";
 import type { Client } from "@temporalio/client";
 import { MemberClient } from "../../src/service/client.ts";
 import { ApprovalStore } from "../../src/service/approvals.ts";
@@ -700,4 +702,38 @@ test("v1 listings reject unknown, repeated, out-of-range and forged query parame
     assert.equal((await f.api("/v1/conversations?" + query)).status, 400, query);
   }
   for (const path of ["/members", "/conversations"]) assert.equal((await f.api(path)).status, 404, "listings are versioned-only");
+});
+
+
+test("committed admission with an invalid stored receipt is a server fault and unknown client outcome", async t => {
+  const f = await fixture(); t.after(f.stop);
+  const requestId = randomUUID(), path = `/v1/conversations/${f.conversationId}/requests`;
+  assert.equal((await f.api(path, { requestId, text: "original" })).status, 202);
+  assert.equal((await f.api(path + "/" + requestId + "/cancel", {})).status, 202);
+  await pool.query("UPDATE birbcrew_ts.integration_cancellations SET receipt_id='00000000-0000-0000-0000-000000000001' WHERE conversation_id=$1 AND request_id=$2", [f.conversationId, requestId]);
+  const response = await f.api(path, { requestId, text: "original" });
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), { error: "retry_same_request" });
+  const client = new CrewClient({ baseUrl: f.endpoint, token: f.token });
+  await assert.rejects(client.submit({ conversationId: f.conversationId, requestId, text: "original" }), error =>
+    error instanceof CrewUnknownOutcomeError && error.command.kind === "request" && error.command.requestId === requestId);
+  assert.equal((await pool.query("SELECT count(*)::integer n FROM birbcrew_ts.request_admissions WHERE conversation_id=$1 AND request_id=$2", [f.conversationId, requestId])).rows[0].n, 1);
+  assert.equal(f.counts().effects, 0);
+});
+
+test("one observer receives fresh gateway snapshots across repeated connections", { timeout: 10_000 }, async t => {
+  const f = await fixture(); t.after(f.stop);
+  const observer = createCrewObserver({ baseUrl: f.endpoint, token: f.token, conversationId: f.conversationId });
+  const projected = Promise.withResolvers<void>();
+  for (let run = 0; run < 2; run++) {
+    const snapshot = Promise.withResolvers<void>();
+    const done = observer.runAgent({ tools: [{ name: "ignored", description: "ignored", parameters: {} }], context: [{ description: "ignored", value: "ignored" }], forwardedProps: { ignored: true } }, {
+      onStateSnapshotEvent() { snapshot.resolve(); },
+      onStateChanged({ state }) { if (state.conversationId === f.conversationId) projected.resolve(); },
+      onRunFailed({ error }) { snapshot.reject(error); },
+    });
+    try { await Promise.all([snapshot.promise, projected.promise]); assert.equal(observer.state.conversationId, f.conversationId); }
+    finally { observer.abortRun(); await observer.detachActiveRun(); await done.catch(() => undefined); }
+  }
+  assert.deepEqual(f.counts(), { accepts: 0, cancels: 0, effects: 0 });
 });
