@@ -27,7 +27,7 @@ fixture providers (`tests/service/usage-capture.test.ts`).
 | | Pi | Claude | Codex |
 | --- | --- | --- | --- |
 | SDK | `@earendil-works/pi-ai` 1.5.2 | `@anthropic-ai/claude-agent-sdk` 0.3.306 (CLI 2.1.306) through the vendored AG-UI adapter 0.0.8 | `@openai/codex-sdk` and CLI 0.167.1 |
-| Where Crew sees it | `usage` and `model` on each assistant message the segment added to the session (`pi.ts`) | `result.usage` on the adapter's `RUN_FINISHED` event, and `model` on its `system:init` event (`claude-worker.ts`) | `usage` on the `turn.completed` event (`codex.ts`) |
+| Where Crew sees it | `usage` and `model` on each reply the host relayed from the provider to the segment's confined worker (`pi-launch.ts`, `pi.ts`) | `result.usage` on the adapter's `RUN_FINISHED` event, and `model` on its `system:init` event (`claude-worker.ts`) | `usage` on the `turn.completed` event (`codex.ts`) |
 | Input tokens | `input` + `cacheRead` + `cacheWrite` | `input_tokens` + `cache_read_input_tokens` + `cache_creation_input_tokens` | `input_tokens`, which already includes cached tokens |
 | Cached input | `cacheRead` | `cache_read_input_tokens` | `cached_input_tokens` |
 | Cache writes | `cacheWrite` | `cache_creation_input_tokens` | `cache_write_input_tokens` |
@@ -301,16 +301,17 @@ change, for three reasons:
   conversation that has any, and member-lane admission refuses a trusted conversation.
 
 Each trusted driver now returns what its SDK reported, through the same capture
-functions as the member lane: Pi the assistant messages the request added; Claude the
-sum of the request's queries, one per tool round trip, and `unknown` if any query
-reported nothing usable; Codex the running total in the rollout before and after the
-turn, since the app-server reports no per-turn usage, and the turn's model from the same
-rollout. `runTrustedRequest` writes one row per trusted request with the same writer,
-after the native turn returns and before the reply commits, priced from the operator's
-table like any other row. It reads `BIRBCREW_USAGE_PRICES_PATH` in the embedding
-process, once; pass a table as its fifth argument to use another. Either way a malformed
-table throws before the request is claimed, never after its tools have run; read it when
-the backend starts (`operatorPrices()` in `usage-prices.ts`) to fail then.
+functions as the member lane: Pi the replies the host relayed to its confined worker for
+the request; Claude the sum of the request's queries, one per tool round trip, and
+`unknown` if any query reported nothing usable; Codex the running total in the rollout
+before and after the turn, since the app-server reports no per-turn usage, and the
+turn's model from the same rollout. `runTrustedRequest` writes one row per trusted
+request with the same writer, after the native turn returns and before the reply
+commits, priced from the operator's table like any other row. It reads
+`BIRBCREW_USAGE_PRICES_PATH` in the embedding process, once; pass a table as its fifth
+argument to use another. Either way a malformed table throws before the request is
+claimed, never after its tools have run; read it when the backend starts
+(`operatorPrices()` in `usage-prices.ts`) to fail then.
 
 The row is bound to the trusted request's generation and the token its start claimed,
 not to a launch: its `token` and `child_id` are null and `trusted_request_id` names the
@@ -601,7 +602,7 @@ npm run test:recovery
 ```
 
 The integration API workflow's `consumer-contract` job runs both after `npm run build`,
-which builds the native launcher the capture suite starts Claude and Codex through.
+which builds the native launcher the capture suite starts Claude, Codex and Pi through.
 
 `usage-capture.test.ts` runs the real drivers against the local fixture providers. It
 checks that Codex records each turn's share of the running total over three resumed
@@ -613,7 +614,8 @@ runners, with no Temporal, and checks one ledger row per launch for all three en
 no second row for a repeated start, and the `model.invoke` attributes. It also checks
 the mapping rules: a billed cost kept only when billed, counts that go down or cannot be
 read. It checks the model each engine names: Codex's from its rollout, the last turn's
-only and none when that turn's entries disagree, and Pi's answering model. It prices
+only and none when that turn's entries disagree, and Pi's answering model, including a
+routed answer taken from the reply the host relayed to the confined worker. It prices
 segments with every part of the input, exactly at the largest counts and rates the
 ledger and table accept, and refuses an estimate with no table, no price, no model, a
 billed cost, nothing reported or parts larger than the input; it refuses every kind of

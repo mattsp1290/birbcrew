@@ -10,7 +10,7 @@ export interface MemberProfile {
   delegateTask?: true;
   humanTool?: "choose_next_step";
   protectedTool?: "record_work_item";
-  pi?: Parameters<typeof runPiTurn>[1];
+  pi?: Omit<Parameters<typeof runPiTurn>[1], "invocationGroup">;
   codex?: Omit<Parameters<typeof runCodexTurn>[1], "ownerId" | "memberId" | "stateDir">;
   claude?: Omit<Parameters<typeof runClaudeTurn>[1], "ownerId" | "memberId" | "stateDir" | "invocationGroup">;
 }
@@ -21,17 +21,18 @@ export function memberProfiles(config: ReadonlyMap<string, MemberProfile>, state
     const tool = protectedTool ?? humanTool;
     const drivers: Partial<Record<Engine, TurnDriver>> = {};
     if (pi) drivers.pi = async (input) => {
+      const member = { ...pi, invocationGroup };
       if (input.childProfile) {
         const child = input.childProfile;
         if (!runsChild({ delegateTask: !!delegateTask, protectedTool }, child) || child.model !== pi.model.id) {
           throw new Error("Child profile differs from member");
         }
-        const options = { ...pi, instructions: child.instructions };
+        const options = { ...member, instructions: child.instructions };
         return child.tools.includes("record_work_item") ? runPiSegment(input, options) :
           { kind: "complete", ...await runPiTurn(input, options) };
       }
-      if (delegateTask) return runPiDelegatingSegment(input, { ...pi, allowRecordWorkItem: !!protectedTool });
-      return tool ? runPiSegment(input, pi, tool) : { kind: "complete", ...await runPiTurn(input, pi) };
+      if (delegateTask) return runPiDelegatingSegment(input, { ...member, allowRecordWorkItem: !!protectedTool });
+      return tool ? runPiSegment(input, member, tool) : { kind: "complete", ...await runPiTurn(input, member) };
     };
     // Only Pi runs delegated children so far. Refuse one here rather than run it as a member turn.
     if (claude) drivers.claude = async (input, { ownerId, memberId }) => {

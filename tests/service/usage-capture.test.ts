@@ -126,8 +126,9 @@ test("Claude's mapping counts cache reads and writes as input and never keeps th
 });
 
 /** A Chat Completions endpoint that reports usage the way OpenAI does: prompt_tokens includes the
- * cached tokens and completion_tokens the reasoning tokens. */
-async function chatCompletions(model: string) {
+ * cached tokens and completion_tokens the reasoning tokens. It answers as `answering`, as a router
+ * or a fallback answers as another model. */
+async function chatCompletions(model: string, answering = model) {
   let requests = 0;
   const server = createServer(async (req, res) => {
     const body = z.looseObject({ messages: z.array(z.looseObject({ role: z.string(), content: z.unknown() })) }).parse(await json(req));
@@ -137,7 +138,7 @@ async function chatCompletions(model: string) {
       : z.array(z.looseObject({ text: z.string().optional() })).parse(content ?? []).map(part => part.text ?? "").join("");
     const call = prompt.includes("record") && body.messages.at(-1)?.role !== "tool";
     const frame = (value: object) => res.write("data: " + JSON.stringify({ id: "chatcmpl_usage", object: "chat.completion.chunk",
-      created: 1, model, ...value }) + "\n\n");
+      created: 1, model: answering, ...value }) + "\n\n");
     res.writeHead(200, { "Content-Type": "text/event-stream" });
     frame({ choices: [{ index: 0, delta: { role: "assistant", ...(call ? { tool_calls: [{ index: 0, id: "call_" + n, type: "function",
       function: { name: "record_work_item", arguments: JSON.stringify({ operation_id: prompt.slice(7), note: "usage" }) } }] }
@@ -178,6 +179,17 @@ test("Pi records each model call's usage from its assistant message, through a r
     result: { kind: "recorded", nativeCallId, receipt: { receiptId: randomUUID(), operationId: operation } } } }, profile.pi!);
   assert.equal(resumed.kind, "complete");
   assert.deepEqual(resumed.usage, call(3), "the resumed segment is its own model call, not the turn so far");
+
+  // The host takes the model from the reply it relayed to the confined worker: a routed answer is
+  // recorded as the model that answered.
+  const routed = await chatCompletions(model, model + "-routed");
+  t.after(routed.close);
+  const viaRouter = await createProxyProfile({ engine: "pi", model, protocol: "openai-chat-completions",
+    endpoint: routed.endpoint, accountId: "fixture-account", allowHttpLoopback: true,
+    resolveCredential: async () => ({ headers: { Authorization: "Bearer synthetic" }, expiresAt: Date.now() + 60_000 }) });
+  t.after(viaRouter.close);
+  const answered = await runPiTurn({ ...input, threadId: randomUUID() }, viaRouter.profile.pi!);
+  assert.deepEqual(answered.usage, { ...call(1), model: model + "-routed" });
 
   // The scripted Pi fixture's faux messages carry all-zero usage: no provider reported anything.
   const faux = await runPiTurn({ ...input, threadId: randomUUID(), text: "remember zero" }, await createPiFixtureOptions());
