@@ -23,7 +23,9 @@ export function segmentTool(mode: PiMode, allowRecordWorkItem?: boolean): Deferr
   return mode === "text" ? undefined : mode === "delegating" ? (allowRecordWorkItem ? "record_work_item" : undefined) : mode;
 }
 
-/** What the confined session gets: the model, and a runtime whose only provider forwards to the host. */
+/** The fields a Pi session reads. In the worker (pi-worker.ts), modelRuntime's only provider forwards to the host;
+ * PiProfile (pi.ts) extends this on the host with prepare and invocationGroup, and there modelRuntime is the
+ * operator's own, which makes each request (pi-launch.ts). */
 export interface SessionProfile {
   model: Model<Api>;
   modelRuntime: ModelRuntime;
