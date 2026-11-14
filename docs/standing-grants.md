@@ -243,7 +243,7 @@ README).
 
 ## Validation
 
-Use Node 22.23.3 on Linux and a disposable PostgreSQL 17 database whose role may
+Use Node 24.22.3 on Linux and a disposable PostgreSQL 17 database whose role may
 create databases, with `BIRBCREW_PG_BIN` naming PostgreSQL 17 `pg_dump` and
 `pg_restore` (or `BIRBCREW_RECOVERY_POSTGRES_CONTAINER`).
 

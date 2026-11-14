@@ -530,7 +530,7 @@ the dump's highest ID.
 
 ## Validation
 
-Use Node 22.23.3 on Linux and a disposable PostgreSQL 17 database whose role may
+Use Node 24.22.3 on Linux and a disposable PostgreSQL 17 database whose role may
 create databases. `BIRBCREW_PG_BIN` must name PostgreSQL 17 `pg_dump`/`pg_restore`, or
 set `BIRBCREW_RECOVERY_POSTGRES_CONTAINER`.
 
