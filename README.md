@@ -37,7 +37,7 @@ client with external networking disabled. Each SDK answers prompts in two
 independent conversations, reports a provider failure, and cancels a streaming
 reply when the client disconnects. The model responses are scripted locally.
 
-For local development, use Node 22.23.3 and run `npm ci`, `npm run typecheck`,
+For local development, use Node 24.22.3 and run `npm ci`, `npm run typecheck`,
 and `npm test`. The TypeScript fixtures exercise all three integrations with real SDKs and local model responses. Package pins and rebuild
 instructions are in [the adapter reference](vendor/ag-ui/README.md).
 

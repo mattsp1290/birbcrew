@@ -350,7 +350,7 @@ members with packs lose them until the release returns.
 
 ## Validation
 
-Use Node 22.23.3 on Linux and a disposable PostgreSQL 17 database whose role may create
+Use Node 24.22.3 on Linux and a disposable PostgreSQL 17 database whose role may create
 databases. `BIRBCREW_PG_BIN` must name PostgreSQL 17 `pg_dump`/`pg_restore` for the recovery
 suite (or set `BIRBCREW_RECOVERY_POSTGRES_CONTAINER` to a PostgreSQL 17 container to run them in).
 

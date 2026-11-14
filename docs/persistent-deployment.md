@@ -16,18 +16,18 @@ provider account.
 ## Build the image
 
 `packaging/service.Dockerfile` has no default base image. Pass a digest-pinned
-Node 22.23.3 Debian bookworm image; the build stops for a tag without a digest,
+Node 24.22.3 Debian bookworm image; the build stops for a tag without a digest,
 another Node version or another Debian release.
 
 ```sh
 docker buildx build --platform linux/amd64,linux/arm64 \
   -f packaging/service.Dockerfile \
-  --build-arg NODE_IMAGE=node:22.23.3-bookworm-slim@sha256:3ed98443660ff48413b5af19ecefce3b9d50845a901a43420d47cc63a9fddbe9 \
+  --build-arg NODE_IMAGE=node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 \
   -t REGISTRY/crew-service:COMMIT --push .
 ```
 
-The digest above is the `node:22.23.3-bookworm-slim` index resolved on
-2026-11-12. Use BuildKit: the build context is limited by
+The digest above is the `node:24.22.3-bookworm-slim` index resolved on
+2026-11-14. Use BuildKit: the build context is limited by
 `packaging/service.Dockerfile.dockerignore` to the lockfiles, vendored packages,
 `scripts/build-native`, `native/member-launch.c` and `src/service`. Each platform
 runs `npm ci --omit=dev` and compiles the native launcher against the same
@@ -127,7 +127,7 @@ certificate, and no member workflow appeared in `default`. A gateway without
 TLS settings or with a wrong server name exited with status 1, as did a worker
 with a missing namespace. `npm run test:temporal:tls` repeats this in CI with a
 separate Node TLS terminator, which also refuses a handshake without a client
-certificate; it needs Docker, OpenSSL, Node 22.23.3 and the pinned Temporal CLI
+certificate; it needs Docker, OpenSSL, Node 24.22.3 and the pinned Temporal CLI
 1.10.0. **Unverified:** a real Temporal 1.32
 frontend with server-side mTLS, its authorizer or claim mapper, and certificate
 rotation.
